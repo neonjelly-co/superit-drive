@@ -23,7 +23,8 @@ type Item struct {
 	Folder   bool
 	Size     int64
 	Changed  time.Time
-	// Above is every folder the item is in, from the top of the place down to its own folder. Only Item fills it.
+	// Above is every folder the item is in, from the top of the place down to its own folder, each with its own
+	// Above filled the same way. Only Item fills it.
 	Above []Item
 }
 
@@ -129,9 +130,11 @@ func item(ctx context.Context, q querier, placeID, id int64) (Item, error) {
 	if len(chain) == 0 || len(chain) > MaxDepth || chain[0].ParentID != 0 || chain[len(chain)-1].ID != id {
 		return Item{}, ErrNoItem
 	}
-	it := chain[len(chain)-1]
-	it.Above = chain[:len(chain)-1]
-	return it, nil
+	// Each folder on the way down carries the folders above it too, so it can be used as a folder on its own.
+	for i := range chain {
+		chain[i].Above = chain[:i:i]
+	}
+	return chain[len(chain)-1], nil
 }
 
 // PutItem records one item the storage now has in a folder of the place (folderID 0: its top folder), such as a file

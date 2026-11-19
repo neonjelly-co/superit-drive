@@ -301,6 +301,19 @@ func TestRenameIsAMoveOnTheStorageAndKeepsTheId(t *testing.T) {
 	if got := onStorage(t, d, rekasTop+"/Offers"); !slices.Equal(got, []string{"offer.docx"}) {
 		t.Fatalf("Offers on the storage: %q", got)
 	}
+	// Deeper down, a file and a folder.
+	bakery := madeFolder(t, c, placeID, drafts.ID, "Bakery")
+	y2026 := madeFolder(t, c, placeID, bakery.ID, "2026")
+	ledger := uploadedInto(t, c, placeID, y2026.ID, "Ledger.xlsx", []byte("ledger"))
+	if res := rename(t, c, placeID, ledger.ID, "Ledger Q3.xlsx"); res.Status != http.StatusOK {
+		t.Fatalf("renaming a file three folders deep: %d %s", res.Status, res.Body)
+	}
+	if res := rename(t, c, placeID, y2026.ID, "Year 2026"); res.Status != http.StatusOK {
+		t.Fatalf("renaming a folder two folders deep: %d %s", res.Status, res.Body)
+	}
+	if got, _ := d.Storage.Get(t, rekasTop+"/Offers/Bakery/Year 2026/Ledger Q3.xlsx"); string(got) != "ledger" {
+		t.Fatalf("Ledger Q3.xlsx is not where the renames put it: %q", got)
+	}
 
 	// The same name is no change; a taken one, or one that cannot be stored, is refused and nothing moves.
 	if res := rename(t, c, placeID, notes.ID, "Notes for Bence – 2026.txt"); res.Status != http.StatusOK {

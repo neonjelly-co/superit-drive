@@ -116,6 +116,10 @@ func TestAnItemIsFoundOnlyInItsPlaceAndNotInTheTrash(t *testing.T) {
 	if err != nil || got.ParentID != y2026.ID || len(got.Above) != 2 || got.Above[0].ID != drafts.ID || got.Above[1].ID != y2026.ID {
 		t.Fatalf("got %+v, %v; want Offer.docx under Drafts/2026", got, err)
 	}
+	// The folder it is in can be used on its own: it knows the folders above it too.
+	if in := got.Above[1]; len(in.Above) != 1 || in.Above[0].ID != drafts.ID || len(got.Above[0].Above) != 0 {
+		t.Fatalf("the folders above Offer.docx: %+v", got.Above)
+	}
 	if _, err := x.Item(ctx, bence.ID, offer.ID); !errors.Is(err, ErrNoItem) {
 		t.Errorf("found through another place: %v", err)
 	}
