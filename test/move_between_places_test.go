@@ -3,7 +3,9 @@ package test
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,12 +25,16 @@ func moveInto(t *testing.T, c *harness.Client, placeID, itemID, toPlace, to int6
 	return sendJSON(t, c, http.MethodPost, fmt.Sprintf("/api/places/%d/items/%d/move", placeID, itemID), map[string]any{"to": dest, "place": toPlace})
 }
 
+// previewPath asks who would see the item in the folder to of the place toPlace (0: its own place).
 func previewPath(placeID, itemID, toPlace, to int64) string {
-	p := fmt.Sprintf("/api/places/%d/items/%d/move?place=%d", placeID, itemID, toPlace)
-	if to != 0 {
-		p += fmt.Sprintf("&to=%d", to)
+	q := url.Values{}
+	if toPlace != 0 {
+		q.Set("place", strconv.FormatInt(toPlace, 10))
 	}
-	return p
+	if to != 0 {
+		q.Set("to", strconv.FormatInt(to, 10))
+	}
+	return fmt.Sprintf("/api/places/%d/items/%d/move?%s", placeID, itemID, q.Encode())
 }
 
 type previewJSON struct {
@@ -130,8 +136,23 @@ func TestMovingFromMyFilesIntoASharedFolderWarnsThenKeepsOnlyItsOwnAccess(t *tes
 	if got := names(list(t, o, x.place, x.clients.ID).Items); !slices.Equal(got, []string{"Price list.pdf"}) {
 		t.Fatalf("Dóra's Clients: %q", got)
 	}
-	// Bence, a manager of Team, can do everything with it there; the project admin too.
+	// Bence, a manager of Team, can do everything with it there; the project admin too. Inside Team a move is not a
+	// move between places: it stays the project's, and the warning lists each line once.
 	ok(t, "Bence renaming Bakery in Team", rename(t, b, team.ID, x.bakery.ID, "Bakery Ltd"))
+	archive := madeFolder(t, b, team.ID, 0, "Archive")
+	ok(t, "sharing Archive with Dóra", share(t, b, team.ID, archive.ID, dora, "viewer"))
+	p, _ = preview(t, b, team.ID, x.bakery.ID, 0, archive.ID)
+	want = []string{reka.UserID + " manager (admin)", bence.UserID + " manager (from Team)", dora.UserID + " viewer (from Archive)", mate.UserID + " editor (here)"}
+	if got := accessLines(p.Access); p.BecomesProjects || !slices.Equal(got, want) {
+		t.Fatalf("who would see Bakery Ltd in Team › Archive: becomes the project's %v, %q, want %q", p.BecomesProjects, got, want)
+	}
+	if p, _ := preview(t, b, team.ID, x.bakery.ID, team.ID, 0); !slices.Equal(accessLines(p.Access), []string{reka.UserID + " manager (admin)",
+		bence.UserID + " manager (from Team)", mate.UserID + " editor (here)"}) {
+		t.Fatalf("who would see Bakery Ltd where it is, naming Team: %q", accessLines(p.Access))
+	}
+	if res := b.Get(t, previewPath(team.ID, x.bakery.ID, 0, x.y2026.ID)); res.Status != http.StatusConflict {
+		t.Fatalf("asking who would see Bakery Ltd inside itself: %d %s", res.Status, res.Body)
+	}
 	if l := list(t, d.As(reka), team.ID, x.y2026.ID); l.Role != "manager" || !slices.Equal(pathNames(l.Path), []string{"Bakery Ltd", "2026"}) ||
 		!slices.Equal(names(l.Items), []string{"From Máté.txt", "Ledger.xlsx", "Offer.pdf"}) {
 		t.Fatalf("Réka's Team › Bakery Ltd › 2026: %+v", l)
