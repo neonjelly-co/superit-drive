@@ -296,6 +296,88 @@ POST   /api/places/{place}/items/{item}/move    {"to": 42 | null, "place": 7}   
        there or that the person cannot add to    409 a name taken there, or something in it being uploaded
 ```
 
+### Opening files in the browser
+
+A file a member uploaded is served from the Drive's own address, where the sign-in cookie applies: a web page, an SVG
+image or a script shown there would run as the Drive, with the access of whoever opened it. So only a fixed list opens
+in the browser, decided by the extension of the file's name alone (the part after its last dot, in any case, in plain
+ASCII letters and digits; a name starting with its only dot has none), each sent with the one content type the list
+gives it, never a type from the upload, the storage or the bytes (`internal/server/opening.go`):
+
+| Kind | Extensions | Content type sent |
+|---|---|---|
+| Images | `.jpg` `.jpeg`, `.png`, `.gif`, `.webp`, `.avif`, `.bmp` | `image/jpeg`, `image/png`, `image/gif`, `image/webp`, `image/avif`, `image/bmp` |
+| PDF | `.pdf` | `application/pdf` (the browser's own viewer) |
+| Plain text | `.txt`, `.log`, `.md` | `text/plain; charset=utf-8` (a text in another encoding shows its accented letters wrong: download it) |
+| Video | `.mp4` `.m4v`, `.webm` | `video/mp4`, `video/webm` |
+| Sound | `.mp3`, `.m4a`, `.aac`, `.wav`, `.flac`, `.ogg` `.oga` `.opus` | `audio/mpeg`, `audio/mp4`, `audio/aac`, `audio/wav`, `audio/flac`, `audio/ogg` |
+
+Everything else downloads: web pages (`.html`, `.htm`, `.xhtml`), SVG, XML, scripts, and kinds Chrome does not show
+(TIFF, QuickTime `.mov`, Ogg Theora `.ogv`). Opening and downloading are separate addresses:
+
+```
+GET    /api/places/{place}/items/{item}/open        shown in the browser when its kind is on the list; otherwise as …/download
+GET    /api/places/{place}/items/{item}/download    always application/octet-stream, as an attachment, whatever is asked
+```
+
+Both are decided as a download (`access.Download`), honour `Range` (so a video or a sound seeks) and take a transfer
+slot. Every answer with a file's bytes carries `X-Content-Type-Options: nosniff`, `Cross-Origin-Resource-Policy:
+same-origin` (no other site can load the bytes into its page) and a `Content-Security-Policy` under which nothing runs:
+
+- images, PDFs, text, downloads and zips: `default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors
+  'none'; sandbox`: nothing loads or runs, and the page has an opaque origin;
+- video and sound: `default-src 'none'; media-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';
+  sandbox allow-same-origin`: the browser's player fetches the file again as media (with `Range`, to seek), which
+  Chrome does not do from an opaque origin (and the Drive's resource policy would refuse); still no scripts.
+
+Checked in Chrome 157: every kind on the list shows or plays (video and sound seek), with the policy above; a web page
+named `.png` shows as a broken image, one named `.txt` as its source text, and nothing in them runs; `.html`, `.svg`,
+`.xhtml` download. Chrome's PDF viewer still runs a PDF's own JavaScript (such as an alert) in its own sandbox, not as
+the Drive. Firefox shows PDFs and images and plays sound and video under the same policies. Safari was not checked.
+
+Listings say which files open (`"opens": true`); the interface opens those in a new tab from a click on the name, and
+downloads the rest.
+
+### Search
+
+```
+GET    /api/search?q=<part of a name>
+       200 {"items": [{"id", "name", "kind", "size", "changed", "opens", "can", "seenBy",   the item, as a listing gives it
+                       "place", "placeKind", "placeName", "owner", "role",
+                       "path", "fromTop"}],                   where it is, as far as the person can open the folders above it
+            "more": false}
+       400 nothing to search for, or more than 255 bytes
+```
+
+It finds files and folders by name (never by what is in them) across everything the person can see, and nothing else:
+
+- **Where it looks**, each part decided through `access` before the index is asked: their own My files (a search
+  never makes one), the shared folders they have a role on, and each item shared with them in a place they cannot open
+  (what "Shared with me" lists), with everything in it. The index walks down from there, past anything in the trash,
+  and reads nothing else, so a name they cannot see is never read, and the time a search takes does not depend on it
+  (a test reads the database's plan for the query; measured: 9,000 files the person cannot see, all matching, change
+  nothing).
+- **Every result** is decided again through `access.Finds` on the whole way down to it. Its `path` names only the folders
+  above it that the person can open (from "Shared with me" otherwise), and `placeName` a shared folder's name only when
+  they can open it. Not a result: anything in a held My files, in the trash, in a shared folder in the trash, or beside
+  or above what was shared; shared folders themselves (they are in the sidebar).
+- **How names match:** in any case and without accents, both ways (`index.SearchKey`: Unicode case folding, marks taken
+  off, compatibility forms made plain), so `szamla`, `SZÁMLA` and `számla` all find "Számla őszi.pdf", also when a
+  Mac program wrote its name decomposed; each word searched for must be somewhere in the name. The best first: the
+  whole name (or without its extension), its start, the start of a word, anywhere, each word somewhere; then by name.
+- **At most 50 results**, and `more` when there are others; no pages. Count, order and `more` come only from what the
+  person can see. The search reads the index, not the storage (what a listing has not seen yet is not found), and takes
+  no place's lock.
+
+### Selecting several
+
+In a folder's list each row has a tick box and the header a "select all"; a click elsewhere on a row selects it alone.
+With two or more selected, the header becomes a bar with Move, Download as zip (`…/zip?item=…`), Delete and Clear.
+There is no bulk share, and no new route: Move and Delete send one request per item, one after another, each decided
+as it would be alone. Deleting several offers Undo for all of them; a move into a shared folder shows the warning, with
+what each item keeps; and when some items are not moved, deleted or restored, a dialog names each with the Drive's
+reason, and says what happened to the rest.
+
 ### Mail
 
 The Drive sends one kind of mail so far: "shared with you", to a member something was just shared with by name. With
@@ -333,7 +415,8 @@ Drive logs at start says where mail goes (`mail="smtp.example.com:587 (starttls)
 
 The Drive is counted at 64 MiB of memory (a hard 96 MiB) on a customer's server, and the kernel's network buffers
 for the transfers in flight are charged to its container too. A transfer is a request that moves a file's bytes: a
-download (of a file or a zip), an upload in one request, or one part of a resumable upload. Three rules hold the
+download (of a file or a zip, or a file opened in the browser), an upload in one request, or one part of a resumable
+upload. Three rules hold the
 figure (`internal/transfers`):
 
 - **At most 32 transfers are in flight.** A download waits its turn in line (holding only its idle connection),
@@ -409,8 +492,10 @@ space is used. Members make shared folders, owned by the project, and work in th
 members managers and delete shared folders into the trash, and project admins manage every one. Members share files
 and folders with other members, or with everyone in the project, as viewers or editors, find what was shared with them
 in "Shared with me", get a mail when something is shared with them by name (with the mail settings), and move things
-from their own My files into a shared folder after a warning that says who will see them there. Guests and public links
-are not built yet. Large files upload in parts that resume after a broken connection, downloads resume
+from their own My files into a shared folder after a warning that says who will see them there. Images, PDFs, text,
+video and sound open in the browser (anything else downloads), a search finds files and folders by name across
+everything a member can see, and several items can be selected to move, download as a zip or delete together. Guests
+and public links are not built yet. Large files upload in parts that resume after a broken connection, downloads resume
 and seek, and folders upload whole and download as zips.
 
 It needs:
@@ -621,13 +706,16 @@ internal/settings/     every environment variable
 internal/members/      the member list file, re-read when it changes
 internal/mail/         the Drive's own mail over SMTP, sent in the background; mailtest/ is a throwaway SMTP server
                        for tests
-internal/access/       the one authorisation function (Decide), the role at an item (RoleAt), and their table test
+internal/access/       the one authorisation function (Decide), the role at an item (RoleAt), what Shared with me lists
+                       and what a search finds (SharedWithMe, Finds), and their table tests
 internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify → own page (for changes) →
                        place → item in it, or in its trash, or the person's upload in progress into it → the access
-                       given there → access.Decide; transfers.go has downloads, zips and uploads
+                       given there → access.Decide; transfers.go has downloads, zips and uploads, opening.go what
+                       opens in the browser and how, search.go the search by name
 internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
                        shared folders, the access given on them
-internal/index/        the SQLite index; schema changes are numbered files in migrations/, run with foreign keys
+internal/index/        the SQLite index (search.go: names as a search compares them, and the walk down a scope);
+                       schema changes are numbered files in migrations/, run with foreign keys
                        off (SQLite's recipe for rebuilding a table) and checked with foreign_key_check before each
                        commits
 internal/clock/        the Drive's clock, which test builds can move forward
