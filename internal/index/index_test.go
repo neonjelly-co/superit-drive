@@ -255,7 +255,7 @@ func TestAnIdIsNeverGivenToASecondItem(t *testing.T) {
 	x := open(t)
 	p := place(t, x, "u-reka")
 	a := put(t, x, p, 0, "a.txt", false, 1)
-	if err := x.Trash(ctx, p.ID, a.ID, time.Now(), "entry"); err != nil {
+	if err := x.Trash(ctx, p.ID, a.ID, time.Now(), "entry", "u-reka"); err != nil {
 		t.Fatal(err)
 	}
 	if err := x.RemoveFromTrash(ctx, p.ID, a.ID); err != nil {
@@ -295,7 +295,7 @@ func TestAnItemIsFoundOnlyInItsPlaceAndNotInTheTrash(t *testing.T) {
 	}
 
 	// Deleting Drafts takes everything in it along, out of reach until it comes back, with the same ids.
-	if err := x.Trash(ctx, reka.ID, drafts.ID, time.Now(), "entry"); err != nil {
+	if err := x.Trash(ctx, reka.ID, drafts.ID, time.Now(), "entry", "u-reka"); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []int64{drafts.ID, y2026.ID, offer.ID} {
@@ -327,10 +327,10 @@ func TestRemovingAFolderForGoodLeavesWhatWasDeletedOutOfItEarlier(t *testing.T) 
 	drafts := put(t, x, p, 0, "Drafts", true, 0)
 	early := put(t, x, p, drafts.ID, "Early.txt", false, 5)
 	inside := put(t, x, p, drafts.ID, "Inside.txt", false, 7)
-	if err := x.Trash(ctx, p.ID, early.ID, time.Now().Add(-time.Hour), "e1"); err != nil {
+	if err := x.Trash(ctx, p.ID, early.ID, time.Now().Add(-time.Hour), "e1", "u-reka"); err != nil {
 		t.Fatal(err)
 	}
-	if err := x.Trash(ctx, p.ID, drafts.ID, time.Now(), "e2"); err != nil {
+	if err := x.Trash(ctx, p.ID, drafts.ID, time.Now(), "e2", "u-reka"); err != nil {
 		t.Fatal(err)
 	}
 	trash, _ := x.TrashItems(ctx, p.ID)
@@ -454,8 +454,12 @@ func TestAGrantOnAnItemLivesAndGoesWithIt(t *testing.T) {
 	if _, err := x.db.ExecContext(ctx, "INSERT INTO grants (place_id, item_id, grantee, member, role, given_at) VALUES (?, ?, 'everyone', 'u-reka', 'viewer', 0)", bence.ID, notes.ID); err == nil {
 		t.Fatal("the index holds a grant to everyone and a member at once")
 	}
-	if err := x.Trash(ctx, bence.ID, clients.ID, now, "e1"); err != nil {
+	if err := x.Trash(ctx, bence.ID, clients.ID, now, "e1", "u-dora"); err != nil {
 		t.Fatal(err)
+	}
+	// The trash knows who put an item there, until it comes back.
+	if tr, err := x.TrashItem(ctx, bence.ID, clients.ID); err != nil || tr.DeletedBy != "u-dora" {
+		t.Fatalf("Clients in the trash: %+v, %v", tr, err)
 	}
 	for _, it := range []Item{clients, offer} {
 		if err := x.Give(ctx, bence.ID, it.ID, Grantee{Member: "u-dora"}, "viewer", now, "u-bence", nil); !errors.Is(err, ErrNoItem) {
@@ -470,6 +474,15 @@ func TestAGrantOnAnItemLivesAndGoesWithIt(t *testing.T) {
 	if _, err := x.Restore(ctx, bence.ID, clients.ID, 0, "Clients (2)"); err != nil {
 		t.Fatal(err)
 	}
+	if err := x.Trash(ctx, bence.ID, clients.ID, now, "e3", ""); err != nil {
+		t.Fatal(err)
+	}
+	if tr, err := x.TrashItem(ctx, bence.ID, clients.ID); err != nil || tr.DeletedBy != "" {
+		t.Fatalf("Clients in the trash again, by someone not known: %+v, %v", tr, err)
+	}
+	if _, err := x.Restore(ctx, bence.ID, clients.ID, 0, "Clients (2)"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := x.Relocate(ctx, bence.ID, offer.ID, 0, "Offer 2026.pdf"); err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +491,7 @@ func TestAGrantOnAnItemLivesAndGoesWithIt(t *testing.T) {
 	}
 
 	// Removed for good from the trash, or dropped because the storage no longer has it: its grants go with it.
-	if err := x.Trash(ctx, bence.ID, offer.ID, now, "e2"); err != nil {
+	if err := x.Trash(ctx, bence.ID, offer.ID, now, "e2", "u-reka"); err != nil {
 		t.Fatal(err)
 	}
 	if err := x.RemoveFromTrash(ctx, bence.ID, offer.ID); err != nil {

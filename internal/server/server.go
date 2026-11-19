@@ -200,6 +200,9 @@ func (s *Server) findWhere(w http.ResponseWriter, r *http.Request, rt route, c *
 		s.fail(w, r, err)
 		return false
 	}
+	if c.trashed != nil {
+		c.access.DeletedBy = c.trashed.DeletedBy
+	}
 	return true
 }
 

@@ -204,7 +204,8 @@ func TestAViewerOfAFolderOpensEverythingInsideItAndNothingElse(t *testing.T) {
 }
 
 // An editor can upload, make folders, rename, move and delete inside what they were given, restore what they deleted,
-// and share it further. They cannot take anything out of it into a folder they were not given.
+// and share it further. They cannot take anything out of it into a folder they were not given, nor rename, move or
+// delete the folder they were given itself: that changes the folder it is in, which they cannot open.
 func TestAnEditorWorksInsideWhatTheyWereGivenAndSharesItFurther(t *testing.T) {
 	t.Parallel()
 	d := harness.Start(t, reka, bence, dora)
@@ -217,7 +218,7 @@ func TestAnEditorWorksInsideWhatTheyWereGivenAndSharesItFurther(t *testing.T) {
 	if l.Role != "editor" || !slices.Contains(l.Can, "upload") || !slices.Contains(l.Can, "make-folder") || slices.Contains(l.Can, "see-trash") {
 		t.Fatalf("Dóra's Clients: role %q, can %q", l.Role, l.Can)
 	}
-	if got := named(t, l.Items, "Price list.pdf").Can; !slices.Equal(got, []string{"list", "download", "upload", "make-folder", "rename", "move", "delete", "restore", "see-access", "share"}) {
+	if got := named(t, l.Items, "Price list.pdf").Can; !slices.Equal(got, []string{"list", "download", "upload", "make-folder", "rename", "move", "delete", "see-access", "share"}) {
 		t.Fatalf("what Dóra may do with Price list.pdf: %q", got)
 	}
 	uploadedInto(t, o, x.place, x.bakery.ID, "Invoice.pdf", []byte("from Dóra"))
@@ -253,7 +254,8 @@ func TestAnEditorWorksInsideWhatTheyWereGivenAndSharesItFurther(t *testing.T) {
 	}
 	sameAs(t, "Dóra moving Price list.pdf into Private", move(t, o, x.place, x.prices.ID, x.private.ID), noFolder)
 	sameAs(t, "Dóra moving Price list.pdf to Bence's top folder", move(t, o, x.place, x.prices.ID, 0), noFolder)
-	sameAs(t, "Dóra moving Clients itself into Private", move(t, o, x.place, x.clients.ID, x.private.ID), noFolder)
+	missingItem := o.Get(t, downloadPath(x.place, x.notes.ID+100))
+	sameAs(t, "Dóra moving Clients itself into Private", move(t, o, x.place, x.clients.ID, x.private.ID), missingItem)
 	if got := onStorage(t, d, top); !slices.Equal(got, []string{"Clients/", "Notes.txt", "Private/"}) {
 		t.Fatalf("Bence's top folder on the storage: %q", got)
 	}
@@ -276,17 +278,21 @@ func TestAnEditorWorksInsideWhatTheyWereGivenAndSharesItFurther(t *testing.T) {
 		}
 	}
 
-	// The very folder her role is on: she may rename it, delete it, and restore it.
-	ok(t, "Dóra renaming Clients", rename(t, o, x.place, x.clients.ID, "Clients 2026"))
-	deleted(t, o, x.place, x.clients.ID)
-	sameAs(t, "Réka listing Bakery while Clients is in the trash", r.Get(t, listPath(x.place, x.bakery.ID)), r.Get(t, listPath(x.place, x.notes.ID+100)))
-	if r := restored(t, o, x.place, x.clients.ID); r.Item.Name != "Clients 2026" || len(r.Path) != 0 {
-		t.Fatalf("Dóra restoring Clients: %+v", r)
+	// The very folder her role is on is in Bence's top folder, which she cannot open: renaming it there could tell her
+	// what else is there, and deleting it she could not undo. Both answer as for something that does not exist.
+	sameAs(t, "Dóra renaming Clients to a name Bence has there", rename(t, o, x.place, x.clients.ID, "Notes.txt"), missingItem)
+	sameAs(t, "Dóra renaming Clients to a free name", rename(t, o, x.place, x.clients.ID, "Clients 2026"), missingItem)
+	sameAs(t, "Dóra deleting Clients", deleteItem(t, o, x.place, x.clients.ID), missingItem)
+	if got := onStorage(t, d, top); !slices.Equal(got, []string{"Clients/", "Notes.txt", "Private/"}) {
+		t.Fatalf("Bence's top folder on the storage: %q", got)
 	}
-	if got := onStorage(t, d, top+"/Clients 2026"); !slices.Equal(got, []string{"Bakery/", "Drafts/", "Prices 2026.pdf"}) {
-		t.Fatalf("Clients 2026 on the storage: %q", got)
+	if got := onStorage(t, d, top+"/Clients"); !slices.Equal(got, []string{"Bakery/", "Drafts/", "Prices 2026.pdf"}) {
+		t.Fatalf("Clients on the storage: %q", got)
 	}
-	list(t, r, x.place, x.bakery.ID) // Réka's share came back with it
+	l = list(t, o, x.place, x.clients.ID)
+	if l.Role != "editor" || !slices.Contains(l.Can, "share") || slices.Contains(l.Can, "rename") || slices.Contains(l.Can, "delete") {
+		t.Fatalf("what Dóra may do in Clients itself: role %q, can %q", l.Role, l.Can)
+	}
 }
 
 // Deeper levels can only add access: a higher role lower down adds to a lower one above, and a lower one lower down
@@ -298,28 +304,35 @@ func TestDeeperLevelsOnlyAddAccess(t *testing.T) {
 	x := bencesFiles(t, d)
 	missingItem := o.Get(t, downloadPath(x.place, x.notes.ID+100))
 
-	// Editor on Offer.pdf alone: that file, not its sibling, not its folder.
+	// Editor on Offer.pdf alone: she opens and shares that file; renaming it would change 2026, which she cannot open.
+	// Not its sibling, not its folder.
 	ok(t, "sharing Offer.pdf with Dóra as editor", share(t, b, x.place, x.offer.ID, dora, "editor"))
 	if res := o.Get(t, downloadPath(x.place, x.offer.ID)); res.Status != http.StatusOK {
 		t.Fatalf("Dóra downloading Offer.pdf: %d %s", res.Status, res.Body)
 	}
-	ok(t, "Dóra renaming Offer.pdf", rename(t, o, x.place, x.offer.ID, "Offer v2.pdf"))
+	ok(t, "Dóra sharing Offer.pdf further with Réka", share(t, o, x.place, x.offer.ID, reka, "viewer"))
+	sameAs(t, "Dóra renaming Offer.pdf", rename(t, o, x.place, x.offer.ID, "Offer v2.pdf"), missingItem)
 	sameAs(t, "Dóra downloading Ledger.xlsx, its sibling", o.Get(t, downloadPath(x.place, x.ledger.ID)), missingItem)
 	sameAs(t, "Dóra listing 2026, its folder", o.Get(t, listPath(x.place, x.y2026.ID)), missingItem)
 	sameAs(t, "Dóra renaming Ledger.xlsx", rename(t, o, x.place, x.ledger.ID, "x"), missingItem)
 
-	// Viewer on Clients as well: everything in it opens, and Offer.pdf stays hers to edit, but nothing else is.
+	// Viewer on Clients, editor on Bakery: she opens everything in Clients, and works in Bakery only.
 	ok(t, "sharing Clients with Dóra as viewer", share(t, b, x.place, x.clients.ID, dora, "viewer"))
+	ok(t, "sharing Bakery with Dóra as editor", share(t, b, x.place, x.bakery.ID, dora, "editor"))
+	if l := list(t, o, x.place, x.clients.ID); l.Role != "viewer" || slices.Contains(l.Can, "upload") ||
+		!slices.Equal(named(t, l.Items, "Price list.pdf").Can, []string{"list", "download", "see-access"}) {
+		t.Fatalf("Dóra's Clients: %+v", l)
+	}
 	l := list(t, o, x.place, x.y2026.ID)
-	if got := named(t, l.Items, "Offer v2.pdf").Can; !slices.Contains(got, "rename") || !slices.Contains(got, "share") {
-		t.Fatalf("what Dóra may do with Offer v2.pdf under a viewer folder: %q", got)
+	if l.Role != "editor" || !slices.Contains(named(t, l.Items, "Offer.pdf").Can, "rename") || !slices.Contains(named(t, l.Items, "Ledger.xlsx").Can, "delete") {
+		t.Fatalf("Dóra's 2026, in Bakery: %+v", l)
 	}
-	if got := named(t, l.Items, "Ledger.xlsx").Can; !slices.Equal(got, []string{"list", "download", "see-access"}) {
-		t.Fatalf("what Dóra may do with Ledger.xlsx: %q", got)
-	}
-	ok(t, "Dóra renaming Offer v2.pdf", rename(t, o, x.place, x.offer.ID, "Offer v3.pdf"))
-	sameAs(t, "Dóra renaming Ledger.xlsx", rename(t, o, x.place, x.ledger.ID, "x"), missingItem)
-	want := []string{bence.UserID + " owner (owner)", dora.UserID + " viewer (from Clients)", dora.UserID + " editor (here)"}
+	ok(t, "Dóra renaming Offer.pdf in Bakery", rename(t, o, x.place, x.offer.ID, "Offer v2.pdf"))
+	uploadedInto(t, o, x.place, x.y2026.ID, "From Dóra.txt", []byte("dóra"))
+	sameAs(t, "Dóra uploading into Clients", uploadInto(t, o, x.place, x.clients.ID, "x.txt", []byte("x"), ""), missingItem)
+	sameAs(t, "Dóra renaming Price list.pdf", rename(t, o, x.place, x.prices.ID, "x"), missingItem)
+	want := []string{bence.UserID + " owner (owner)", dora.UserID + " viewer (from Clients)", dora.UserID + " editor (from Bakery)",
+		dora.UserID + " editor (here)", reka.UserID + " viewer (here)"}
 	if got := accessLines(accessOf(t, b, itemAccessPath(x.place, x.offer.ID))); !slices.Equal(got, want) {
 		t.Fatalf("who can see Offer.pdf: %q, want %q", got, want)
 	}
@@ -365,10 +378,10 @@ func TestSharingWithEveryoneInTheProject(t *testing.T) {
 		t.Fatalf("Máté after leaving: %d %s", res.Status, res.Body)
 	}
 
-	// Everyone as editor on one file, then taken away: the rest of Bakery stays as it was.
-	ok(t, "everyone editor on Offer.pdf", shareWithEveryone(t, b, x.place, x.offer.ID, "editor"))
+	// Everyone as editor on 2026, then taken away: the rest of Bakery stays as it was.
+	ok(t, "everyone editor on 2026", shareWithEveryone(t, b, x.place, x.y2026.ID, "editor"))
 	ok(t, "Dóra renaming Offer.pdf", rename(t, d.As(dora), x.place, x.offer.ID, "Offer (everyone).pdf"))
-	ok(t, "taking everyone's editor away", unshareEveryone(t, b, x.place, x.offer.ID))
+	ok(t, "taking everyone's editor away", unshareEveryone(t, b, x.place, x.y2026.ID))
 	missing := d.As(dora).Get(t, downloadPath(x.place, x.notes.ID+100))
 	sameAs(t, "Dóra renaming it again", rename(t, d.As(dora), x.place, x.offer.ID, "x"), missing)
 	ok(t, "taking everyone's viewer away", unshareEveryone(t, b, x.place, x.bakery.ID))
@@ -569,6 +582,24 @@ func TestOnlyMembersAndTheRolesThereAreCanBeGiven(t *testing.T) {
 	// A member who has never opened the Drive can be given access.
 	ok(t, "sharing with Réka, who has never opened the Drive", share(t, b, x.place, x.clients.ID, reka, "viewer"))
 	list(t, d.As(reka), x.place, x.clients.ID)
+
+	// Nobody gives access on an item to themselves: it would outlast what they were given above, once that is taken
+	// away. Taking away what was given to them is theirs to do.
+	ok(t, "sharing Clients with Dóra as editor", share(t, b, x.place, x.clients.ID, dora, "editor"))
+	o := d.As(dora)
+	for what, res := range map[string]harness.Response{
+		"Dóra giving herself editor on Bakery":  share(t, o, x.place, x.bakery.ID, dora, "editor"),
+		"Dóra giving herself viewer on Clients": share(t, o, x.place, x.clients.ID, dora, "viewer"),
+	} {
+		if res.Status != http.StatusBadRequest || !strings.Contains(errorOf(t, res), "yourself") {
+			t.Errorf("%s: got %d %s, want 400", what, res.Status, res.Body)
+		}
+	}
+	ok(t, "Dóra sharing Bakery with everyone", shareWithEveryone(t, o, x.place, x.bakery.ID, "viewer"))
+	ok(t, "Dóra stepping back from Clients", unshare(t, o, x.place, x.clients.ID, dora))
+	if l := list(t, o, x.place, x.bakery.ID); l.Role != "viewer" {
+		t.Fatalf("Dóra in Bakery after stepping back: %+v", l)
+	}
 }
 
 // A share hangs on the item, not on its name or place in the folder tree: it stays through rename, move, replace and
@@ -720,6 +751,12 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 		sameAs(t, "Dóra: "+route+" of Bence's My files", send(o, x2), send(o, top(nowhere)[route]))
 	}
 
+	// Renaming Bakery, the folder she was given, would put a name into Clients, which she cannot open: whether a name
+	// is taken there or not, the answer is the same, and nothing changes.
+	for _, name := range []string{"Price list.pdf", "Bakery 2026", "Bakery"} {
+		sameAs(t, "Dóra renaming Bakery to "+name, rename(t, o, x.place, x.bakery.ID, name), send(o, none["POST /api/places/{place}/items/{item}/rename"]))
+	}
+
 	// Moving what she was given into what she was not: the same answer as a folder that does not exist.
 	noFolder := move(t, o, x.place, x.y2026.ID, nowhere)
 	for what, id := range map[string]int64{"Clients": x.clients.ID, "Private": x.private.ID, "Réka's file": rekasFile.ID, "a folder of Payroll": slip.ID, "the top folder": 0} {
@@ -742,5 +779,75 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 	}
 	if got := trashOf(t, b, x.place); len(got) != 2 {
 		t.Errorf("Bence's trash: %+v", got)
+	}
+}
+
+// Restoring is for what someone could have deleted from where it goes back to, and, for someone given only part of a
+// place, only for what they put in the trash themselves: never what the owner deleted or replaced before sharing it, and
+// never into a folder they may not add to, even when the folder it was deleted from is gone.
+func TestSomeoneGivenPartOfAPlaceRestoresOnlyWhatTheyDeletedAndOnlyWhereTheyMayAdd(t *testing.T) {
+	t.Parallel()
+	d := harness.Start(t, reka, bence, dora)
+	b, o := d.As(bence), d.As(dora)
+	x := bencesFiles(t, d)
+	top := "My files/bence@example.com"
+	missingTrashed := func() harness.Response { return restore(t, o, x.place, x.notes.ID+1000) }
+
+	// Before sharing Clients, Bence deletes a file from it and replaces another: the old content goes to his trash.
+	salaries := uploadedInto(t, b, x.place, x.clients.ID, "Salaries.xlsx", []byte("salaries"))
+	deleted(t, b, x.place, salaries.ID)
+	if res := uploadInto(t, b, x.place, x.clients.ID, "Price list.pdf", []byte("new prices"), "replace"); res.Status != http.StatusCreated {
+		t.Fatalf("replacing Price list.pdf: %d %s", res.Status, res.Body)
+	}
+	trash := trashOf(t, b, x.place)
+	if len(trash) != 2 {
+		t.Fatalf("Bence's trash: %+v", trash)
+	}
+	ok(t, "sharing Clients with Dóra as editor", share(t, b, x.place, x.clients.ID, dora, "editor"))
+	for _, e := range trash {
+		sameAs(t, "Dóra restoring "+e.Name+", which Bence put in the trash", restore(t, o, x.place, e.ID), missingTrashed())
+	}
+	// Nor what Bence deletes from Clients now: it is his to restore.
+	deleted(t, b, x.place, x.ledger.ID)
+	sameAs(t, "Dóra restoring Ledger.xlsx, deleted by Bence", restore(t, o, x.place, x.ledger.ID), missingTrashed())
+	if got := onStorage(t, d, top+"/Clients"); !slices.Equal(got, []string{"Bakery/", "Price list.pdf"}) {
+		t.Fatalf("Clients on the storage: %q", got)
+	}
+	if got, _ := d.Storage.Get(t, top+"/Clients/Price list.pdf"); string(got) != "new prices" {
+		t.Fatalf("Price list.pdf holds %q", got)
+	}
+
+	// What she deletes herself she may restore, back where it was.
+	deleted(t, o, x.place, x.offer.ID)
+	if r := restored(t, o, x.place, x.offer.ID); r.Item.ID != x.offer.ID || !slices.Equal(pathNames(r.Path), []string{"Clients", "Bakery", "2026"}) {
+		t.Fatalf("Dóra restoring Offer.pdf: %+v", r)
+	}
+
+	// Its folder deleted after it: it would go back to Bence's top folder, where she may not add, so it stays in the
+	// trash, even when it has a share of its own.
+	ok(t, "Bence giving Dóra editor on Offer.pdf too", share(t, b, x.place, x.offer.ID, dora, "editor"))
+	deleted(t, o, x.place, x.offer.ID)
+	deleted(t, o, x.place, x.y2026.ID)
+	sameAs(t, "Dóra restoring Offer.pdf while 2026 is in the trash", restore(t, o, x.place, x.offer.ID), missingTrashed())
+	restored(t, o, x.place, x.y2026.ID) // 2026 itself goes back into Bakery, which she may add to
+	restored(t, o, x.place, x.offer.ID) // and with it there, Offer.pdf goes back into it
+
+	// Its folder gone from the storage behind the Drive's back: the guard finds it in the index, and the restore finds it
+	// gone, decides again on the top folder instead, and stops.
+	deleted(t, o, x.place, x.offer.ID)
+	d.Storage.Delete(t, top+"/Clients/Bakery/2026", true)
+	res := restore(t, o, x.place, x.offer.ID)
+	if res.Status != http.StatusConflict || !strings.Contains(errorOf(t, res), "cannot go back") {
+		t.Fatalf("Dóra restoring Offer.pdf after 2026 went from the storage: got %d %s, want 409", res.Status, res.Body)
+	}
+	if got := onStorage(t, d, top); !slices.Equal(got, []string{"Clients/", "Notes.txt", "Private/"}) {
+		t.Fatalf("Bence's top folder on the storage: %q", got)
+	}
+	// Bence may: it goes to his top folder.
+	if r := restored(t, b, x.place, x.offer.ID); r.Item.ID != x.offer.ID || len(r.Path) != 0 {
+		t.Fatalf("Bence restoring Offer.pdf: %+v", r)
+	}
+	if got, _ := d.Storage.Get(t, top+"/Offer.pdf"); string(got) != "offer" {
+		t.Fatalf("Offer.pdf in Bence's top folder holds %q", got)
 	}
 }

@@ -23,9 +23,13 @@
 //     member. Access on a folder applies to everything in it, at any depth. Deeper levels can only add access, never
 //     take it away: the role someone has at an item is the highest of what they were given on it, on every folder
 //     above it and on the place, and what the place gives them by itself (owner, project admin). RoleAt computes it.
-//   - A viewer may open, download and see who has access; an editor may also upload, make folders, rename, move and
-//     delete, restore what it could have deleted, and share further. Only managers decide who has access to a shared
-//     folder as a whole, and only they may delete it.
+//   - A viewer may open, download and see who has access; an editor may also upload and make folders in it, and share
+//     it further. Only managers decide who has access to a shared folder as a whole, and only they may delete it.
+//   - Renaming, moving, deleting and restoring an item change the folder it is in (or goes back to), so they need the
+//     right to put things into that folder, as an upload does: someone given one folder or file works inside it, but
+//     cannot rename it, take it out of the folder it is in, or put it back into one they cannot add to, and so never
+//     learns what else is in a folder they were not given. Restoring also needs the right to see the place's whole
+//     trash, or to be the one who put the item there.
 //   - A shared folder in the trash can only be restored, by a manager.
 //   - A "My files" whose owner has left the member list is held: nobody may do anything there.
 //
@@ -133,24 +137,29 @@ type Place struct {
 	// folder down, the item last. It is empty when the request is about the place's top folder, or the place as a
 	// whole. For an item in the trash it is the folders it goes back to when restored, then the item.
 	Path []int64
+	// DeletedBy is, for an item in the trash, the user id of the member who put it there (by deleting it, or by
+	// replacing it with an upload), or empty when that is not known.
+	DeletedBy string
 	// Grants is the access given in this place. Only what was given on its top folder (On 0) or on an item of Path
 	// counts: access given on one item never reaches its parent or its siblings. A caller may pass more.
 	Grants []Grant
 }
 
 // Below is the same place, about the item id directly inside the item p is about (or inside its top folder), with
-// the access given on that item added: how a listing describes each item in a folder.
+// the access given on that item added: how a listing describes each item in a folder. It is about a live item.
 func (p *Place) Below(id int64, given []Grant) *Place {
 	q := *p
+	q.DeletedBy = ""
 	q.Path = append(append(make([]int64, 0, len(p.Path)+1), p.Path...), id)
 	q.Grants = append(append(make([]Grant, 0, len(p.Grants)+len(given)), p.Grants...), given...)
 	return &q
 }
 
 // Up is the same place, about the folder depth levels down from its top folder on the way to the item (0: the top
-// folder itself), with the same access given: how a path is checked one folder at a time.
+// folder itself), with the same access given: how a path is checked one folder at a time. It is about a live folder.
 func (p *Place) Up(depth int) *Place {
 	q := *p
+	q.DeletedBy = ""
 	if depth < 0 {
 		depth = 0
 	}
@@ -183,18 +192,21 @@ const (
 	Upload Action = "upload"
 	// MakeFolder is making a new folder in a folder.
 	MakeFolder Action = "make-folder"
-	// Rename is giving a file or folder a new name. It concerns an item.
+	// Rename is giving a file or folder a new name in its folder. It concerns an item, and needs the right to Upload
+	// into its folder: a new name can clash with what is there.
 	Rename Action = "rename"
-	// Move is taking a file or folder out of its folder, to put it into another folder of the same place, where the
-	// person must be allowed to Upload. (Moving between places needs a decision on both, and comes with the move
-	// warning.) It concerns an item.
+	// Move is taking a file or folder out of its folder, which needs the right to Upload into that folder, to put it
+	// into another folder of the same place, where the person must be allowed to Upload too. (Moving between places
+	// needs a decision on both, and comes with the move warning.) It concerns an item.
 	Move Action = "move"
-	// Delete is moving a file or folder into its place's trash. It concerns an item.
+	// Delete is moving a file or folder into its place's trash, out of its folder: it needs the right to Upload into
+	// that folder. It concerns an item.
 	Delete Action = "delete"
 	// SeeTrash is seeing what is in a place's trash. It concerns the place's top folder.
 	SeeTrash Action = "see-trash"
-	// Restore is moving an item out of its place's trash, back into the folder it was deleted from. Whoever could have
-	// deleted it may. It concerns an item in the trash.
+	// Restore is moving an item out of its place's trash, back into the folder it goes back to: whoever could have
+	// deleted it from there may, if they may see the place's whole trash or put it there themselves. It concerns an
+	// item in the trash, with the folders it goes back to as its path.
 	Restore Action = "restore"
 
 	// SeeAccess is seeing who has access to an item, or to a shared folder as a whole, and in which role.
@@ -230,7 +242,22 @@ func Decide(person Person, action Action, place *Place) bool {
 	if len(place.Path) == 0 {
 		return atTop[role][action]
 	}
-	return atItem[role][action]
+	if !atItem[role][action] {
+		return false
+	}
+	switch action {
+	case Rename, Move, Delete, Restore:
+		// A change to the folder the item is in, or goes back to: as an upload into it. Access only widens down the
+		// tree, so whoever may do that is an editor of the item too.
+		if !Decide(person, Upload, place.Up(len(place.Path)-1)) {
+			return false
+		}
+	}
+	if action == Restore {
+		// The trash of a place is its own: someone given part of a place restores only what they put there.
+		return place.DeletedBy == person.UserID || Decide(person, SeeTrash, place.Up(0))
+	}
+	return true
 }
 
 // What each role may do in a place's top folder. The owner of a "My files" has nothing to manage and nobody to show
@@ -243,7 +270,8 @@ var atTop = map[Role]map[Action]bool{
 }
 
 // What each role may do at an item. A manager of a shared folder, and the owner of a "My files", are editors of
-// everything in it.
+// everything in it. Renaming, moving, deleting and restoring also need the right to put things into the item's folder
+// (see Decide).
 var atItem = map[Role]map[Action]bool{
 	Viewer:  asViewer,
 	Editor:  asEditor,

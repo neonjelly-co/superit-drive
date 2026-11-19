@@ -166,8 +166,9 @@ func (s *Server) keepsAManager(p index.Place) func(after []index.Grant) error {
 //	PUT /api/places/{place}/items/{item}/access/members/{member} {"role": "viewer" | "editor"}
 //	PUT /api/places/{place}/items/{item}/access/everyone         {"role": "viewer" | "editor"}
 //
-// Only members can be given access (guests come later), including those who have never opened the Drive. Changing a
-// manager of a shared folder into something less is refused when nobody would be left managing it.
+// Only members can be given access (guests come later), including those who have never opened the Drive, and nobody
+// gives access on an item to themselves. Changing a manager of a shared folder into something less is refused when
+// nobody would be left managing it.
 func (s *Server) giveAccess(who grantee) func(http.ResponseWriter, *http.Request, call) {
 	return func(w http.ResponseWriter, r *http.Request, c call) {
 		var body struct {
@@ -186,6 +187,13 @@ func (s *Server) giveAccess(who grantee) func(http.ResponseWriter, *http.Request
 			to.Member = m.UserID
 			if c.place.Kind == index.MyFiles && m.UserID == c.place.Owner {
 				s.refuse(w, r, http.StatusBadRequest, "This is in their own My files: they have it already.")
+				return
+			}
+			// Access on an item is given to others. Given to oneself it would only outlast what one was given above,
+			// after the person who gave that took it away. (A manager stepping down on a shared folder as a whole changes
+			// their own role there, under the rule that it keeps a manager.)
+			if c.item != nil && m.UserID == c.member.UserID {
+				s.refuse(w, r, http.StatusBadRequest, "You cannot give yourself access. Ask someone who may share it.")
 				return
 			}
 		}

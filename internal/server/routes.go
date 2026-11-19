@@ -367,7 +367,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, c call) {
 		s.refuse(w, r, http.StatusBadRequest, "The upload asked for something the Drive does not do with a name that is taken.")
 		return
 	}
-	up, err := s.drive.Upload(r.Context(), *c.place, folder, name, r.Body, r.ContentLength, existing)
+	up, err := s.drive.Upload(r.Context(), *c.place, folder, name, r.Body, r.ContentLength, existing, c.member.UserID)
 	var bad *drive.BadName
 	var taken *drive.Taken
 	switch {
@@ -518,6 +518,8 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, c call) {
 	}
 }
 
+var errCannotGoBack = errors.New("the person may not put it back where it would go")
+
 const noSuchDestination = "The folder to move it into is not in the Drive, or you cannot add to it. Reload the page and try again."
 
 // changeFailed answers a change to a file or folder that did not happen. name is the name it concerned.
@@ -584,7 +586,7 @@ func (s *Server) trashOf(ctx context.Context, who access.Person, p index.Place, 
 //
 //	DELETE /api/places/{place}/items/{item}
 func (s *Server) delete(w http.ResponseWriter, r *http.Request, c call) {
-	e, err := s.drive.Delete(r.Context(), *c.place, *c.item)
+	e, err := s.drive.Delete(r.Context(), *c.place, *c.item, c.member.UserID)
 	if err != nil {
 		s.changeFailed(w, r, err, c.item.Name)
 		return
@@ -624,11 +626,34 @@ func (s *Server) trash(w http.ResponseWriter, r *http.Request, c call) {
 
 // restore moves a file or folder out of the place's trash, back to the folder it was deleted from (or the top folder,
 // when that folder is gone), and answers with it and the folders it is now in that the person can open. Whoever could
-// have deleted it from where it goes back to may.
+// have deleted it from where it goes back to may, if they may see the place's whole trash or put it there themselves.
+//
+// guard decided on the folder it goes back to as the index had it. The folder it actually goes into is decided on
+// again, by the same rule, just before it moves: that folder can have gone (to the trash, or from the storage, and
+// then it goes to the top folder instead) or moved since, and nobody puts anything into a folder they may not add to.
 //
 //	POST /api/places/{place}/trash/{item}/restore
 func (s *Server) restore(w http.ResponseWriter, r *http.Request, c call) {
-	it, err := s.drive.Restore(r.Context(), *c.place, *c.trashed)
+	who := personOf(c.member)
+	it, err := s.drive.Restore(r.Context(), *c.place, *c.trashed, func(into *index.Item) error {
+		var path []index.Item
+		if into != nil {
+			path = pathTo(*into)
+		}
+		where, err := s.accessAt(r.Context(), *c.place, append(idsOf(path), c.trashed.ID))
+		if err != nil {
+			return err
+		}
+		where.DeletedBy = c.trashed.DeletedBy
+		if !access.Decide(who, access.Restore, where) {
+			return errCannotGoBack
+		}
+		return nil
+	})
+	if errors.Is(err, errCannotGoBack) {
+		s.refuse(w, r, http.StatusConflict, "This cannot go back: the folder it was deleted from is gone, or you can no longer add to it.")
+		return
+	}
 	if errors.Is(err, drive.ErrGone) {
 		s.refuse(w, r, http.StatusNotFound, "This is no longer in the trash on the Drive storage.")
 		return

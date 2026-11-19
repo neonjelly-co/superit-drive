@@ -13,7 +13,13 @@
 --
 -- given_by is the user id of the member who gave it (NULL for the managers given before this migration).
 --
+-- items.trashed_by is, for an item in the trash, the user id of the member who put it there (by deleting it, or by
+-- replacing it with an upload): someone given only part of a place restores only what they put there. NULL for what
+-- was in the trash before this migration, and while an item is not in the trash.
+--
 -- The migration runs with foreign keys off, so dropping the old table takes nothing with it.
+ALTER TABLE items ADD COLUMN trashed_by TEXT;
+
 CREATE UNIQUE INDEX items_id_and_place ON items (id, place_id);
 
 CREATE TABLE grants_new (

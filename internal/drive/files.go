@@ -96,8 +96,9 @@ type Upload struct {
 // the whole file or nothing, so a cut-off upload leaves nothing behind.
 //
 // When the name is taken, existing decides: ask (a *Taken error before any byte is sent), replace a file, or keep both
-// under a new name. A folder is never replaced. Another upload of the same name still in flight is ErrBusy.
-func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, name string, body io.Reader, size int64, existing Existing) (Upload, error) {
+// under a new name. A folder is never replaced. Another upload of the same name still in flight is ErrBusy. by is the
+// member uploading: a file they replace goes to the trash as put there by them.
+func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, name string, body io.Reader, size int64, existing Existing, by string) (Upload, error) {
 	if err := CheckName(name); err != nil {
 		return Upload{}, err
 	}
@@ -146,7 +147,7 @@ func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, n
 	if replacing {
 		// The file there goes to the trash first, and comes back if the upload fails. (With the hidden uploads folder,
 		// a later ticket, the upload is stored first and the two swap places at the end.)
-		replaced, undo, err := d.putAside(ctx, p, folder, file, there)
+		replaced, undo, err := d.putAside(ctx, p, folder, file, there, by)
 		if err != nil {
 			return Upload{}, err
 		}
