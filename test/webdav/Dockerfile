@@ -12,6 +12,8 @@ RUN sed -i \
       /usr/local/apache2/conf/httpd.conf \
  && echo 'Include conf/extra/storage.conf' >> /usr/local/apache2/conf/httpd.conf \
  && mkdir -p /var/storage/files /var/storage/lock \
+ && cd /var/storage/files && mkdir refuses-mkcol refuses-put ignores-range refuses-move refuses-delete \
+      refuses-content-range ignores-content-range \
  && chown -R www-data:www-data /var/storage \
  && htpasswd -bc /usr/local/apache2/conf/storage.passwd drive drive-test-password
 

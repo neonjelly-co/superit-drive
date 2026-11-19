@@ -85,6 +85,56 @@ Storage Box runs, writes to a hidden temporary file and renames it at the end), 
 that is there. Shared folders, and hidden folders for the trash, uploads in progress and the index copy, come with
 their tickets.
 
+### Checking a WebDAV server
+
+`superit-drive check-storage` finds out whether a WebDAV server can hold the Drive's files, before a Drive is set up
+on it. It needs only the four storage settings, and it is in the image:
+
+```sh
+docker run --rm -e DRIVE_STORAGE_URL=https://dav.example.com -e DRIVE_STORAGE_USER=drive \
+  -e DRIVE_STORAGE_PASSWORD=example-password -e DRIVE_STORAGE_FOLDER=/drive \
+  ghcr.io/neonjelly-co/superit-drive:<version> check-storage
+```
+
+It takes these steps with the Drive's own WebDAV client and stops at the first that fails:
+
+| Step | What it does |
+|---|---|
+| `sign in` | Lists `DRIVE_STORAGE_FOLDER` with the login. A folder that is not there yet is fine: the Drive makes it. |
+| `make a folder` | Makes a folder of its own, `.superit-drive-check-<random>`, inside it (and `DRIVE_STORAGE_FOLDER` if missing). |
+| `write a file` | Writes a file of 256 KiB there, and finds it listed with its size. |
+| `read part of it` | Reads 1000 bytes from the middle of the file (`GET` with `Range`), and gets only those. |
+| `move it` | Moves the file to another name on the server (`MOVE`), and finds it there and not at its old name. |
+| `delete it` | Deletes the file, and finds it gone. |
+
+Then it finds out whether resuming uploads is supported: it writes half a file, then the other half into the same
+file from its middle (`PUT` with `Content-Range`), and reads the file back. A server that refuses that, or ignores
+where the half goes and replaces the file with it, does not support it; this never fails the check. Last, it removes
+its own folder. If it made `DRIVE_STORAGE_FOLDER`, that stays.
+
+It prints one line per step, then the resume line, then the result, on standard output:
+
+```
+Checking the WebDAV server at https://dav.example.com/drive/ for Superit Drive <version>.
+sign in: ok
+make a folder: ok
+write a file: ok
+read part of it: ok
+move it: ok
+delete it: ok
+resume an upload: not supported: the server ignored where the second half goes (Content-Range) and replaced the file with it
+This server can hold the Drive's files. Resuming uploads: not supported.
+```
+
+A step that fails prints `<step>: failed: <reason>`, then `This server cannot hold the Drive's files: "<step>" failed.`
+and nothing after it but, when its folder could not be removed, a `clean up:` line saying where it is. A step that
+passes prints `<step>: ok`, sometimes with a note in brackets. The exit code is 0 when every step passed (whether or
+not resuming is supported), 1 when a step failed, and 2 when a storage setting is missing or wrong (the reason goes to
+standard error, and nothing was asked of the server). The check takes at most about two and a half minutes.
+
+It does not find out how large a file the server takes, whether an upload cut off midway keeps what arrived, how many
+connections the server allows at once, how fast it is, or how much room it has.
+
 ## Develop
 
 You need Go 1.27, Bun 1.3 and Docker. `make help` lists the targets.
@@ -109,6 +159,7 @@ through the authorisation function. The interface has no tests of its own; check
 make dev-storage  # stand-in storage on 127.0.0.1:8081
 make run          # the Drive on 127.0.0.1:8080, with dev/drive.env and dev/members.json
 make dev-ui       # in another terminal: the interface on http://localhost:5173, with hot reload
+make check-storage  # the storage check against the stand-in storage
 ```
 
 A browser cannot reach the Drive on :8080 directly, because nothing adds the sign-in headers. `make dev-ui` serves the
@@ -129,19 +180,20 @@ rename.
 ## Repository layout
 
 ```
-cmd/superit-drive/   main: starts internal/app
-internal/app/        wires everything together and serves until stopped
-internal/settings/   every environment variable
-internal/members/    the member list file, re-read when it changes
-internal/access/     the one authorisation function (Decide) and its table test
-internal/server/     HTTP: routes.go lists every route; server.go's guard runs identify → own page (for changes) →
-                     place → access.Decide → item in that place
-internal/drive/      the Drive's operations, joining the index and the storage
-internal/index/      the SQLite index; schema changes are numbered files in migrations/
-internal/storage/    the WebDAV client
-web/                 the interface (Vite, React, Tailwind with the Pilot light tokens); built into web/dist
-test/                tests through HTTP; harness/ runs the Drive; webdav/ is the stand-in storage
-dev/                 settings and a member list for running locally
+cmd/superit-drive/     main: runs the Drive, or the storage check (`check-storage`)
+internal/app/          wires everything together and serves until stopped
+internal/settings/     every environment variable
+internal/members/      the member list file, re-read when it changes
+internal/access/       the one authorisation function (Decide) and its table test
+internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify → own page (for changes) →
+                       place → access.Decide → item in that place
+internal/drive/        the Drive's operations, joining the index and the storage
+internal/index/        the SQLite index; schema changes are numbered files in migrations/
+internal/storage/      the WebDAV client
+internal/storagecheck/ `superit-drive check-storage`: can a WebDAV server hold the Drive's files?
+web/                   the interface (Vite, React, Tailwind with the Pilot light tokens); built into web/dist
+test/                  tests through HTTP; harness/ runs the Drive; webdav/ is the stand-in storage
+dev/                   settings and a member list for running locally
 ```
 
 ## Licence

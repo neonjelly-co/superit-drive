@@ -4,7 +4,7 @@ BIN     := bin/superit-drive
 IMAGE   := superit-drive:dev
 STORAGE := superit-drive-dev-storage
 
-.PHONY: help ui build test test-short image dev-storage run dev-ui
+.PHONY: help ui build test test-short image dev-storage run dev-ui check-storage
 
 help:
 	@grep -E '^[a-z-]+:.*## ' Makefile | sed 's/:.*## /\t/'
@@ -34,3 +34,6 @@ run: build ## Run the Drive on 127.0.0.1:8080 with the settings in dev/drive.env
 
 dev-ui: ## Serve the interface with hot reload on :5173, signed in as DEV_USER_ID from dev/drive.env
 	set -a && . ./dev/drive.env && set +a && cd web && bun run dev
+
+check-storage: build ## Check the storage in dev/drive.env (the stand-in) as a WebDAV server is checked before a Drive
+	set -a && . ./dev/drive.env && set +a && ./$(BIN) check-storage

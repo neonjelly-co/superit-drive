@@ -182,7 +182,8 @@ func StartFailing(t *testing.T, o Options) string {
 
 var listening = regexp.MustCompile(`msg=listening address=(\S+)`)
 
-func launch(t *testing.T, o Options) *Drive {
+// ready builds the Drive and starts the stand-in storage, once per test package.
+func ready(t *testing.T) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("needs Docker; skipped with -short")
@@ -191,6 +192,57 @@ func launch(t *testing.T, o Options) *Drive {
 	if shared.err != nil {
 		t.Fatal("harness:", shared.err)
 	}
+}
+
+// StorageAt is the folder at folder on the stand-in storage (such as "/drive-1a2b"): the storage settings that point
+// a Drive or the storage check at it, and the folder itself, reached with the storage login. Nothing is made.
+func StorageAt(t *testing.T, folder string) (map[string]string, *Storage) {
+	t.Helper()
+	ready(t)
+	env := map[string]string{
+		"DRIVE_STORAGE_URL":      shared.storage.url,
+		"DRIVE_STORAGE_USER":     storageUser,
+		"DRIVE_STORAGE_PASSWORD": storagePassword,
+		"DRIVE_STORAGE_FOLDER":   folder,
+	}
+	return env, &Storage{root: shared.storage.url + strings.TrimSuffix(folder, "/"), user: storageUser, password: storagePassword}
+}
+
+// Unique is a folder name no other test uses, such as "check-1a2b3c4d5e6f".
+func Unique(prefix string) string { return prefix + "-" + randomHex(6) }
+
+// Command runs the Drive's binary with args and only the environment variables in env, as a container would, and
+// returns what it printed (standard output, then standard error) and its exit code.
+func Command(t *testing.T, env map[string]string, args ...string) (output string, exitCode int) {
+	t.Helper()
+	ready(t)
+	cmd := exec.Command(shared.binary, args...)
+	cmd.Env = []string{}
+	for k, v := range env {
+		if v != "" {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	done := make(chan error, 1)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Minute):
+		_ = cmd.Process.Kill()
+		<-done
+		t.Fatalf("superit-drive %s did not end within 3 minutes:\n%s%s", strings.Join(args, " "), &stdout, &stderr)
+	}
+	return stdout.String() + stderr.String(), cmd.ProcessState.ExitCode()
+}
+
+func launch(t *testing.T, o Options) *Drive {
+	t.Helper()
+	ready(t)
 	dir := t.TempDir()
 	folder := "drive-" + randomHex(6)
 	d := &Drive{

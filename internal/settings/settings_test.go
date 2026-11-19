@@ -1,6 +1,8 @@
 package settings
 
 import (
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -69,6 +71,60 @@ func TestRefusesBadValues(t *testing.T) {
 		if _, err := FromEnv(func(k string) string { return env[k] }); err == nil || !strings.Contains(err.Error(), name) {
 			t.Errorf("%s=%q: expected an error naming it, got %v", name, bad, err)
 		}
+	}
+}
+
+// The storage check needs the storage settings and nothing else.
+func TestTheStorageSettingsAloneAreEnoughToCheckAServer(t *testing.T) {
+	env := map[string]string{
+		"DRIVE_STORAGE_URL":      "https://dav.example.com/remote",
+		"DRIVE_STORAGE_USER":     "u1",
+		"DRIVE_STORAGE_PASSWORD": "pw",
+	}
+	s, err := StorageFromEnv(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.URL.String() != "https://dav.example.com/remote" || s.User != "u1" || s.Password != "pw" || s.Folder != "/" {
+		t.Fatalf("unexpected storage settings: %+v", s)
+	}
+
+	_, err = StorageFromEnv(func(string) string { return "" })
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, v := range Variables {
+		storage := strings.HasPrefix(v.Name, "DRIVE_STORAGE_")
+		if named := strings.Contains(err.Error(), v.Name); named != (storage && v.Required) {
+			t.Errorf("named %s: %v, want %v: %v", v.Name, named, storage && v.Required, err)
+		}
+	}
+}
+
+// The README's settings table is the settings reference for people running the Drive themselves: it lists every
+// variable, and nothing else.
+func TestTheREADMEListsEverySetting(t *testing.T) {
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := regexp.MustCompile("(?m)^\\| `([A-Z_]+)` \\| (yes|no)")
+	documented := map[string]bool{}
+	for _, m := range row.FindAllStringSubmatch(string(readme), -1) {
+		documented[m[1]] = m[2] == "yes"
+	}
+	for _, v := range Variables {
+		required, ok := documented[v.Name]
+		switch {
+		case !ok:
+			t.Errorf("the README's settings table does not list %s", v.Name)
+		case required != v.Required:
+			t.Errorf("the README's settings table says %s is required: %v, want %v", v.Name, required, v.Required)
+		}
+		delete(documented, v.Name)
+	}
+	for name := range documented {
+		t.Errorf("the README's settings table lists %s, which the Drive does not read", name)
 	}
 }
 
