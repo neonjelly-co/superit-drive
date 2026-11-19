@@ -1,0 +1,70 @@
+@import "tailwindcss";
+@import "@fontsource-variable/atkinson-hyperlegible-next";
+@import "@fontsource-variable/atkinson-hyperlegible-mono";
+
+/*
+ * Pilot light, Superit's look: mist ground, white panels, graphite ink. Copied from src/styles.css of
+ * neonjelly-co/superit; keep the two in step.
+ *
+ * - Green (`signal`) means "running". Use it only for real status, never as decoration. `attention` (amber) is for
+ *   something that needs the person; errors use `destructive`.
+ * - `font-mono` only for values people copy or compare: addresses, tokens, versions.
+ * - Sentence case everywhere. No all-caps labels.
+ */
+:root {
+  --background: oklch(0.956 0.006 239.8);
+  --foreground: oklch(0.283 0.026 246.5);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.283 0.026 246.5);
+  --primary: oklch(0.283 0.026 246.5);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.925 0.009 242.8);
+  --secondary-foreground: oklch(0.283 0.026 246.5);
+  --muted: oklch(0.937 0.008 241.7);
+  --muted-foreground: oklch(0.511 0.028 248.4);
+  --destructive: oklch(0.544 0.186 26);
+  --border: oklch(0.893 0.013 244.3);
+  --input: oklch(0.862 0.016 241.8);
+  --ring: oklch(0.511 0.028 248.4);
+  --radius: 0.75rem;
+
+  --signal: oklch(0.614 0.15 152.3);
+  --signal-foreground: oklch(0.477 0.119 151.2);
+  --attention: oklch(0.532 0.118 66.4);
+}
+
+@theme inline {
+  --font-sans: "Atkinson Hyperlegible Next Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Atkinson Hyperlegible Mono Variable", ui-monospace, monospace;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-signal: var(--signal);
+  --color-signal-foreground: var(--signal-foreground);
+  --color-attention: var(--attention);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body {
+    @apply font-sans bg-background text-foreground;
+  }
+}
