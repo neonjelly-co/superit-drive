@@ -2,9 +2,9 @@
 //
 // Every route is listed in routes.go and registered in Handler, and nowhere else. Each request passes the same steps
 // in guard before its handler runs: who is asking (identify), whether a change came from the Drive's own pages
-// (fromOwnPage), which place it concerns (if any), whether they may (access.Decide), and which item in that place (if
-// any). A handler only ever sees a request that passed them all. A test fails if anything outside this file registers
-// a handler.
+// (fromOwnPage), which place it concerns (if any), whether they may (access.Decide), and which item in that place, or
+// in that place's trash (if any). A handler only ever sees a request that passed them all. A test fails if anything
+// outside this file registers a handler.
 package server
 
 import (
@@ -33,6 +33,8 @@ type Config struct {
 	HeaderSecret string
 	Members      interface{ Current() *members.List }
 	Drive        *drive.Drive
+	// Capacity is the size of the Drive storage in bytes (DRIVE_CAPACITY), or 0 when it is not known.
+	Capacity int64
 	// Interface is the built interface (index.html and assets/).
 	Interface fs.FS
 	Log       *slog.Logger
@@ -40,18 +42,20 @@ type Config struct {
 
 // Server answers the Drive's HTTP requests.
 type Server struct {
-	project string
-	origin  string // the origin of Config.Address, such as https://files.example.com
-	secret  string
-	members interface{ Current() *members.List }
-	drive   *drive.Drive
-	ui      fs.FS
-	log     *slog.Logger
+	project  string
+	origin   string // the origin of Config.Address, such as https://files.example.com
+	secret   string
+	members  interface{ Current() *members.List }
+	drive    *drive.Drive
+	capacity int64
+	ui       fs.FS
+	log      *slog.Logger
 }
 
 // New makes a server.
 func New(c Config) *Server {
-	s := &Server{project: c.ProjectName, secret: c.HeaderSecret, members: c.Members, drive: c.Drive, ui: c.Interface, log: c.Log}
+	s := &Server{project: c.ProjectName, secret: c.HeaderSecret, members: c.Members, drive: c.Drive, capacity: c.Capacity,
+		ui: c.Interface, log: c.Log}
 	if c.Address != nil {
 		s.origin = originOf(c.Address)
 	}
@@ -65,26 +69,32 @@ type route struct {
 	action  access.Action
 	// place is the name of the path value holding the place's id, or "" when the action concerns no place.
 	place string
-	// item is the name of the path value holding the id of an item in that place, or "" when the action concerns
-	// the place as a whole. A route with an item must have a place.
-	item  string
-	serve func(http.ResponseWriter, *http.Request, call)
+	// item is the name of the path value holding the id of an item in that place (at any depth, not in the trash),
+	// or "" when the action concerns the place as a whole. A route with an item must have a place.
+	item string
+	// trashed is, instead, the name of the path value holding the id of an item in that place's trash.
+	trashed string
+	serve   func(http.ResponseWriter, *http.Request, call)
 }
 
-// call is what a handler gets: who is asking, the place the request concerns (nil for no place) and the item in it
-// (nil for none). All have already passed guard.
+// call is what a handler gets: who is asking, the place the request concerns (nil for no place) and the item in it or
+// in its trash (nil for none). All have already passed guard.
 type call struct {
-	member members.Member
-	place  *index.Place
-	item   *index.Item
+	member  members.Member
+	place   *index.Place
+	item    *index.Item
+	trashed *index.TrashItem
 }
 
 // Handler is the Drive's whole HTTP handler. This is the only place routes are registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	for _, rt := range s.routes() {
-		if rt.item != "" && rt.place == "" {
+		if (rt.item != "" || rt.trashed != "") && rt.place == "" {
 			panic("server: route " + rt.pattern + " names an item but no place")
+		}
+		if rt.item != "" && rt.trashed != "" {
+			panic("server: route " + rt.pattern + " names an item both in a place and in its trash")
 		}
 		mux.Handle(rt.pattern, s.guard(rt))
 	}
@@ -144,6 +154,18 @@ func (s *Server) guard(rt route) http.Handler {
 			}
 			c.item = &it
 		}
+		if rt.trashed != "" {
+			t, err := s.findTrashed(r, *c.place, rt.trashed)
+			if errors.Is(err, index.ErrNoItem) {
+				s.refuse(w, r, http.StatusNotFound, noSuchTrashed)
+				return
+			}
+			if err != nil {
+				s.fail(w, r, err)
+				return
+			}
+			c.trashed = &t
+		}
 		rt.serve(w, r, c)
 	})
 }
@@ -151,6 +173,7 @@ func (s *Server) guard(rt route) http.Handler {
 const (
 	noSuchPlace   = "There is no such place in this Drive."
 	noSuchItem    = "There is no such file or folder in this Drive."
+	noSuchTrashed = "There is no such file or folder in the trash."
 	refusedOrigin = "This change did not come from the Drive's own page, so it was refused."
 )
 
@@ -168,6 +191,14 @@ func (s *Server) findItem(r *http.Request, p index.Place, name string) (index.It
 		return index.Item{}, index.ErrNoItem
 	}
 	return s.drive.Item(r.Context(), p, id)
+}
+
+func (s *Server) findTrashed(r *http.Request, p index.Place, name string) (index.TrashItem, error) {
+	id, err := strconv.ParseInt(r.PathValue(name), 10, 64)
+	if err != nil || id <= 0 {
+		return index.TrashItem{}, index.ErrNoItem
+	}
+	return s.drive.TrashItem(r.Context(), p, id)
 }
 
 // fromOwnPage says whether a request may change something: only a page served from the Drive's own address may.

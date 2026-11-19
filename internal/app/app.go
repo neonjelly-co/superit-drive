@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/neonjelly-co/superit-drive/internal/clock"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/members"
@@ -36,16 +37,30 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	}
 	defer x.Close()
 	store := storage.New(s.Storage.URL, s.Storage.User, s.Storage.Password, s.Storage.Folder)
+	if shift := clock.Shift(); shift != 0 {
+		log.Warn("this is a test build: its clock is moved forward", "by", shift.String())
+	}
+	d := drive.New(x, store, drive.Options{Now: clock.Now, Log: log})
 
 	srv := server.New(server.Config{
 		ProjectName:  s.ProjectName,
 		Address:      s.Address,
 		HeaderSecret: s.HeaderSecret,
 		Members:      list,
-		Drive:        drive.New(x, store),
+		Drive:        d,
+		Capacity:     s.Capacity,
 		Interface:    web.Interface(),
 		Log:          log,
 	})
+
+	// Removes what has been in the trash for 30 days: now, and every hour while the Drive runs.
+	trashCtx, stopTrash := context.WithCancel(ctx)
+	trashDone := make(chan struct{})
+	go func() {
+		defer close(trashDone)
+		d.EmptyTrash(trashCtx, time.Hour)
+	}()
+	defer func() { stopTrash(); <-trashDone }() // before the index closes
 
 	ln, err := net.Listen("tcp", s.Listen)
 	if err != nil {

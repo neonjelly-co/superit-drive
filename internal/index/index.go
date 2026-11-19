@@ -1,6 +1,8 @@
-// Package index is the Drive's index: one SQLite file in the data folder. It holds the folder tree and, as later
-// tickets add them, access, public links, guests, the trash and usage. The storage wins for which files exist and
-// what is in them; the index alone will hold access.
+// Package index is the Drive's index: one SQLite file in the data folder. It holds the folder tree with every file's
+// size (the space used is summed from them), the trash, and, as later tickets add them, access, public links and
+// guests. The storage wins for which files exist and what is in them; the index alone will hold access.
+//
+// index.go opens the file and holds the places; items.go holds the folder tree, and trash.go the trash.
 //
 // The schema is changed only by adding a numbered file to migrations/. Each runs once, in order, and the database's
 // user_version records how far it got.
@@ -156,6 +158,24 @@ func (x *Index) MyFiles(ctx context.Context, userID string) (Place, error) {
 		"SELECT "+placeColumns+" FROM places WHERE kind = ? AND owner = ?", MyFiles, userID))
 }
 
+// Places returns every place.
+func (x *Index) Places(ctx context.Context) ([]Place, error) {
+	rows, err := x.db.QueryContext(ctx, "SELECT "+placeColumns+" FROM places ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Place
+	for rows.Next() {
+		p, err := scanPlace(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // FolderTaken says whether a place already uses folder as its top folder.
 func (x *Index) FolderTaken(ctx context.Context, folder string) (bool, error) {
 	var n int
@@ -173,120 +193,4 @@ func (x *Index) AddMyFiles(ctx context.Context, userID, folder string) (Place, e
 		return Place{}, err
 	}
 	return x.MyFiles(ctx, userID)
-}
-
-// An Item is a file or folder inside a place.
-type Item struct {
-	ID      int64
-	PlaceID int64
-	Name    string
-	Folder  bool
-	Size    int64
-	Changed time.Time
-}
-
-// A Seen item is a file or folder as the storage showed it.
-type Seen struct {
-	Name    string
-	Folder  bool
-	Size    int64
-	Changed time.Time
-}
-
-// ErrNoItem is returned when an item does not exist where it was looked for.
-var ErrNoItem = errors.New("no such item")
-
-const itemColumns = "id, place_id, name, is_folder, size, changed_at"
-
-func scanItem(row interface{ Scan(...any) error }) (Item, error) {
-	var it Item
-	var changed int64
-	err := row.Scan(&it.ID, &it.PlaceID, &it.Name, &it.Folder, &it.Size, &changed)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Item{}, ErrNoItem
-	}
-	it.Changed = time.Unix(changed, 0).UTC()
-	return it, err
-}
-
-// TopItems returns what is directly in the place's top folder, folders first, then by name.
-func (x *Index) TopItems(ctx context.Context, placeID int64) ([]Item, error) {
-	rows, err := x.db.QueryContext(ctx, `
-		SELECT `+itemColumns+` FROM items
-		WHERE place_id = ? AND parent_id IS NULL
-		ORDER BY is_folder DESC, name`, placeID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []Item
-	for rows.Next() {
-		it, err := scanItem(rows)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, it)
-	}
-	return items, rows.Err()
-}
-
-// TopItem finds the item with id directly in the place's top folder. It returns ErrNoItem for an id that is not
-// there, including one in another place: an item is only ever found inside the place it belongs to. (Items deeper in
-// folders arrive with folders, and with them a lookup that walks the tree.)
-func (x *Index) TopItem(ctx context.Context, placeID, id int64) (Item, error) {
-	return scanItem(x.db.QueryRowContext(ctx,
-		"SELECT "+itemColumns+" FROM items WHERE id = ? AND place_id = ? AND parent_id IS NULL", id, placeID))
-}
-
-// PutTopItem records one item the storage now has in the place's top folder, such as a file just uploaded, keeping
-// the id of a known name, and returns it.
-func (x *Index) PutTopItem(ctx context.Context, placeID int64, s Seen) (Item, error) {
-	return scanItem(x.db.QueryRowContext(ctx, `
-		INSERT INTO items (place_id, parent_id, name, is_folder, size, changed_at) VALUES (?, NULL, ?, ?, ?, ?)
-		ON CONFLICT (place_id, IFNULL(parent_id, 0), name) DO UPDATE
-		SET is_folder = excluded.is_folder, size = excluded.size, changed_at = excluded.changed_at
-		RETURNING `+itemColumns,
-		placeID, s.Name, s.Folder, s.Size, s.Changed.Unix()))
-}
-
-// SetTopItems brings the index in step with what the storage showed in the place's top folder: new names are added,
-// known ones updated (keeping their ids), and names the storage no longer has are dropped with everything under them.
-func (x *Index) SetTopItems(ctx context.Context, placeID int64, seen []Seen) error {
-	return x.write(ctx, func(tx *sql.Tx) error {
-		known := map[string]int64{}
-		rows, err := tx.QueryContext(ctx, "SELECT id, name FROM items WHERE place_id = ? AND parent_id IS NULL", placeID)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var id int64
-			var name string
-			if err := rows.Scan(&id, &name); err != nil {
-				rows.Close()
-				return err
-			}
-			known[name] = id
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-
-		for _, s := range seen {
-			_, err := tx.ExecContext(ctx, `
-				INSERT INTO items (place_id, parent_id, name, is_folder, size, changed_at) VALUES (?, NULL, ?, ?, ?, ?)
-				ON CONFLICT (place_id, IFNULL(parent_id, 0), name) DO UPDATE
-				SET is_folder = excluded.is_folder, size = excluded.size, changed_at = excluded.changed_at`,
-				placeID, s.Name, s.Folder, s.Size, s.Changed.Unix())
-			if err != nil {
-				return err
-			}
-			delete(known, s.Name)
-		}
-		for _, id := range known {
-			if _, err := tx.ExecContext(ctx, "DELETE FROM items WHERE id = ?", id); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 }

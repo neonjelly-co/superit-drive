@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -16,11 +17,8 @@ import (
 
 // Errors the server tells the person about.
 var (
-	// ErrExists: something of that name is already there. Uploading never replaces anything (asking "replace or keep
-	// both" comes with folders and the trash).
-	ErrExists = errors.New("something of that name is already there")
-	// ErrGone: the file, or the folder an upload was going into, is no longer on the storage.
-	ErrGone = errors.New("no longer on the storage")
+	// ErrBusy: another change of the same name, such as an upload, is still on its way.
+	ErrBusy = errors.New("something of that name is being changed right now")
 	// ErrNotAFile: the item is a folder, and only a file can be downloaded on its own.
 	ErrNotAFile = errors.New("not a file")
 	// ErrFull: the storage has no room for the file.
@@ -28,6 +26,15 @@ var (
 	// ErrCutOff: the upload ended before the whole file arrived. Nothing was stored.
 	ErrCutOff = errors.New("the upload was cut off")
 )
+
+// A Taken error says that something called Name is already where a file or folder was to go, and whether it is a
+// folder: a file can replace a file, never a folder.
+type Taken struct {
+	Name   string
+	Folder bool
+}
+
+func (t *Taken) Error() string { return fmt.Sprintf("something called %q is already there", t.Name) }
 
 // MaxNameBytes is the longest name the Drive stores, in bytes of UTF-8. It is the limit of a Storage Box, of Apache's
 // mod_dav and of most file systems.
@@ -44,68 +51,108 @@ const TooLong = "This name is too long. Names can be up to 255 characters, and f
 	"other alphabets or symbols. Shorten the name and try again."
 
 // CheckName says whether name can be the name of a file or folder on the storage. Names are kept exactly as given
-// (no change of case or Unicode form): they are the real names on the storage.
+// (no change of case or Unicode form): they are the real names on the storage. The interface sends names in Unicode's
+// composed form (NFC), so a name typed or chosen in one browser matches the same name from another.
 func CheckName(name string) error {
 	switch {
 	case name == "":
-		return &BadName{"A file needs a name."}
+		return &BadName{"A name is needed."}
 	case !utf8.ValidString(name):
-		return &BadName{"This name is not valid text. Rename the file and try again."}
+		return &BadName{"This name is not valid text. Choose another name."}
 	case len(name) > MaxNameBytes:
 		return &BadName{TooLong}
 	case name == "." || name == "..":
-		return &BadName{"“.” and “..” cannot be used as names. Rename the file and try again."}
+		return &BadName{"“.” and “..” cannot be used as names. Choose another name."}
 	case strings.Contains(name, "/"):
-		return &BadName{"A name cannot contain “/”. Rename the file and try again."}
+		return &BadName{"A name cannot contain “/”. Choose another name."}
 	case strings.ContainsFunc(name, unicode.IsControl):
-		return &BadName{"A name cannot contain line breaks, tabs or other control characters. Rename the file and try again."}
+		return &BadName{"A name cannot contain line breaks, tabs or other control characters. Choose another name."}
 	}
 	return nil
 }
 
-// pathIn is the storage path of the item called name directly in the place's top folder. ok is false for a name that
-// is not one plain segment ("", ".", "..", or one holding a "/", which only a misbehaving server could list): such a
-// name never becomes a path, so no name in the index can reach outside its place.
-func pathIn(p index.Place, name string) (file string, ok bool) {
-	if name == "" || name == "." || name == ".." || strings.Contains(name, "/") {
-		return "", false
-	}
-	return p.Folder + "/" + name, true
+// Existing says what an upload does when its name is taken by a file.
+type Existing string
+
+const (
+	// Ask refuses with a *Taken error, so the person can be asked "replace or keep both".
+	Ask Existing = ""
+	// Replace puts the file that is there into the trash and stores the upload under its name. The item keeps its id:
+	// it is the same file with new content.
+	Replace Existing = "replace"
+	// KeepBoth stores the upload under the first free name made by adding " (2)", " (3)" and so on to its own.
+	KeepBoth Existing = "keep-both"
+)
+
+// An Upload is a file just stored.
+type Upload struct {
+	index.Item
+	// Replaced is the file the upload replaced, now in the trash, or nil.
+	Replaced *index.TrashItem
 }
 
-// Item finds the item with id in the place's top folder, and nowhere else.
-func (d *Drive) Item(ctx context.Context, p index.Place, id int64) (index.Item, error) {
-	return d.index.TopItem(ctx, p.ID, id)
-}
-
-// Upload stores a new file called name in the place's top folder and returns it as the index now holds it. body must
-// hold exactly size bytes; they stream straight through to the storage in one PUT, which writes the whole file or
-// nothing, so a cut-off upload leaves nothing behind.
+// Upload stores a new file called name in a folder of the place (nil: its top folder) and returns it as the index now
+// holds it. body must hold exactly size bytes; they stream straight through to the storage in one PUT, which writes
+// the whole file or nothing, so a cut-off upload leaves nothing behind.
 //
-// An upload never replaces anything: a name that is taken, on the storage or by another upload still in flight, is
-// refused with ErrExists before any byte is sent.
-func (d *Drive) Upload(ctx context.Context, p index.Place, name string, body io.Reader, size int64) (index.Item, error) {
+// When the name is taken, existing decides: ask (a *Taken error before any byte is sent), replace a file, or keep both
+// under a new name. A folder is never replaced. Another upload of the same name still in flight is ErrBusy.
+func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, name string, body io.Reader, size int64, existing Existing) (Upload, error) {
 	if err := CheckName(name); err != nil {
-		return index.Item{}, err
+		return Upload{}, err
 	}
-	file, ok := pathIn(p, name)
+	dir, ok := folderPath(p, folder)
 	if !ok {
-		return index.Item{}, &BadName{"This name cannot be used. Rename the file and try again."} // CheckName refuses these first
+		return Upload{}, ErrGone
+	}
+	file, ok := pathIn(dir, name)
+	if !ok {
+		return Upload{}, &BadName{"This name cannot be used. Choose another name."} // CheckName refuses these first
 	}
 	release, ok := d.claim(file)
 	if !ok {
-		return index.Item{}, ErrExists
+		return Upload{}, ErrBusy
 	}
 	defer release()
 
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
-	_, err := d.storage.Stat(sctx, file)
+	there, err := d.storage.Stat(sctx, file)
 	cancel()
-	if err == nil {
-		return index.Item{}, ErrExists
+	var replacing bool
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+	case err != nil:
+		return Upload{}, storageError(err)
+	case existing == Replace && !there.Folder:
+		replacing = true
+	case existing == KeepBoth:
+		var releaseOther func()
+		name, releaseOther, err = d.freeName(ctx, dir, name, false)
+		if err != nil {
+			return Upload{}, err
+		}
+		defer releaseOther()
+		file, _ = pathIn(dir, name)
+	default:
+		return Upload{}, &Taken{Name: name, Folder: there.Folder}
 	}
-	if !errors.Is(err, storage.ErrNotFound) {
-		return index.Item{}, storageError(err)
+
+	var out Upload
+	if replacing {
+		// The file there goes to the trash first, and comes back if the upload fails. (With the hidden uploads folder,
+		// a later ticket, the upload is stored first and the two swap places at the end.)
+		replaced, undo, err := d.putAside(ctx, p, folder, file, there)
+		if err != nil {
+			return Upload{}, err
+		}
+		if replaced != nil {
+			out.Replaced = replaced
+			defer func() {
+				if out.Item.ID == 0 {
+					undo()
+				}
+			}()
+		}
 	}
 
 	// The upload's own length bounds it, and the person's leaving ends it; no other deadline applies.
@@ -113,41 +160,89 @@ func (d *Drive) Upload(ctx context.Context, p index.Place, name string, body io.
 	err = d.storage.Put(ctx, file, from, size)
 	switch {
 	case from.err != nil:
-		return index.Item{}, fmt.Errorf("%w: %w", ErrCutOff, from.err)
+		return Upload{}, fmt.Errorf("%w: %w", ErrCutOff, from.err)
 	case errors.Is(err, storage.ErrExists):
-		return index.Item{}, ErrExists
+		return Upload{}, &Taken{Name: name}
 	case errors.Is(err, storage.ErrNotFound):
-		return index.Item{}, ErrGone
+		// The folder is gone from the storage. A place's top folder is made again, so the next try works.
+		if err := d.ensureTop(context.WithoutCancel(ctx), p, folder); err != nil {
+			d.log.Error("a place's top folder could not be made again", "folder", p.Folder, "error", err)
+		}
+		return Upload{}, ErrGone
 	case errors.Is(err, storage.ErrFull):
-		return index.Item{}, ErrFull
+		return Upload{}, ErrFull
 	case err != nil:
-		return index.Item{}, storageError(err)
+		return Upload{}, storageError(err)
 	}
 
 	// Size and time as the storage records them. If it cannot say right now, the file is there all the same: use what
 	// the Drive knows, and the next listing corrects it.
-	seen := index.Seen{Name: name, Size: size, Changed: time.Now().UTC()}
+	seen := index.Seen{Name: name, Size: size, Changed: d.now().UTC()}
 	sctx, cancel = context.WithTimeout(ctx, storageTimeout)
 	if e, err := d.storage.Stat(sctx, file); err == nil && !e.Folder {
 		seen.Size, seen.Changed = e.Size, e.Changed
 	}
 	cancel()
-	return d.index.PutTopItem(ctx, p.ID, seen)
+	d.changed(folderKey{p.ID, folderID(folder)})
+	it, err := d.index.PutItem(ctx, p.ID, folderID(folder), seen)
+	if err != nil {
+		return Upload{}, err
+	}
+	out.Item = it
+	return out, nil
 }
 
-// claim marks the storage path file as being written. ok is false when another upload holds it.
-func (d *Drive) claim(file string) (release func(), ok bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.writing[file] {
-		return nil, false
+// freeName finds a name in the folder at dir that nothing on the storage or in flight uses: name with " (2)", " (3)"
+// and so on added before its extension (at the end, for a folder), and holds it until release is called.
+func (d *Drive) freeName(ctx context.Context, dir, name string, folder bool) (free string, release func(), err error) {
+	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
+	entries, err := d.storage.List(sctx, dir)
+	cancel()
+	if errors.Is(err, storage.ErrNotFound) {
+		return "", nil, ErrGone
 	}
-	d.writing[file] = true
-	return func() {
-		d.mu.Lock()
-		delete(d.writing, file)
-		d.mu.Unlock()
-	}, true
+	if err != nil {
+		return "", nil, storageError(err)
+	}
+	taken := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		taken[e.Name] = true
+	}
+	for n := 2; n < 1000; n++ {
+		candidate := numbered(name, n, folder)
+		p, ok := pathIn(dir, candidate)
+		if !ok || taken[candidate] {
+			continue
+		}
+		if release, ok := d.claim(p); ok {
+			return candidate, release, nil
+		}
+	}
+	return "", nil, &Taken{Name: name, Folder: folder}
+}
+
+// numberedSuffix is a number in brackets at the end of a name's stem, as numbered adds it: "Report (2)".
+var numberedSuffix = regexp.MustCompile(` \(([1-9][0-9]{0,2})\)$`)
+
+// numbered is name with " (n)" added: before the extension of a file ("Report.pdf" → "Report (2).pdf"), at the end of
+// a folder's name or of a file name without one (".bashrc" → ".bashrc (2)"). A number numbered added before is
+// replaced rather than added to ("Report (2).pdf" → "Report (3).pdf"); larger numbers, such as a year, stay. The
+// stem is shortened when the result would be longer than MaxNameBytes.
+func numbered(name string, n int, folder bool) string {
+	stem, ext := name, ""
+	if i := strings.LastIndexByte(name, '.'); !folder && i > 0 {
+		stem, ext = name[:i], name[i:]
+	}
+	stem = numberedSuffix.ReplaceAllString(stem, "")
+	suffix := " (" + strconv.Itoa(n) + ")"
+	if len(suffix)+len(ext) >= MaxNameBytes {
+		stem, ext = stem+ext, "" // an extension too long to keep whole is part of the name
+	}
+	for len(stem)+len(suffix)+len(ext) > MaxNameBytes {
+		_, size := utf8.DecodeLastRuneInString(stem)
+		stem = stem[:len(stem)-size]
+	}
+	return stem + suffix + ext
 }
 
 // bodyReader keeps the first error reading an upload's body, so a person's dropped connection is told apart from
@@ -170,7 +265,7 @@ func (d *Drive) Download(ctx context.Context, p index.Place, it index.Item) (*st
 	if it.Folder {
 		return nil, ErrNotAFile
 	}
-	file, ok := pathIn(p, it.Name)
+	file, ok := itemPath(p, it)
 	if !ok {
 		return nil, ErrGone
 	}
