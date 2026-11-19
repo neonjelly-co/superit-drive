@@ -78,6 +78,7 @@ type (
 		Size     *int64  `json:"size"`
 		Changed  *string `json:"changed"`
 		Replaced bool    `json:"replaced"` // uploads only
+		Opens    bool    `json:"opens"`    // files that open in the browser
 		// Listings only: what the person may do with it, and who can see it.
 		Can    []string    `json:"can"`
 		SeenBy *seenByJSON `json:"seenBy"`

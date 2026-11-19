@@ -704,6 +704,7 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 			"POST /api/places/{place}/items/{item}/files":             {"POST", at("/api/places/%d/items/%d/files?name=Planted.txt&existing=replace", x.place, item), "x"},
 			"POST /api/places/{place}/items/{item}/folders":           {"POST", at("/api/places/%d/items/%d/folders", x.place, item), `{"name":"Planted"}`},
 			"GET /api/places/{place}/items/{item}/download":           {"GET", downloadPath(x.place, item), ""},
+			"GET /api/places/{place}/items/{item}/open":               {"GET", openPath(x.place, item), ""},
 			"POST /api/places/{place}/items/{item}/rename":            {"POST", at("/api/places/%d/items/%d/rename", x.place, item), `{"name":"Renamed"}`},
 			"POST /api/places/{place}/items/{item}/move":              {"POST", at("/api/places/%d/items/%d/move", x.place, item), fmt.Sprintf(`{"to":%d}`, x.bakery.ID)},
 			"GET /api/places/{place}/items/{item}/move":               {"GET", at("/api/places/%d/items/%d/move?to=%d", x.place, item, x.bakery.ID), ""},
@@ -728,8 +729,8 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 		}
 		return c.Do(t, t2.method, t2.path, body)
 	}
-	if n := len(tries(0)) + len(uploadTries("")); n != 20 {
-		t.Fatalf("the test tries %d routes that take an item or an upload; internal/server/server_test.go lists 20", n)
+	if n := len(tries(0)) + len(uploadTries("")); n != 21 {
+		t.Fatalf("the test tries %d routes that take an item or an upload; internal/server/server_test.go lists 21", n)
 	}
 	none := tries(nowhere)
 	notGiven := map[string]int64{

@@ -77,6 +77,9 @@ func (s *Server) routes() []route {
 		// Transfers: what moves a file's bytes (transfers.go). A download is of a file, or of a folder (or some items
 		// in it) as one zip; an upload is in one request, or resumable: started, then a part per request, then finished.
 		{pattern: "GET /api/places/{place}/items/{item}/download", action: access.Download, place: "place", item: "item", serve: s.download},
+		// Opening a file in the browser is reading it, as a download is: only the kinds on a fixed list are shown there
+		// (opening.go), and anything else is sent as a download.
+		{pattern: "GET /api/places/{place}/items/{item}/open", action: access.Download, place: "place", item: "item", serve: s.open},
 		{pattern: "GET /api/places/{place}/zip", action: access.Download, place: "place", serve: s.zip},
 		{pattern: "GET /api/places/{place}/items/{item}/zip", action: access.Download, place: "place", item: "item", serve: s.zip},
 		{pattern: "POST /api/places/{place}/files", action: access.Upload, place: "place", serve: s.upload},
@@ -200,6 +203,8 @@ type itemJSON struct {
 	Kind    string     `json:"kind"`              // "folder" or "file"
 	Size    *int64     `json:"size,omitempty"`    // bytes, files only
 	Changed *time.Time `json:"changed,omitempty"` // when the storage last saw it change
+	// Opens is true for a file that opens in the browser (…/open shows it); any other file is downloaded.
+	Opens bool `json:"opens,omitempty"`
 }
 
 // folderJSON is a folder in a path, such as the breadcrumb.
@@ -215,6 +220,7 @@ func itemOf(it index.Item) itemJSON {
 	} else {
 		size := it.Size
 		j.Size = &size
+		j.Opens = opensInTheBrowser(it.Name)
 	}
 	if !it.Changed.IsZero() && it.Changed.Unix() > 0 {
 		changed := it.Changed

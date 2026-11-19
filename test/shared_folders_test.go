@@ -534,6 +534,7 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 			"POST /api/places/{place}/folders":                        {"POST", at("/api/places/%d/folders", place), `{"name":"Planted"}`},
 			"POST /api/places/{place}/items/{item}/folders":           {"POST", at("/api/places/%d/items/%d/folders", place, folder), `{"name":"Planted"}`},
 			"GET /api/places/{place}/items/{item}/download":           {"GET", downloadPath(place, file), ""},
+			"GET /api/places/{place}/items/{item}/open":               {"GET", openPath(place, file), ""},
 			"POST /api/places/{place}/items/{item}/rename":            {"POST", at("/api/places/%d/items/%d/rename", place, file), `{"name":"Renamed.xlsx"}`},
 			"POST /api/places/{place}/items/{item}/move":              {"POST", at("/api/places/%d/items/%d/move", place, file), `{"to":null}`},
 			"GET /api/places/{place}/items/{item}/move":               {"GET", at("/api/places/%d/items/%d/move?to=%d", place, file, folder), ""},

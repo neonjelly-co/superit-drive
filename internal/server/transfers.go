@@ -111,8 +111,8 @@ func (d deadlineReader) Read(p []byte) (int, error) {
 	return d.r.Read(p)
 }
 
-// download sends a file's bytes under its original name, as an attachment, so the browser saves it rather than
-// showing it. (Opening safe kinds of file in the browser comes later.)
+// download sends a file's bytes under its original name, as an attachment of type application/octet-stream, so the
+// browser saves it rather than showing it, whatever kind of file it is.
 //
 // A Range asking for one part of the file (a video seeking, a download resuming) is answered with that part (206); a
 // part that starts after the end, with 416. With If-Range (the ETag or Last-Modified of an earlier answer, as a
@@ -127,6 +127,26 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request, c call) {
 		s.refuse(w, r, http.StatusNotFound, "This is a folder. Download it as a zip instead.")
 		return
 	}
+	s.sendFile(w, r, c, false)
+}
+
+// open sends a file's bytes to be shown in the browser, when its kind is one that opens there (opensInBrowser, by the
+// extension of its name), with the content type and policy the list gives it. Any other file is sent exactly as
+// download sends it: as an attachment, to be saved. Range and If-Range work as for a download, so a video or a sound
+// seeks.
+//
+//	GET /api/places/{place}/items/{item}/open
+func (s *Server) open(w http.ResponseWriter, r *http.Request, c call) {
+	if c.item.Folder {
+		s.refuse(w, r, http.StatusNotFound, "This is a folder. Open it in the list instead.")
+		return
+	}
+	s.sendFile(w, r, c, true)
+}
+
+// sendFile sends the file c.item, to be shown in the browser when inline is true and its kind opens there, and as an
+// attachment otherwise. It waits its turn for a transfer slot, as every download does.
+func (s *Server) sendFile(w http.ResponseWriter, r *http.Request, c call, inline bool) {
 	release, ok := s.waitTurn(w, r)
 	if !ok {
 		return
@@ -152,7 +172,13 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request, c call) {
 
 	h := w.Header()
 	h.Set("Content-Type", "application/octet-stream")
-	h.Set("Content-Disposition", attachment(c.item.Name))
+	h.Set("Content-Disposition", disposition("attachment", c.item.Name))
+	h.Set("Content-Security-Policy", sandboxed)
+	if o, ok := openingOf(c.item.Name); inline && ok {
+		h.Set("Content-Type", o.contentType)
+		h.Set("Content-Disposition", disposition("inline", c.item.Name))
+		h.Set("Content-Security-Policy", o.policy)
+	}
 	h.Set("Cache-Control", "private, no-store")
 	h.Set("Accept-Ranges", "bytes")
 	if f.ETag != "" {
@@ -221,13 +247,14 @@ func rangeOf(h string) *storage.Range {
 	return &storage.Range{First: first, Last: last}
 }
 
-// attachment is a Content-Disposition value that has the browser save the file under name. A name that is not plain
-// ASCII is sent in the RFC 6266 filename* form, which every current browser reads.
-func attachment(name string) string {
-	if v := mime.FormatMediaType("attachment", map[string]string{"filename": name}); v != "" {
+// disposition is a Content-Disposition value: kind is "attachment" (the browser saves the file under name) or
+// "inline" (it shows it, and saves it under name when asked to). A name that is not plain ASCII is sent in the RFC 6266
+// filename* form, which every current browser reads.
+func disposition(kind, name string) string {
+	if v := mime.FormatMediaType(kind, map[string]string{"filename": name}); v != "" {
 		return v
 	}
-	return "attachment"
+	return kind
 }
 
 // zip sends a folder (the place's top folder, or a folder item), with everything in it, as one zip, streamed: the
@@ -267,7 +294,8 @@ func (s *Server) zip(w http.ResponseWriter, r *http.Request, c call) {
 	headers := func() {
 		h := w.Header()
 		h.Set("Content-Type", "application/zip")
-		h.Set("Content-Disposition", attachment(name+".zip"))
+		h.Set("Content-Disposition", disposition("attachment", name+".zip"))
+		h.Set("Content-Security-Policy", sandboxed)
 		h.Set("Cache-Control", "private, no-store")
 	}
 	if r.Method == http.MethodHead {
