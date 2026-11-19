@@ -1,0 +1,36 @@
+# Superit Drive. `make help` lists the targets.
+
+BIN     := bin/superit-drive
+IMAGE   := superit-drive:dev
+STORAGE := superit-drive-dev-storage
+
+.PHONY: help ui build test test-short image dev-storage run dev-ui
+
+help:
+	@grep -E '^[a-z-]+:.*## ' Makefile | sed 's/:.*## /\t/'
+
+ui: ## Build the interface into web/dist (needs Bun)
+	cd web && bun install --frozen-lockfile && bun run build
+
+build: ui ## Build the Drive, interface included, into bin/
+	CGO_ENABLED=0 go build -trimpath -o $(BIN) ./cmd/superit-drive
+
+test: ## Run every test (needs Docker running)
+	go test ./...
+
+test-short: ## Run only the tests that need no Docker
+	go test -short ./...
+
+image: ## Build the container image superit-drive:dev
+	docker build -t $(IMAGE) .
+
+dev-storage: ## Start a stand-in Drive storage (Apache mod_dav) on 127.0.0.1:8081
+	docker build -q -t superit-drive-test-webdav test/webdav
+	docker rm -f $(STORAGE) >/dev/null 2>&1 || true
+	docker run -d --name $(STORAGE) -p 127.0.0.1:8081:80 superit-drive-test-webdav
+
+run: build ## Run the Drive on 127.0.0.1:8080 with the settings in dev/drive.env
+	set -a && . ./dev/drive.env && set +a && ./$(BIN)
+
+dev-ui: ## Serve the interface with hot reload on :5173, signed in as DEV_USER_ID from dev/drive.env
+	set -a && . ./dev/drive.env && set +a && cd web && bun run dev

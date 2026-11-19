@@ -1,0 +1,10 @@
+# Built files
+/bin/
+/web/dist/*
+!/web/dist/.gitkeep
+/web/node_modules/
+
+# Local run (`make run`)
+/dev/data/
+
+.DS_Store
