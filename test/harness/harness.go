@@ -75,7 +75,9 @@ func setup() error {
 	}
 	shared.dir = dir
 	shared.binary = filepath.Join(dir, "superit-drive")
-	build := exec.Command("go", "build", "-o", shared.binary, "github.com/neonjelly-co/superit-drive/cmd/superit-drive")
+	// The build tag testclock lets a test move the Drive's clock forward (TestClockShift); nothing else differs from
+	// the Drive that is released.
+	build := exec.Command("go", "build", "-tags", "testclock", "-o", shared.binary, "github.com/neonjelly-co/superit-drive/cmd/superit-drive")
 	if out, err := build.CombinedOutput(); err != nil {
 		return fmt.Errorf("building the Drive failed: %v\n%s", err, out)
 	}
@@ -134,10 +136,16 @@ type Drive struct {
 	Address string
 
 	membersFile string
+	env         map[string]string
 	cmd         *exec.Cmd
 	logs        *logBuffer
+	earlierLogs string // what the Drive printed before a Restart
 	exited      chan struct{}
 }
+
+// TestClockShift is the environment variable that moves the clock of the Drive the harness builds forward by a Go
+// duration, such as "744h" (internal/clock). Pass it to Restart to see what the Drive does 31 days later.
+const TestClockShift = "SUPERIT_DRIVE_TEST_CLOCK_SHIFT"
 
 // Start starts a Drive whose member list holds members. It stops when the test ends.
 func Start(t *testing.T, members ...Member) *Drive {
@@ -149,6 +157,26 @@ func Start(t *testing.T, members ...Member) *Drive {
 func StartWith(t *testing.T, o Options) *Drive {
 	t.Helper()
 	d := launch(t, o)
+	d.waitUntilListening(t)
+	return d
+}
+
+// Restart stops the Drive and starts it again with the same data folder, storage folder, member list and settings,
+// changed by env (an empty value leaves a variable out), as a new version or a new setting would. Its URL changes.
+func (d *Drive) Restart(t *testing.T, env map[string]string) {
+	t.Helper()
+	d.stop()
+	d.earlierLogs += d.logs.String()
+	for k, v := range env {
+		d.env[k] = v
+	}
+	d.URL = ""
+	d.run(t)
+	d.waitUntilListening(t)
+}
+
+func (d *Drive) waitUntilListening(t *testing.T) {
+	t.Helper()
 	deadline := time.After(15 * time.Second)
 	for d.URL == "" {
 		select {
@@ -157,12 +185,11 @@ func StartWith(t *testing.T, o Options) *Drive {
 		case <-deadline:
 			t.Fatalf("the Drive did not start within 15 seconds:\n%s", d.Logs())
 		case <-time.After(20 * time.Millisecond):
-			if m := listening.FindStringSubmatch(d.Logs()); m != nil {
+			if m := listening.FindStringSubmatch(d.logs.String()); m != nil {
 				d.URL = "http://" + m[1]
 			}
 		}
 	}
-	return d
 }
 
 // StartFailing starts a Drive that is expected to refuse to start, and returns what it printed.
@@ -250,8 +277,6 @@ func launch(t *testing.T, o Options) *Drive {
 		Secret:      randomHex(32),
 		membersFile: filepath.Join(dir, "members", "members.json"),
 		Storage:     &Storage{root: shared.storage.url + "/" + folder, user: storageUser, password: storagePassword},
-		logs:        &logBuffer{},
-		exited:      make(chan struct{}),
 	}
 	if err := os.MkdirAll(filepath.Dir(d.membersFile), 0o755); err != nil {
 		t.Fatal(err)
@@ -274,9 +299,25 @@ func launch(t *testing.T, o Options) *Drive {
 		env[k] = v
 	}
 	d.Address = env["DRIVE_ADDRESS"]
+	d.env = env
+	d.run(t)
+	t.Cleanup(func() {
+		d.stop()
+		if t.Failed() {
+			t.Logf("the Drive's log:\n%s", d.Logs())
+		}
+	})
+	return d
+}
+
+// run starts the Drive's process with d.env.
+func (d *Drive) run(t *testing.T) {
+	t.Helper()
+	d.logs = &logBuffer{}
+	d.exited = make(chan struct{})
 	d.cmd = exec.Command(shared.binary)
 	d.cmd.Env = []string{} // only what is set here: the Drive must start from its settings alone
-	for k, v := range env {
+	for k, v := range d.env {
 		if v != "" {
 			d.cmd.Env = append(d.cmd.Env, k+"="+v)
 		}
@@ -285,14 +326,8 @@ func launch(t *testing.T, o Options) *Drive {
 	if err := d.cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = d.cmd.Wait(); close(d.exited) }()
-	t.Cleanup(func() {
-		d.stop()
-		if t.Failed() {
-			t.Logf("the Drive's log:\n%s", d.Logs())
-		}
-	})
-	return d
+	cmd, exited := d.cmd, d.exited
+	go func() { _ = cmd.Wait(); close(exited) }()
 }
 
 func (d *Drive) stop() {
@@ -310,8 +345,8 @@ func (d *Drive) stop() {
 	}
 }
 
-// Logs is everything the Drive printed so far.
-func (d *Drive) Logs() string { return d.logs.String() }
+// Logs is everything the Drive printed so far, before restarts included.
+func (d *Drive) Logs() string { return d.earlierLogs + d.logs.String() }
 
 // SetMembers replaces the member list file the way the daemon does: write a new file, then rename it over the old one.
 func (d *Drive) SetMembers(t *testing.T, members ...Member) {
