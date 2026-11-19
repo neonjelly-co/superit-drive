@@ -65,8 +65,13 @@ type Mailer struct {
 // New makes a Mailer that sends through the mail server s; hello is the name the Drive gives itself to it (the host of
 // DRIVE_ADDRESS). Run must run for anything to be sent.
 func New(s settings.Mail, hello string, log *slog.Logger) *Mailer {
-	if hello == "" || strings.ContainsFunc(hello, func(r rune) bool { return r <= ' ' || r > unicode.MaxASCII }) {
+	switch ip := net.ParseIP(hello); {
+	case hello == "" || strings.ContainsFunc(hello, func(r rune) bool { return r <= ' ' || r > unicode.MaxASCII }):
 		hello = "localhost"
+	case ip != nil && ip.To4() != nil:
+		hello = "[" + ip.String() + "]" // an address literal, as SMTP writes one (RFC 5321)
+	case ip != nil:
+		hello = "[IPv6:" + ip.String() + "]"
 	}
 	m := &Mailer{s: s, hello: hello, log: log, timeout: Timeout}
 	if s.Host != "" {
