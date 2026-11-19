@@ -7,10 +7,15 @@ import { Dialog } from "./dialog";
 
 type Props = {
 	placeId: number;
+	/**
+	 * Where the tree starts: the place's top folder (null), called placeName, or, for someone given part of the place,
+	 * the highest folder they can open.
+	 */
+	root: FolderRef | null;
 	/** The place's name as people see it: "My files", or a shared folder's name. */
 	placeName: string;
 	item: Item;
-	/** The folders from the top down to the one the item is in now; empty for the top folder. */
+	/** The folders from the root (or the one below the top folder) down to the one the item is in now; empty for the top folder. */
 	path: FolderRef[];
 	/** Moves it; resolves when done, rejects with an Error whose message is for the person. */
 	onMove: (to: FolderRef | null) => Promise<unknown>;
@@ -20,13 +25,14 @@ type Props = {
 /**
  * The Move dialog: the place's folder tree, opened one level at a time as the person goes down it (each level is
  * listed from the Drive storage as it is opened). A folder cannot be moved into itself or a folder inside it, so the
- * folder being moved is shown but cannot be chosen or opened. Moves stay inside the place, so its tree is all there is
- * (moving from "My files" into a shared folder comes with its warning, later).
+ * folder being moved is shown but cannot be chosen or opened, and only folders the person may add to can be chosen.
+ * Moves stay inside the place, so its tree is all there is (moving from "My files" into a shared folder comes with its
+ * warning, later); for someone given part of a place, the part they were given.
  */
-export function MoveDialog({ placeId, placeName, item, path, onMove, onClose }: Props) {
+export function MoveDialog({ placeId, root, placeName, item, path, onMove, onClose }: Props) {
 	const here = path.at(-1)?.id ?? null;
 	// The way down to where the item is now starts open, so the person sees it.
-	const [open, setOpen] = useState<Set<number | null>>(() => new Set([null, ...path.map((f) => f.id)]));
+	const [open, setOpen] = useState<Set<number | null>>(() => new Set([root?.id ?? null, ...path.map((f) => f.id)]));
 	const [dest, setDest] = useState<FolderRef | null | undefined>(undefined);
 	const [problem, setProblem] = useState<string>();
 	const [busy, setBusy] = useState(false);
@@ -74,7 +80,7 @@ export function MoveDialog({ placeId, placeName, item, path, onMove, onClose }: 
 			}
 		>
 			<ul aria-label="Folders" className="max-h-72 overflow-auto rounded-lg border border-border py-1 text-sm">
-				<FolderNode {...node} folder={null} depth={0} />
+				<FolderNode {...node} folder={root} depth={0} />
 			</ul>
 			{problem && (
 				<p role="alert" className="mt-3 text-sm text-destructive">
@@ -96,6 +102,8 @@ type NodeProps = {
 	choose: (f: FolderRef | null) => void;
 	/** null: the place's top folder. */
 	folder: FolderRef | null;
+	/** Whether the person may put things into it, as its folder's list said; the tree's root asks its own list. */
+	canPut?: boolean;
 	depth: number;
 };
 
@@ -107,11 +115,18 @@ function FolderNode(props: NodeProps) {
 	const listing = useQuery({
 		queryKey: ["items", placeId, id],
 		queryFn: () => api.list(placeId, id),
-		enabled: isOpen,
+		enabled: isOpen || (depth === 0 && !isMoving),
 	});
 	const children = listing.data?.items.filter((i) => i.kind === "folder") ?? [];
 	const name = folder?.name ?? placeName;
-	const note = isMoving ? "the folder being moved" : id === here ? "where it is now" : undefined;
+	const canPut = depth === 0 ? (listing.data?.can.includes("upload") ?? false) : (props.canPut ?? false);
+	const note = isMoving
+		? "the folder being moved"
+		: id === here
+			? "where it is now"
+			: !canPut && (depth === 0 ? listing.data !== undefined : true)
+				? "you cannot add to it"
+				: undefined;
 	const Icon = isOpen ? FolderOpen : Folder;
 
 	return (
@@ -133,7 +148,7 @@ function FolderNode(props: NodeProps) {
 				<button
 					type="button"
 					onClick={() => choose(folder)}
-					disabled={isMoving}
+					disabled={isMoving || !canPut}
 					aria-pressed={chosen === id}
 					className={`flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pr-2 pl-1 text-left disabled:text-muted-foreground ${chosen === id ? "font-semibold" : "hover:bg-muted/60"}`}
 				>
@@ -148,7 +163,13 @@ function FolderNode(props: NodeProps) {
 					{listing.error && <Line depth={depth + 1}>{listing.error.message}</Line>}
 					{listing.data && children.length === 0 && depth === 0 && <Line depth={depth + 1}>No folders here yet.</Line>}
 					{children.map((c) => (
-						<FolderNode key={c.id} {...props} folder={{ id: c.id, name: c.name }} depth={depth + 1} />
+						<FolderNode
+							key={c.id}
+							{...props}
+							folder={{ id: c.id, name: c.name }}
+							canPut={c.can?.includes("upload") ?? false}
+							depth={depth + 1}
+						/>
 					))}
 				</ul>
 			)}

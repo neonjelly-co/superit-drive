@@ -8,7 +8,9 @@ export type Me = {
 	project: string;
 };
 
-/** What the Drive may let a person do in a place (internal/access). It decides again on every request. */
+/**
+ * What the Drive may let a person do in a place or with an item (internal/access). It decides again on every request.
+ */
 export type Action =
 	| "list"
 	| "download"
@@ -20,12 +22,19 @@ export type Action =
 	| "see-trash"
 	| "restore"
 	| "see-access"
+	| "share"
 	| "manage-access"
 	| "delete-shared-folder"
 	| "restore-shared-folder";
 
-/** A role on a shared folder. Project admins are managers of every shared folder. */
+/**
+ * A role that can be given: viewer or editor on a file or folder, and also manager on a shared folder as a whole.
+ * Project admins are managers of every shared folder.
+ */
 export type Role = "viewer" | "editor" | "manager";
+
+/** Someone's role at an item: what was given, or "owner" in their own My files. */
+export type RoleAt = Role | "owner";
 
 /**
  * A place the person can open: their own "My files", or a shared folder (owned by the project) with their role on it.
@@ -50,19 +59,31 @@ export type DeletedPlace = {
 /** A member of the project, from the member list. */
 export type Member = { userId: string; email: string; displayName: string; role: "admin" | "member" };
 
-/** Someone with a role on a shared folder. */
-export type Person = {
-	userId: string;
+/** Who can see an item, for the list's sentence: everyone in the project, or these members (by user id). */
+export type SeenBy = { everyone: boolean; members: string[] };
+
+/** One line of "who can see this", for an item or a shared folder as a whole. */
+export type Access = {
+	/** Everyone in the project; otherwise one member. */
+	everyone?: boolean;
+	userId?: string;
 	email?: string;
 	displayName?: string;
-	role: Role;
-	/** Given on this shared folder, so it can be taken away. */
+	role: RoleAt;
+	/** Whose My files it is, or a project admin (a manager of every shared folder): neither given nor taken away. */
+	owner?: boolean;
+	admin?: boolean;
+	/** Given right here, so whoever may share it can change it or take it away here. */
 	given: boolean;
-	/** Holds the admin role on the project: a manager of every shared folder. */
-	admin: boolean;
-	/** No longer in the project. */
+	/** Given on a folder above, or on the shared folder as a whole: `from` is that folder when the person can open it. */
+	inherited?: boolean;
+	from?: FolderRef;
+	/** Given to someone no longer in the project. */
 	former?: boolean;
 };
+
+/** Who access is given to: everyone in the project, or one member. */
+export type Grantee = { everyone: true } | { userId: string };
 
 export type Item = {
 	id: number;
@@ -72,13 +93,19 @@ export type Item = {
 	size?: number;
 	/** When the storage last saw it change (ISO 8601). */
 	changed?: string;
+	/** In a listing: what the person may do with it, and who can see it. */
+	can?: Action[];
+	seenBy?: SeenBy;
 };
 
 /** A folder in a path, such as the breadcrumb. */
 export type FolderRef = { id: number; name: string };
 
-/** What is in a folder, and the folders from the top of the place down to it (empty for the top folder). */
-export type Listing = { items: Item[]; path: FolderRef[] };
+/**
+ * What is in a folder, and the folders down to it that the person can open (empty for the top folder): from the place's
+ * top folder when `fromTop`, otherwise from the folder they were given. `role` and `can` are theirs in this folder.
+ */
+export type Listing = { items: Item[]; path: FolderRef[]; fromTop: boolean; role: RoleAt | ""; can: Action[] };
 
 /** An item in the trash. */
 export type TrashItem = {
@@ -132,6 +159,14 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 	return data as T;
 }
 
+const accessPath = (placeId: number, itemId: number | null) =>
+	itemId === null ? `/api/places/${placeId}/access` : `/api/places/${placeId}/items/${itemId}/access`;
+
+const granteePath = (placeId: number, itemId: number | null, to: Grantee) =>
+	"everyone" in to
+		? `${accessPath(placeId, itemId)}/everyone`
+		: `${accessPath(placeId, itemId)}/members/${encodeURIComponent(to.userId)}`;
+
 /** The address of a folder of a place: the place itself for its top folder (null). */
 const folderPath = (placeId: number, folderId: number | null) =>
 	folderId === null ? `/api/places/${placeId}` : `/api/places/${placeId}/items/${folderId}`;
@@ -183,12 +218,15 @@ export const api = {
 	/** The shared folders in the trash that the person may restore. */
 	deletedSharedFolders: () => call<{ places: DeletedPlace[] }>("GET", "/api/places/deleted").then((r) => r.places),
 	restoreSharedFolder: (placeId: number) => call<Place>("POST", `/api/places/${placeId}/restore`),
-	/** Who has access to a shared folder. */
-	access: (placeId: number) => call<{ people: Person[] }>("GET", `/api/places/${placeId}/access`).then((r) => r.people),
-	giveAccess: (placeId: number, userId: string, role: Role) =>
-		call<{ people: Person[] }>("PUT", `/api/places/${placeId}/access/${encodeURIComponent(userId)}`, { role }).then((r) => r.people),
-	takeAccess: (placeId: number, userId: string) =>
-		call<{ people: Person[] }>("DELETE", `/api/places/${placeId}/access/${encodeURIComponent(userId)}`).then((r) => r.people),
+	/** Who can see an item (or, with itemId null, a shared folder as a whole). */
+	access: (placeId: number, itemId: number | null) =>
+		call<{ access: Access[] }>("GET", accessPath(placeId, itemId)).then((r) => r.access),
+	/** Gives a role on an item (or a shared folder as a whole), in place of what they had there. */
+	giveAccess: (placeId: number, itemId: number | null, to: Grantee, role: Role) =>
+		call<{ access: Access[] }>("PUT", granteePath(placeId, itemId, to), { role }).then((r) => r.access),
+	/** Takes away what was given right there; access from a folder above stays. */
+	takeAccess: (placeId: number, itemId: number | null, from: Grantee) =>
+		call<{ access: Access[] }>("DELETE", granteePath(placeId, itemId, from)).then((r) => r.access),
 	usage: () => call<Usage>("GET", "/api/usage"),
 	/** What is in a folder of a place (null: its top folder). */
 	list: (placeId: number, folderId: number | null) => call<Listing>("GET", `${folderPath(placeId, folderId)}/items`),

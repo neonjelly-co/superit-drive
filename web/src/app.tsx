@@ -4,7 +4,7 @@ import { type DragEvent, type MouseEvent, useCallback, useEffect, useState } fro
 import { ApiError, api, type DeletedPlace, type FolderRef, type Item, type Place, type TrashItem } from "./api";
 import { Button } from "./components/button";
 import { ConflictDialog } from "./components/conflict-dialog";
-import { DetailsPanel } from "./components/details-panel";
+import { DetailsPanel, whereOf } from "./components/details-panel";
 import { ItemList } from "./components/item-list";
 import { MoveDialog } from "./components/move-dialog";
 import { NameDialog } from "./components/name-dialog";
@@ -25,41 +25,58 @@ const isShared = (p: Place): p is SharedFolder => p.kind === "shared-folder";
 /** A place's name as people see it. */
 const nameOfPlace = (p: Place) => (p.kind === "my-files" ? "My files" : p.name);
 
-const ROLE_SENTENCE = { viewer: "You can open and download.", editor: "You are an editor.", manager: "You are a manager." };
+const ROLE_SENTENCE: Record<string, string> = {
+	viewer: "You can open and download.",
+	editor: "You are an editor: you can also upload, rename, move, delete and share.",
+	manager: "You are a manager.",
+};
 
 let nextNotice = 1;
 
 /**
  * The Drive as a member sees it: layout D of the prototype. A sidebar on the left, the list in the middle, and the
- * details panel on the right, which opens when one item is selected (or, for a shared folder itself, from "Who can see
- * this"). The list shows a folder of "My files" or of a shared folder (the address says which), or the trash of every
- * place. Files are uploaded into the folder being looked at, with the sidebar's Upload button or by dragging them onto
- * the list. Only what the Drive says the person may do in the place is offered.
+ * details panel on the right, which opens when one item is selected (or, for the folder being looked at, from "Who can
+ * see this"). The list shows a folder of "My files" or of a shared folder (the address says which), or the trash of
+ * every place. Files are uploaded into the folder being looked at, with the sidebar's Upload button or by dragging
+ * them onto the list. Only what the Drive says the person may do there is offered.
+ *
+ * A folder shared with the person from a place they cannot otherwise open (someone's My files, a shared folder they
+ * have no role on as a whole) opens at its address, `/?place=…&folder=…`: the place is not in the sidebar, and the
+ * breadcrumb starts at the highest folder they can open. Finding such folders is "Shared with me", a later ticket.
  */
 export function App() {
 	const queryClient = useQueryClient();
 	const me = useQuery({ queryKey: ["me"], queryFn: api.me });
 	const places = useQuery({ queryKey: ["places"], queryFn: api.places });
+	const members = useQuery({ queryKey: ["members"], queryFn: api.members });
 	const [where, go] = useWhere();
 	const myFiles = places.data?.find((p) => p.kind === "my-files");
 	const sharedFolders = places.data?.filter(isShared) ?? [];
 	const place =
 		where.view !== "files" ? undefined : where.place === null ? myFiles : places.data?.find((p) => p.id === where.place);
-	const placeId = place?.id;
+	// Part of a place: a folder of a place the person cannot open as a whole, which may have been shared with them.
+	const inPart =
+		where.view === "files" && where.place !== null && where.folder !== null && places.data !== undefined && !place;
+	const placeId = place?.id ?? (inPart && where.view === "files" ? (where.place ?? undefined) : undefined);
 	const placeName = place ? nameOfPlace(place) : "My files";
-	const can = place?.can ?? [];
-	// A shared folder that is not there: never was, went to the trash, or the person has no role on it. The Drive
-	// answers all three the same, and so does the page.
-	const missingPlace = where.view === "files" && where.place !== null && places.data !== undefined && !place;
 	const folderId = where.view === "files" ? where.folder : null;
 
 	const listing = useQuery({
 		queryKey: ["items", placeId, folderId],
 		queryFn: () => api.list(placeId as number, folderId),
 		enabled: placeId !== undefined && where.view === "files",
+		retry: (n, e) => !(e instanceof ApiError && e.status === 404) && n < 3,
 	});
 	const items = listing.data?.items;
 	const path = listing.data?.path ?? [];
+	const fromTop = listing.data?.fromTop ?? place !== undefined;
+	// What the person may do in this folder: the Drive says, for each folder, as it lists it.
+	const can = listing.data?.can ?? [];
+	const listingGone = listing.error instanceof ApiError && listing.error.status === 404;
+	// A place, or a folder in part of one, that is not there: never was, went to the trash, or the person has no access
+	// to it. The Drive answers all of them the same, and so does the page.
+	const missingPlace =
+		where.view === "files" && where.place !== null && places.data !== undefined && !place && (!inPart || listingGone);
 	const inFiles = where.view === "files" && placeId !== undefined && listing.data !== undefined;
 	const uploads = useUploads(placeId, folderId, items);
 
@@ -98,7 +115,8 @@ export function App() {
 	const openFolder = (folder: FolderRef | Item | null) =>
 		goTo({ view: "files", place: where.view === "files" ? where.place : null, folder: folder?.id ?? null });
 
-	const here = path.at(-1)?.name ?? placeName;
+	const current = path.at(-1);
+	const here = current?.name ?? placeName;
 	const project = me.data?.project;
 	useEffect(() => {
 		const name = where.view === "trash" ? "Trash" : here;
@@ -132,6 +150,12 @@ export function App() {
 	const refresh = (folder: number | null) => {
 		void queryClient.invalidateQueries({ queryKey: ["items", placeId, folder] });
 		void queryClient.invalidateQueries({ queryKey: ["usage"] });
+	};
+	/** Who has access changed: every list of the place says who can see what, and the person's own places may change. */
+	const accessChanged = () => {
+		void queryClient.invalidateQueries({ queryKey: ["items", placeId] });
+		void queryClient.invalidateQueries({ queryKey: ["access", placeId] });
+		void queryClient.invalidateQueries({ queryKey: ["places"] });
 	};
 
 	const remove = async (item: Item) => {
@@ -218,11 +242,16 @@ export function App() {
 	const trashError = places.error ?? deletedPlaces.error ?? trashes.find((q) => q.error)?.error;
 	const trashLoading = places.isPending || deletedPlaces.isPending || trashes.some((q) => q.isPending);
 
-	const folderGone = listing.error instanceof ApiError && listing.error.status === 404;
-	const note =
-		place?.kind === "shared-folder"
-			? `Owned by the project. ${ROLE_SENTENCE[place.role]} Project admins can open every shared folder.`
+	const folderGone = listingGone;
+	const role = listing.data?.role || (place?.kind === "shared-folder" ? place.role : "");
+	const note = !place
+		? `Shared with you. ${ROLE_SENTENCE[role] ?? ""}`
+		: place.kind === "shared-folder"
+			? `Owned by the project. ${ROLE_SENTENCE[role] ?? ""} Project admins can open every shared folder.`
 			: "Only you can see these, unless you share them. Project admins cannot open them.";
+	// The panel for the folder being looked at: the shared folder as a whole at its top, the folder itself further in.
+	const herePanel = placePanel && !selected && where.view === "files" && placeId !== undefined;
+	const canSeeHere = current ? can.includes("see-access") : place?.kind === "shared-folder";
 
 	return (
 		<div className="flex h-screen bg-background text-foreground">
@@ -272,7 +301,7 @@ export function App() {
 						</>
 					) : missingPlace ? (
 						<div className="mt-16 flex flex-col items-center text-center text-sm text-muted-foreground">
-							<p>This shared folder is not there, or you have no access to it.</p>
+							<p>This is not in the Drive, or you have no access to it.</p>
 							<Button className="mt-3" onClick={() => goTo({ view: "files", place: null, folder: null })}>
 								Go to My files
 							</Button>
@@ -281,9 +310,14 @@ export function App() {
 						<>
 							<div className="flex items-start gap-3">
 								<div className="min-w-0 flex-1">
-									<Breadcrumb placeName={placeName} place={where.view === "files" ? where.place : null} path={path} go={goTo} />
+									<Breadcrumb
+										placeName={fromTop ? placeName : undefined}
+										place={where.view === "files" ? where.place : null}
+										path={path}
+										go={goTo}
+									/>
 								</div>
-								{place?.kind === "shared-folder" && (
+								{inFiles && canSeeHere && (
 									<Button
 										small
 										onClick={() => {
@@ -302,15 +336,18 @@ export function App() {
 								loading={places.isPending || listing.isPending}
 								error={places.error ?? listing.error}
 								onRetry={() =>
-									places.error ? places.refetch() : folderGone ? openFolder(null) : listing.refetch()
+									places.error ? places.refetch() : folderGone ? (fromTop ? openFolder(null) : goTo({ view: "files", place: null, folder: null })) : listing.refetch()
 								}
-								retryLabel={folderGone ? `Go to ${placeName}` : undefined}
+								retryLabel={folderGone ? `Go to ${fromTop ? placeName : "My files"}` : undefined}
 								onOpen={openFolder}
 								selected={selectedId}
 								onSelect={(item) => {
 									setPlacePanel(false);
 									setSelectedId(item.id);
 								}}
+								me={me.data?.userId}
+								members={members.data}
+								canAdd={can.includes("upload")}
 							/>
 							{items && items.length > 0 && (
 								<p className="mt-3 text-sm text-muted-foreground">
@@ -333,31 +370,51 @@ export function App() {
 			{selected && placeId !== undefined && where.view === "files" && (
 				<DetailsPanel
 					placeId={placeId}
-					placeName={placeName}
-					can={can}
+					where={whereOf(fromTop ? placeName : undefined, path)}
+					can={selected.can ?? []}
+					me={me.data?.userId}
 					item={selected}
-					path={path}
 					busy={busy}
 					onClose={() => setSelectedId(undefined)}
 					onOpen={openFolder}
 					onRename={() => setDialog("rename")}
 					onMove={() => setDialog("move")}
 					onDelete={() => void remove(selected)}
+					onAccessChanged={accessChanged}
 				/>
 			)}
-			{!selected && placePanel && place?.kind === "shared-folder" && where.view === "files" && (
+			{herePanel && current && (
+				<DetailsPanel
+					key={current.id}
+					placeId={placeId}
+					where={whereOf(fromTop ? placeName : undefined, path.slice(0, -1))}
+					can={can}
+					me={me.data?.userId}
+					item={{ id: current.id, name: current.name, kind: "folder" }}
+					here
+					onClose={() => setPlacePanel(false)}
+					onOpen={openFolder}
+					onRename={() => undefined}
+					onMove={() => undefined}
+					onDelete={() => undefined}
+					onAccessChanged={accessChanged}
+				/>
+			)}
+			{herePanel && !current && place?.kind === "shared-folder" && (
 				<SharedFolderPanel
 					key={place.id}
 					place={place}
+					me={me.data?.userId}
 					onClose={() => setPlacePanel(false)}
 					onDelete={() => deleteSharedFolder(place)}
+					onAccessChanged={accessChanged}
 				/>
 			)}
 
 			{dialog === "new-folder" && placeId !== undefined && (
 				<NameDialog
 					title="New folder"
-					description={`In ${[placeName, ...path.map((f) => f.name)].join(" › ")}`}
+					description={`In ${whereOf(fromTop ? placeName : undefined, path)}`}
 					initial={freeName("New folder", items, true)}
 					submitLabel="Make folder"
 					onSubmit={async (name) => {
@@ -398,6 +455,7 @@ export function App() {
 			{dialog === "move" && selected && placeId !== undefined && (
 				<MoveDialog
 					placeId={placeId}
+					root={fromTop ? null : (path[0] ?? null)}
 					placeName={placeName}
 					item={selected}
 					path={path}
@@ -416,31 +474,38 @@ export function App() {
 	);
 }
 
-/** Where the list is: the place and the folders down to the one shown, each but the last a link up to it. */
+/**
+ * Where the list is: the place and the folders down to the one shown, each but the last a link up to it. For someone
+ * given part of a place (placeName undefined), it starts at the highest folder they can open.
+ */
 function Breadcrumb({
 	placeName,
 	place,
 	path,
 	go,
-}: { placeName: string; place: number | null; path: FolderRef[]; go: (w: Where) => void }) {
+}: { placeName?: string; place: number | null; path: FolderRef[]; go: (w: Where) => void }) {
 	const link = (to: FolderRef | null) => (e: MouseEvent) => {
 		if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
 		e.preventDefault();
 		go({ view: "files", place, folder: to?.id ?? null });
 	};
-	if (path.length === 0) return <h1 className="text-xl font-semibold break-words">{placeName}</h1>;
+	if (path.length === 0) return <h1 className="text-xl font-semibold break-words">{placeName ?? ""}</h1>;
 	const crumb = "max-w-64 truncate underline-offset-4 hover:underline";
 	return (
 		<nav aria-label="Breadcrumb">
 			<ol className="flex min-w-0 flex-wrap items-center gap-1 text-xl font-semibold">
-				<li>
-					<a href={hrefOf({ view: "files", place, folder: null })} onClick={link(null)} className={`block ${crumb}`} title={placeName}>
-						{placeName}
-					</a>
-				</li>
+				{placeName !== undefined && (
+					<li>
+						<a href={hrefOf({ view: "files", place, folder: null })} onClick={link(null)} className={`block ${crumb}`} title={placeName}>
+							{placeName}
+						</a>
+					</li>
+				)}
 				{path.map((f, i) => (
 					<li key={f.id} className="flex min-w-0 items-center gap-1">
-						<ChevronRight aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+						{(i > 0 || placeName !== undefined) && (
+							<ChevronRight aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+						)}
 						{i === path.length - 1 ? (
 							<h1 aria-current="page" className="max-w-96 truncate" title={f.name}>
 								{f.name}
