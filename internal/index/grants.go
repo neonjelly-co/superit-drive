@@ -169,7 +169,8 @@ func (x *Index) GrantedTo(ctx context.Context, member string) ([]Granted, error)
 		SELECT place_id, item_id FROM grants
 		WHERE item_id IS NOT NULL AND (grantee = 'everyone' OR member = ?)
 		GROUP BY place_id, item_id
-		ORDER BY MAX(given_at) DESC, item_id DESC`, member)
+		ORDER BY MAX(given_at) DESC, MAX(rowid) DESC -- given in the same millisecond: the one given last first
+		`, member)
 	if err != nil {
 		return nil, err
 	}
