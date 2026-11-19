@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { FolderOpen, FolderPlus, FolderUp, Plus, Trash2, Upload } from "lucide-react";
+import { FolderOpen, FolderPlus, FolderUp, Plus, Trash2, Upload, Users } from "lucide-react";
 import { type MouseEvent, useEffect, useRef } from "react";
 import { api, type Place } from "../api";
 import { type Chosen, chosenFolder } from "../uploads";
@@ -14,6 +14,8 @@ type Props = {
 	go: (w: Where) => void;
 	/** The shared folders the person can open, by name. */
 	sharedFolders: Extract<Place, { kind: "shared-folder" }>[];
+	/** True while the person is in something shared with them from a place they cannot open: "Shared with me" is where. */
+	inShared?: boolean;
 	/**
 	 * Called with the files the person chose, or with every file of a folder they chose whole (each with the folders it
 	 * is in); undefined while there is nowhere to upload to.
@@ -29,12 +31,11 @@ type Props = {
 const foldersChoosable = typeof document !== "undefined" && "webkitdirectory" in document.createElement("input");
 
 /**
- * The left sidebar of layout D. In the full design it holds, from the top: Upload (files, or a whole folder where the
- * browser offers it) and New folder, My files, the shared folders by name, New shared folder, Shared with me, Trash,
- * and the storage meter at the bottom. Each arrives with the ticket that makes it work; "Shared with me" is still to
- * come.
+ * The left sidebar of layout D: from the top, Upload (files, or a whole folder where the browser offers it) and New
+ * folder, My files, the shared folders by name, New shared folder, Shared with me, Trash, and the storage meter at the
+ * bottom.
  */
-export function Sidebar({ project, where, go, sharedFolders, onUpload, onNewFolder, onNewSharedFolder }: Props) {
+export function Sidebar({ project, where, go, sharedFolders, inShared, onUpload, onNewFolder, onNewSharedFolder }: Props) {
 	const chooser = useRef<HTMLInputElement>(null);
 	const folderChooser = useRef<HTMLInputElement>(null);
 	// React does not know the attribute; the browser does.
@@ -124,6 +125,14 @@ export function Sidebar({ project, where, go, sharedFolders, onUpload, onNewFold
 					<Plus aria-hidden className="size-4 shrink-0" /> New shared folder
 				</button>
 				<div className="pt-4" />
+				<a
+					href={hrefOf({ view: "shared" })}
+					onClick={link({ view: "shared" })}
+					aria-current={where.view === "shared" ? "page" : inShared ? "location" : undefined}
+					className={nav(where.view === "shared" || !!inShared)}
+				>
+					<Users aria-hidden className="size-4 text-muted-foreground" /> Shared with me
+				</a>
 				<a
 					href={hrefOf({ view: "trash" })}
 					onClick={link({ view: "trash" })}

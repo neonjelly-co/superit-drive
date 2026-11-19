@@ -1,12 +1,13 @@
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Download, Upload, Users } from "lucide-react";
 import { type DragEvent, type MouseEvent, useCallback, useEffect, useState } from "react";
-import { ApiError, api, type DeletedPlace, type FolderRef, type Item, type Place, type TrashItem } from "./api";
+import { ApiError, api, type DeletedPlace, type FolderRef, type Item, type Place, type SharedItem, type TrashItem } from "./api";
 import { Button } from "./components/button";
 import { ConflictDialog } from "./components/conflict-dialog";
 import { DetailsPanel, link, whereOf } from "./components/details-panel";
 import { ItemList } from "./components/item-list";
 import { MoveDialog } from "./components/move-dialog";
+import { keyOf, SharedList } from "./components/shared-list";
 import { NameDialog } from "./components/name-dialog";
 import { type Notice, NoticeBar } from "./components/notice";
 import { SharedFolderPanel } from "./components/shared-folder-panel";
@@ -40,9 +41,10 @@ let nextNotice = 1;
  * every place. Files are uploaded into the folder being looked at, with the sidebar's Upload button or by dragging
  * them onto the list. Only what the Drive says the person may do there is offered.
  *
- * A folder shared with the person from a place they cannot otherwise open (someone's My files, a shared folder they
- * have no role on as a whole) opens at its address, `/?place=…&folder=…`: the place is not in the sidebar, and the
- * breadcrumb starts at the highest folder they can open. Finding such folders is "Shared with me", a later ticket.
+ * What others shared with the person from a place they cannot otherwise open (someone's My files, a shared folder they
+ * have no role on as a whole) is in "Shared with me" (`/?shared`). A folder from there opens at its address,
+ * `/?place=…&folder=…`: the place is not in the sidebar, and the breadcrumb starts at "Shared with me", then the highest
+ * folder they can open. A file there downloads, and its details open beside the list.
  */
 export function App() {
 	const queryClient = useQueryClient();
@@ -90,6 +92,9 @@ export function App() {
 		queryFn: api.deletedSharedFolders,
 		enabled: where.view === "trash",
 	});
+	const shared = useQuery({ queryKey: ["shared-with-me"], queryFn: api.sharedWithMe, enabled: where.view === "shared" });
+	const [sharedKey, setSharedKey] = useState<string>();
+	const sharedSelected = where.view === "shared" ? shared.data?.find((i) => keyOf(i) === sharedKey) : undefined;
 
 	const [selectedId, setSelectedId] = useState<number>();
 	const selected = items?.find((i) => i.id === selectedId);
@@ -105,11 +110,13 @@ export function App() {
 	const goTo = useCallback(
 		(w: Where) => {
 			setSelectedId(undefined);
+			setSharedKey(undefined);
 			setPlacePanel(false);
 			go(w);
 		},
 		[go],
 	);
+	const openShared = (item: SharedItem) => goTo({ view: "files", place: item.place, folder: item.id });
 	/** The address's way of naming a place: null for My files. */
 	const placeParam = (id: number) => (id === myFiles?.id ? null : id);
 	const openFolder = (folder: FolderRef | Item | null) =>
@@ -119,7 +126,7 @@ export function App() {
 	const here = current?.name ?? placeName;
 	const project = me.data?.project;
 	useEffect(() => {
-		const name = where.view === "trash" ? "Trash" : here;
+		const name = where.view === "trash" ? "Trash" : where.view === "shared" ? "Shared with me" : here;
 		document.title = project ? `${name} · ${project}` : name;
 	}, [where.view, here, project]);
 
@@ -252,6 +259,11 @@ export function App() {
 	// The panel for the folder being looked at: the shared folder as a whole at its top, the folder itself further in.
 	const herePanel = placePanel && !selected && where.view === "files" && placeId !== undefined;
 	const canSeeHere = current ? can.includes("see-access") : place?.kind === "shared-folder";
+	// Where an item is, as the person may see it: from the place's name when they can open it, otherwise from "Shared
+	// with me", where they found what they were given.
+	const rootName = fromTop ? placeName : "Shared with me";
+	// The shared folders an item of the person's own My files may be moved into (with the warning).
+	const moveInto = sharedFolders.filter((p) => p.can.includes("move-in") && p.id !== placeId).map((p) => ({ id: p.id, name: p.name }));
 
 	return (
 		<div className="flex h-screen bg-background text-foreground">
@@ -260,6 +272,7 @@ export function App() {
 				where={where}
 				go={goTo}
 				sharedFolders={sharedFolders}
+				inShared={inPart}
 				onUpload={canUpload ? uploads.add : undefined}
 				onNewFolder={inFiles && can.includes("make-folder") ? () => setDialog("new-folder") : undefined}
 				onNewSharedFolder={() => setDialog("new-shared-folder")}
@@ -300,6 +313,28 @@ export function App() {
 								onRestore={(row) => trashRows.find((r) => r.row.key === row.key)?.restore()}
 								restoring={restoring}
 							/>
+						</>
+					) : where.view === "shared" ? (
+						<>
+							<h1 className="text-xl font-semibold">Shared with me</h1>
+							<p className="mt-1 text-sm text-muted-foreground">
+								What others shared with you from their My files, or from shared folders you are not part of. What is in
+								a folder is found by opening it.
+							</p>
+							<SharedList
+								items={shared.data}
+								loading={shared.isPending}
+								error={shared.error}
+								onRetry={() => void shared.refetch()}
+								onOpen={openShared}
+								selected={sharedKey}
+								onSelect={(item) => setSharedKey(keyOf(item))}
+							/>
+							{shared.data && shared.data.length > 0 && (
+								<p className="mt-3 text-sm text-muted-foreground">
+									Click a name to open it. Click elsewhere on a row to see its details.
+								</p>
+							)}
 						</>
 					) : missingPlace ? (
 						<div className="mt-16 flex flex-col items-center text-center text-sm text-muted-foreground">
@@ -377,7 +412,7 @@ export function App() {
 			{selected && placeId !== undefined && where.view === "files" && (
 				<DetailsPanel
 					placeId={placeId}
-					where={whereOf(fromTop ? placeName : undefined, path)}
+					where={whereOf(rootName, path)}
 					can={selected.can ?? []}
 					me={me.data?.userId}
 					item={selected}
@@ -394,7 +429,7 @@ export function App() {
 				<DetailsPanel
 					key={current.id}
 					placeId={placeId}
-					where={whereOf(fromTop ? placeName : undefined, path.slice(0, -1))}
+					where={whereOf(rootName, path.slice(0, -1))}
 					can={can}
 					me={me.data?.userId}
 					item={{ id: current.id, name: current.name, kind: "folder" }}
@@ -405,6 +440,25 @@ export function App() {
 					onMove={() => undefined}
 					onDelete={() => undefined}
 					onAccessChanged={accessChanged}
+				/>
+			)}
+			{sharedSelected && (
+				<DetailsPanel
+					key={keyOf(sharedSelected)}
+					placeId={sharedSelected.place}
+					where="Shared with me"
+					can={sharedSelected.can ?? []}
+					me={me.data?.userId}
+					item={sharedSelected}
+					onClose={() => setSharedKey(undefined)}
+					onOpen={() => openShared(sharedSelected)}
+					onRename={() => undefined}
+					onMove={() => undefined}
+					onDelete={() => undefined}
+					onAccessChanged={() => {
+						void queryClient.invalidateQueries({ queryKey: ["shared-with-me"] });
+						void queryClient.invalidateQueries({ queryKey: ["items", sharedSelected.place] });
+					}}
 				/>
 			)}
 			{herePanel && !current && place?.kind === "shared-folder" && (
@@ -421,7 +475,7 @@ export function App() {
 			{dialog === "new-folder" && placeId !== undefined && (
 				<NameDialog
 					title="New folder"
-					description={`In ${whereOf(fromTop ? placeName : undefined, path)}`}
+					description={`In ${whereOf(rootName, path)}`}
 					initial={freeName("New folder", items, true)}
 					submitLabel="Make folder"
 					onSubmit={async (name) => {
@@ -461,17 +515,32 @@ export function App() {
 			)}
 			{dialog === "move" && selected && placeId !== undefined && (
 				<MoveDialog
-					placeId={placeId}
+					place={{ id: placeId, name: placeName }}
 					root={fromTop ? null : (path[0] ?? null)}
-					placeName={placeName}
 					item={selected}
 					path={path}
-					onMove={async (to) => {
-						await api.move(placeId, selected.id, to?.id ?? null);
+					otherPlaces={selected.can?.includes("move-out") ? moveInto : []}
+					me={me.data?.userId}
+					members={members.data}
+					onMove={async ({ place: to, folder }) => {
+						const there = folder?.name ?? to.name;
+						if (to.id === placeId) {
+							await api.move(placeId, selected.id, folder?.id ?? null);
+							setSelectedId(undefined);
+							refresh(folderId);
+							refresh(folder?.id ?? null);
+							say({ text: `“${selected.name}” was moved to ${there}.`, action: { label: "Show", run: () => openFolder(folder) } });
+							return;
+						}
+						await api.move(placeId, selected.id, folder?.id ?? null, to.id);
 						setSelectedId(undefined);
 						refresh(folderId);
-						refresh(to?.id ?? null);
-						say({ text: `“${selected.name}” was moved to ${to?.name ?? placeName}.`, action: { label: "Show", run: () => openFolder(to) } });
+						void queryClient.invalidateQueries({ queryKey: ["items", to.id] });
+						void queryClient.invalidateQueries({ queryKey: ["access"] });
+						say({
+							text: `“${selected.name}” was moved to ${there}. It belongs to the project now.`,
+							action: { label: "Show", run: () => goTo({ view: "files", place: to.id, folder: folder?.id ?? null }) },
+						});
 					}}
 					onClose={() => setDialog(null)}
 				/>
@@ -498,21 +567,29 @@ function Breadcrumb({
 	};
 	if (path.length === 0) return <h1 className="text-xl font-semibold break-words">{placeName ?? ""}</h1>;
 	const crumb = "max-w-64 truncate underline-offset-4 hover:underline";
+	const toShared = (e: MouseEvent) => {
+		if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+		e.preventDefault();
+		go({ view: "shared" });
+	};
 	return (
 		<nav aria-label="Breadcrumb">
 			<ol className="flex min-w-0 flex-wrap items-center gap-1 text-xl font-semibold">
-				{placeName !== undefined && (
-					<li>
+				<li>
+					{placeName !== undefined ? (
 						<a href={hrefOf({ view: "files", place, folder: null })} onClick={link(null)} className={`block ${crumb}`} title={placeName}>
 							{placeName}
 						</a>
-					</li>
-				)}
+					) : (
+						// Given part of a place: it was found in "Shared with me", and nothing above it is theirs to see.
+						<a href={hrefOf({ view: "shared" })} onClick={toShared} className={`block ${crumb}`}>
+							Shared with me
+						</a>
+					)}
+				</li>
 				{path.map((f, i) => (
 					<li key={f.id} className="flex min-w-0 items-center gap-1">
-						{(i > 0 || placeName !== undefined) && (
-							<ChevronRight aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-						)}
+						<ChevronRight aria-hidden className="size-4 shrink-0 text-muted-foreground" />
 						{i === path.length - 1 ? (
 							<h1 aria-current="page" className="max-w-96 truncate" title={f.name}>
 								{f.name}
