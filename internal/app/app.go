@@ -6,8 +6,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
+	"runtime/debug"
+	"strconv"
 	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/clock"
@@ -17,14 +18,24 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/server"
 	"github.com/neonjelly-co/superit-drive/internal/settings"
 	"github.com/neonjelly-co/superit-drive/internal/storage"
+	"github.com/neonjelly-co/superit-drive/internal/transfers"
 	"github.com/neonjelly-co/superit-drive/web"
 )
+
+// MemoryLimit is Go's memory limit for the Drive (debug.SetMemoryLimit), unless GOMEMLIMIT sets another. The Drive is
+// counted at 64 MiB, and the kernel's network buffers for the transfers in flight are charged to it too (package
+// transfers), so Go keeps well below: past the limit its garbage collector works harder instead of letting the heap
+// grow.
+const MemoryLimit = 24 << 20
 
 // Run runs the Drive until ctx ends. getenv is os.Getenv; version is logged at start.
 func Run(ctx context.Context, getenv func(string) string, version string, log *slog.Logger) error {
 	s, err := settings.FromEnv(getenv)
 	if err != nil {
 		return err
+	}
+	if getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(MemoryLimit)
 	}
 
 	list, err := members.Watch(ctx, s.MembersFile, log)
@@ -53,16 +64,18 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 		Log:          log,
 	})
 
-	// Removes what has been in the trash for 30 days: now, and every hour while the Drive runs.
-	trashCtx, stopTrash := context.WithCancel(ctx)
-	trashDone := make(chan struct{})
+	// Removes what has been in the trash for 30 days, and uploads abandoned for a day: now, and every hour while the
+	// Drive runs.
+	tidyCtx, stopTidy := context.WithCancel(ctx)
+	tidyDone := make(chan struct{})
 	go func() {
-		defer close(trashDone)
-		d.EmptyTrash(trashCtx, time.Hour)
+		defer close(tidyDone)
+		d.Tidy(tidyCtx, time.Hour)
 	}()
-	defer func() { stopTrash(); <-trashDone }() // before the index closes
+	defer func() { stopTidy(); <-tidyDone }() // before the index closes
 
-	ln, err := net.Listen("tcp", s.Listen)
+	// Every connection's network buffers are capped (package transfers).
+	ln, err := transfers.Listen(s.Listen)
 	if err != nil {
 		return err
 	}
@@ -80,7 +93,8 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	}()
 
 	log.Info("listening", "address", ln.Addr().String(), "version", version, "storage", store.Address(),
-		"members", list.Current().Len(), "data", s.DataDir)
+		"members", list.Current().Len(), "data", s.DataDir,
+		"memoryLimit", strconv.FormatInt(debug.SetMemoryLimit(-1)>>20, 10)+" MiB")
 	if err := httpServer.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

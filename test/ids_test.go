@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/neonjelly-co/superit-drive/test/harness"
 )
@@ -83,8 +84,9 @@ func TestIdsLastThroughListingsThatRaceUploads(t *testing.T) {
 	}
 }
 
-// While a replacing upload is on its way, the file it replaces is already in the trash and the name is empty on the
-// storage. A listing then must leave the item alone: it keeps its id through the replace.
+// While a replacing upload is on its way, it arrives in the hidden uploads folder, and the file it replaces stays where
+// it is, whole, until the upload is complete: then the two swap. A listing meanwhile shows the file with its id, and it
+// keeps its id through the replace.
 func TestAReplacedFileKeepsItsIdWhileItsUploadIsOnItsWay(t *testing.T) {
 	t.Parallel()
 	d := harness.Start(t, reka)
@@ -112,10 +114,14 @@ func TestAReplacedFileKeepsItsIdWhileItsUploadIsOnItsWay(t *testing.T) {
 	if _, err := write.Write([]byte("sec")); err != nil {
 		t.Fatal(err)
 	}
-	harness.Eventually(t, "the replaced file is in the trash", func() bool {
-		_, ok := d.Storage.Get(t, rekasTop+"/Report.pdf")
-		return !ok
+	harness.Eventually(t, "the upload is on its way into the uploads folder", func() bool {
+		_, ok := d.Storage.List(t, ".superit-drive/uploads")
+		return ok
 	})
+	time.Sleep(200 * time.Millisecond) // its first bytes are on their way to the storage
+	if got, _ := d.Storage.Get(t, rekasTop+"/Report.pdf"); string(got) != "first" {
+		t.Fatalf("during the replace Report.pdf holds %q, want the file it replaces, whole", got)
+	}
 	if l := list(t, d.As(reka), placeID, 0); len(l.Items) != 1 || l.Items[0].ID != report.ID {
 		t.Fatalf("during the replace the list holds %+v, want Report.pdf with id %d", l.Items, report.ID)
 	}

@@ -1,10 +1,10 @@
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Upload, Users } from "lucide-react";
+import { ChevronRight, Download, Upload, Users } from "lucide-react";
 import { type DragEvent, type MouseEvent, useCallback, useEffect, useState } from "react";
 import { ApiError, api, type DeletedPlace, type FolderRef, type Item, type Place, type TrashItem } from "./api";
 import { Button } from "./components/button";
 import { ConflictDialog } from "./components/conflict-dialog";
-import { DetailsPanel, whereOf } from "./components/details-panel";
+import { DetailsPanel, link, whereOf } from "./components/details-panel";
 import { ItemList } from "./components/item-list";
 import { MoveDialog } from "./components/move-dialog";
 import { NameDialog } from "./components/name-dialog";
@@ -260,7 +260,7 @@ export function App() {
 				where={where}
 				go={goTo}
 				sharedFolders={sharedFolders}
-				onUpload={canUpload ? (files) => uploads.add(files.map((file) => ({ file }))) : undefined}
+				onUpload={canUpload ? uploads.add : undefined}
 				onNewFolder={inFiles && can.includes("make-folder") ? () => setDialog("new-folder") : undefined}
 				onNewSharedFolder={() => setDialog("new-shared-folder")}
 			/>
@@ -275,7 +275,9 @@ export function App() {
 					if (!carriesFiles(e) || !canUpload) return;
 					e.preventDefault();
 					setDragging(false);
-					uploads.add(droppedFiles(e.dataTransfer));
+					droppedFiles(e.dataTransfer).then(uploads.add, (err) =>
+						say({ text: `What was dropped could not be read: ${err instanceof Error ? err.message : String(err)}`, failed: true }),
+					);
 				}}
 			>
 				<main className="h-full overflow-auto p-6 pb-24">
@@ -317,6 +319,11 @@ export function App() {
 										go={goTo}
 									/>
 								</div>
+								{inFiles && placeId !== undefined && can.includes("download") && items && items.length > 0 && (
+									<a href={api.zipUrl(placeId, current?.id ?? null)} download className={`${link} h-8 px-2.5`}>
+										<Download aria-hidden className="size-4" /> Download as zip
+									</a>
+								)}
 								{inFiles && canSeeHere && (
 									<Button
 										small
@@ -360,12 +367,12 @@ export function App() {
 				{dragging && (
 					<div className="pointer-events-none absolute inset-3 grid place-items-center rounded-xl border-2 border-dashed border-ring bg-card/85">
 						<p className="flex items-center gap-2 font-semibold">
-							<Upload aria-hidden className="size-5 text-muted-foreground" /> Drop files to upload them to {here}
+							<Upload aria-hidden className="size-5 text-muted-foreground" /> Drop files or folders to upload them to {here}
 						</p>
 					</div>
 				)}
 				<NoticeBar notice={notice} onClose={closeNotice} />
-				<UploadsPanel uploads={uploads.uploads} onClose={uploads.clear} />
+				<UploadsPanel uploads={uploads.uploads} onCancel={uploads.cancel} onClose={uploads.clear} />
 			</div>
 			{selected && placeId !== undefined && where.view === "files" && (
 				<DetailsPanel

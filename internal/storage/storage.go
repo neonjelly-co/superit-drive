@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/neonjelly-co/superit-drive/internal/transfers"
 )
 
 // Errors a caller may want to tell apart.
@@ -70,9 +72,10 @@ func New(address *url.URL, user, password, folder string) *Client {
 	server := &url.URL{Scheme: address.Scheme, Host: address.Host}
 	root := escapeSegments(path.Join(address.Path, folder))
 
-	// One transport for every call to the storage. Large transfers will need their socket buffers capped here to hold
-	// the Drive's memory figure.
+	// One transport for every call to the storage. Each connection's network buffers are capped, to hold the Drive's
+	// memory figure (package transfers).
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = transfers.Dial(30 * time.Second)
 	transport.MaxIdleConnsPerHost = 8
 	transport.ResponseHeaderTimeout = time.Minute
 
@@ -309,7 +312,7 @@ func (c *Client) OpenPart(ctx context.Context, p string, offset, length int64) (
 		return nil, fmt.Errorf("reading part of %q on the storage: %w", p, err)
 	}
 	if res.StatusCode == http.StatusPartialContent {
-		first, end, ok := parseContentRange(res.Header.Get("Content-Range"))
+		first, end, _, ok := parseContentRange(res.Header.Get("Content-Range"))
 		if !ok || first != offset || end > last {
 			drain(res)
 			return nil, fmt.Errorf("reading part of %q: asked for bytes %d to %d, the storage sent %q", p, offset, last,
@@ -327,20 +330,131 @@ func (c *Client) OpenPart(ctx context.Context, p string, offset, length int64) (
 	return nil, statusError("reading part of", p, res)
 }
 
-// parseContentRange reads the first and last byte of a Content-Range such as "bytes 100-199/1000" or "bytes 0-9/*".
-func parseContentRange(v string) (first, last int64, ok bool) {
+// parseContentRange reads a Content-Range such as "bytes 100-199/1000" or "bytes 0-9/*": the first and last byte, and
+// the file's whole length (-1 for "*").
+func parseContentRange(v string) (first, last, total int64, ok bool) {
 	spec, found := strings.CutPrefix(v, "bytes ")
 	if !found {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
-	span, _, found := strings.Cut(spec, "/")
+	span, whole, found := strings.Cut(spec, "/")
 	from, to, found2 := strings.Cut(span, "-")
 	if !found || !found2 {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	first, err1 := strconv.ParseInt(from, 10, 64)
 	last, err2 := strconv.ParseInt(to, 10, 64)
-	return first, last, err1 == nil && err2 == nil && first >= 0 && last >= first
+	total = -1
+	var err3 error
+	if whole != "*" {
+		total, err3 = strconv.ParseInt(whole, 10, 64)
+	}
+	ok = err1 == nil && err2 == nil && err3 == nil && first >= 0 && last >= first && (total < 0 || last < total)
+	return first, last, total, ok
+}
+
+// A Range is the bytes of a file a download asks for: from First to Last, or from First to the end when Last is
+// negative; or, when Suffix is above 0, the last Suffix bytes.
+type Range struct {
+	First, Last int64
+	Suffix      int64
+}
+
+// header is the range as a Range header writes it.
+func (r Range) header() string {
+	switch {
+	case r.Suffix > 0:
+		return fmt.Sprintf("bytes=-%d", r.Suffix)
+	case r.Last < 0:
+		return fmt.Sprintf("bytes=%d-", r.First)
+	}
+	return fmt.Sprintf("bytes=%d-%d", r.First, r.Last)
+}
+
+// answers says whether bytes first to last of a file of total bytes are what r asks for.
+func (r Range) answers(first, last, total int64) bool {
+	if total < 0 || last != min(r.end(total), total-1) {
+		return false
+	}
+	if r.Suffix > 0 {
+		return first == max(0, total-r.Suffix)
+	}
+	return first == r.First
+}
+
+func (r Range) end(total int64) int64 {
+	if r.Suffix > 0 || r.Last < 0 {
+		return total - 1
+	}
+	return r.Last
+}
+
+// A Reading is a file being read from the storage: whole, or the part of it a Range asked for. Close its Body when
+// done.
+type Reading struct {
+	Body io.ReadCloser
+	// Length is how many bytes Body holds, as the server announced it, or -1 when it did not.
+	Length int64
+	// Partial is true when Body holds bytes First to Last of a file of Total bytes, and false when it holds the whole
+	// file: the server may send the whole file instead of a part (when If-Range no longer matches, or when it does not
+	// answer Range requests), and HTTP allows it.
+	Partial            bool
+	First, Last, Total int64
+	// ETag and Modified are the file's validators as the server sent them (ETag and Last-Modified), for a browser to
+	// resume a download with (If-Range); empty when it sent none.
+	ETag, Modified string
+}
+
+// ErrNoSuchRange is returned by Read when the range asked for starts after the file's end (416).
+var ErrNoSuchRange = errors.New("the range asked for is not in the file")
+
+// Read starts reading the file at p: whole when r is nil, otherwise the part r asks for, unless ifRange (an If-Range
+// value a browser sent, or "") no longer matches the file, when the server sends it whole. It returns ErrNotFound when
+// there is no file there (a folder included), and ErrNoSuchRange when the part starts after its end. A part the server
+// sends is checked against what was asked for.
+func (c *Client) Read(ctx context.Context, p string, r *Range, ifRange string) (*Reading, error) {
+	if err := checkPath(p); err != nil {
+		return nil, err
+	}
+	req, err := c.request(ctx, http.MethodGet, c.fileURL(p), nil)
+	if err != nil {
+		return nil, err
+	}
+	// A compressed answer would count its range, and its length, in compressed bytes.
+	req.Header.Set("Accept-Encoding", "identity")
+	if r != nil {
+		req.Header.Set("Range", r.header())
+		if ifRange != "" {
+			req.Header.Set("If-Range", ifRange)
+		}
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("reading %q on the storage: %w", p, err)
+	}
+	reading := &Reading{Body: res.Body, Length: res.ContentLength, ETag: res.Header.Get("ETag"), Modified: res.Header.Get("Last-Modified")}
+	switch {
+	case res.StatusCode == http.StatusOK:
+		return reading, nil
+	case res.StatusCode == http.StatusPartialContent && r != nil:
+		first, last, total, ok := parseContentRange(res.Header.Get("Content-Range"))
+		if !ok || !r.answers(first, last, total) || (res.ContentLength >= 0 && res.ContentLength != last-first+1) {
+			drain(res)
+			return nil, fmt.Errorf("reading part of %q: asked for %s, the storage sent %q (%d bytes)", p, r.header(),
+				res.Header.Get("Content-Range"), res.ContentLength)
+		}
+		reading.Partial, reading.First, reading.Last, reading.Total = true, first, last, total
+		reading.Length = last - first + 1
+		return reading, nil
+	}
+	defer drain(res)
+	switch {
+	case res.StatusCode == http.StatusRequestedRangeNotSatisfiable && r != nil:
+		return nil, fmt.Errorf("reading %s of %q: %w", r.header(), p, ErrNoSuchRange)
+	case isRedirect(res.StatusCode):
+		return nil, fmt.Errorf("reading %q: it is a folder: %w", p, ErrNotFound)
+	}
+	return nil, statusError("reading", p, res)
 }
 
 // Move moves the file at from to to, on the server: no bytes of the file travel. It never replaces anything: it sends

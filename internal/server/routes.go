@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"io/fs"
-	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -20,8 +18,9 @@ import (
 )
 
 // routes is every route the Drive answers. Add new ones here, each with the action it is. A route that takes a place
-// must also be tried by an outsider in test/shared_folders_test.go, and a route that takes an item by someone with
-// access to part of the place in test/sharing_test.go (a test here fails until it is).
+// must also be tried by an outsider in test/shared_folders_test.go, and a route that takes an item (or an upload in
+// progress, which is about the folder it goes into) by someone with access to part of the place in
+// test/sharing_test.go (a test here fails until it is).
 //
 // A folder of a place is addressed as an item; the place's top folder by the place alone. So most things that happen
 // in a folder have two routes, one for the top folder and one for any other.
@@ -60,17 +59,28 @@ func (s *Server) routes() []route {
 		// What is in a place.
 		{pattern: "GET /api/places/{place}/items", action: access.List, place: "place", serve: s.items},
 		{pattern: "GET /api/places/{place}/items/{item}/items", action: access.List, place: "place", item: "item", serve: s.items},
-		{pattern: "POST /api/places/{place}/files", action: access.Upload, place: "place", serve: s.upload},
-		{pattern: "POST /api/places/{place}/items/{item}/files", action: access.Upload, place: "place", item: "item", serve: s.upload},
 		{pattern: "POST /api/places/{place}/folders", action: access.MakeFolder, place: "place", serve: s.newFolder},
 		{pattern: "POST /api/places/{place}/items/{item}/folders", action: access.MakeFolder, place: "place", item: "item", serve: s.newFolder},
-		{pattern: "GET /api/places/{place}/items/{item}/download", action: access.Download, place: "place", item: "item", serve: s.download},
 		{pattern: "POST /api/places/{place}/items/{item}/rename", action: access.Rename, place: "place", item: "item", serve: s.rename},
 		{pattern: "POST /api/places/{place}/items/{item}/move", action: access.Move, place: "place", item: "item", serve: s.move},
 		{pattern: "DELETE /api/places/{place}/items/{item}", action: access.Delete, place: "place", item: "item", serve: s.delete},
 
 		{pattern: "GET /api/places/{place}/trash", action: access.SeeTrash, place: "place", serve: s.trash},
 		{pattern: "POST /api/places/{place}/trash/{item}/restore", action: access.Restore, place: "place", trashed: "item", serve: s.restore},
+
+		// Transfers: what moves a file's bytes (transfers.go). A download is of a file, or of a folder (or some items
+		// in it) as one zip; an upload is in one request, or resumable: started, then a part per request, then finished.
+		{pattern: "GET /api/places/{place}/items/{item}/download", action: access.Download, place: "place", item: "item", serve: s.download},
+		{pattern: "GET /api/places/{place}/zip", action: access.Download, place: "place", serve: s.zip},
+		{pattern: "GET /api/places/{place}/items/{item}/zip", action: access.Download, place: "place", item: "item", serve: s.zip},
+		{pattern: "POST /api/places/{place}/files", action: access.Upload, place: "place", serve: s.upload},
+		{pattern: "POST /api/places/{place}/items/{item}/files", action: access.Upload, place: "place", item: "item", serve: s.upload},
+		{pattern: "POST /api/places/{place}/uploads", action: access.Upload, place: "place", serve: s.startUpload},
+		{pattern: "POST /api/places/{place}/items/{item}/uploads", action: access.Upload, place: "place", item: "item", serve: s.startUpload},
+		{pattern: "GET /api/places/{place}/uploads/{upload}", action: access.Upload, place: "place", upload: "upload", serve: s.uploadState},
+		{pattern: "PUT /api/places/{place}/uploads/{upload}", action: access.Upload, place: "place", upload: "upload", serve: s.uploadPart},
+		{pattern: "POST /api/places/{place}/uploads/{upload}/finish", action: access.Upload, place: "place", upload: "upload", serve: s.finishUpload},
+		{pattern: "DELETE /api/places/{place}/uploads/{upload}", action: access.Upload, place: "place", upload: "upload", serve: s.cancelUpload},
 	}
 }
 
@@ -330,70 +340,6 @@ func (s *Server) openFolders(ctx context.Context, who access.Person, p index.Pla
 	}
 	open, _ := openPath(who, where, folders)
 	return pathOf(open), nil
-}
-
-type uploadJSON struct {
-	itemJSON
-	// Replaced is true when the upload replaced a file of its name, which is now in the trash.
-	Replaced bool `json:"replaced,omitempty"`
-}
-
-// upload stores a new file in a folder of a place and answers 201 with it.
-//
-//	POST /api/places/{place}/files?name=<the file's name>[&existing=replace|keep-both]
-//	POST /api/places/{place}/items/{folder}/files?name=…
-//	Content-Length: <the file's size>
-//
-//	<the file's bytes>
-//
-// The body is the file itself, not a form, and streams straight through to the storage in one all-or-nothing PUT.
-// Content-Length is required, so the storage can tell a whole file from a cut-off one.
-//
-// When the name is taken, existing says what to do: replace the file there (it goes to the trash) or keep both (the
-// upload gets a name with " (2)" or the like, and the answer has it). Without it, the answer is 409 with "exists" set to
-// "file" or "folder", so the interface can ask; nothing is sent to the storage. A folder is never replaced.
-func (s *Server) upload(w http.ResponseWriter, r *http.Request, c call) {
-	folder, ok := s.folder(w, r, c, "Files can only be uploaded into a folder.")
-	if !ok {
-		return
-	}
-	if r.ContentLength < 0 {
-		s.refuse(w, r, http.StatusLengthRequired, "The upload did not say how large the file is, so nothing was stored. Try again.")
-		return
-	}
-	name := r.URL.Query().Get("name")
-	existing := drive.Existing(r.URL.Query().Get("existing"))
-	if existing != drive.Ask && existing != drive.Replace && existing != drive.KeepBoth {
-		s.refuse(w, r, http.StatusBadRequest, "The upload asked for something the Drive does not do with a name that is taken.")
-		return
-	}
-	up, err := s.drive.Upload(r.Context(), *c.place, folder, name, r.Body, r.ContentLength, existing, c.member.UserID)
-	var bad *drive.BadName
-	var taken *drive.Taken
-	switch {
-	case err == nil:
-		writeJSON(w, http.StatusCreated, uploadJSON{itemJSON: itemOf(up.Item), Replaced: up.Replaced != nil})
-	case errors.As(err, &bad):
-		s.refuse(w, r, http.StatusBadRequest, bad.Error())
-	case errors.As(err, &taken) && taken.Folder && existing == drive.Replace:
-		s.refuseTaken(w, r, taken, "There is a folder called “"+taken.Name+"” here, and a file cannot replace a folder. Keep both instead.")
-	case errors.As(err, &taken) && taken.Folder:
-		s.refuseTaken(w, r, taken, "There is already a folder called “"+taken.Name+"” here.")
-	case errors.As(err, &taken):
-		s.refuseTaken(w, r, taken, "There is already a file called “"+taken.Name+"” here.")
-	case errors.Is(err, drive.ErrBusy):
-		s.refuse(w, r, http.StatusConflict, "“"+name+"” is being uploaded or changed right now. Try again when that is done.")
-	case errors.Is(err, drive.ErrGone):
-		s.refuse(w, r, http.StatusConflict, "This folder is no longer on the Drive storage. Reload the page and try again.")
-	case errors.Is(err, drive.ErrFull):
-		s.refuse(w, r, http.StatusInsufficientStorage, "The Drive storage is full, so this file was not uploaded.")
-	case errors.Is(err, drive.ErrCutOff) || r.Context().Err() != nil:
-		// The person's connection ended (or they cancelled); the storage kept nothing. Not the Drive's failure.
-		s.log.Info("an upload ended before the whole file arrived; nothing was stored", "error", err)
-		s.refuse(w, r, http.StatusBadRequest, "The upload stopped before the whole file arrived, so nothing was stored. Try again.")
-	default:
-		s.failed(w, r, err)
-	}
 }
 
 // refuseTaken answers 409 for a name that is taken, saying what kind of item has it.
@@ -668,49 +614,6 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request, c call) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"item": itemOf(it), "path": path})
-}
-
-// download sends a file's bytes under its original name, as an attachment, so the browser saves it rather than
-// showing it. (Opening safe kinds of file in the browser, and ranged reads, come later.)
-func (s *Server) download(w http.ResponseWriter, r *http.Request, c call) {
-	f, err := s.drive.Download(r.Context(), *c.place, *c.item)
-	switch {
-	case errors.Is(err, drive.ErrNotAFile):
-		s.refuse(w, r, http.StatusNotFound, "This is a folder, and only files can be downloaded.")
-		return
-	case errors.Is(err, drive.ErrGone):
-		s.refuse(w, r, http.StatusNotFound, "This file is no longer on the Drive storage. Reload the page to see what is there now.")
-		return
-	case err != nil:
-		s.failed(w, r, err)
-		return
-	}
-	defer f.Body.Close()
-
-	h := w.Header()
-	h.Set("Content-Type", "application/octet-stream")
-	h.Set("Content-Disposition", attachment(c.item.Name))
-	h.Set("Cache-Control", "private, no-store")
-	if f.Size >= 0 {
-		// With the length announced, a download cut short shows as failed in the browser instead of as a short file.
-		h.Set("Content-Length", strconv.FormatInt(f.Size, 10))
-	}
-	w.WriteHeader(http.StatusOK)
-	if r.Method == http.MethodHead {
-		return
-	}
-	if _, err := io.Copy(w, f.Body); err != nil {
-		s.log.Info("a download ended before its last byte", "error", err)
-	}
-}
-
-// attachment is a Content-Disposition value that has the browser save the file under name. A name that is not plain
-// ASCII is sent in the RFC 6266 filename* form, which every current browser reads.
-func attachment(name string) string {
-	if v := mime.FormatMediaType("attachment", map[string]string{"filename": name}); v != "" {
-		return v
-	}
-	return "attachment"
 }
 
 // failed answers a request whose work went wrong: on the storage, or in the Drive itself.

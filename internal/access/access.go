@@ -23,8 +23,9 @@
 //     member. Access on a folder applies to everything in it, at any depth. Deeper levels can only add access, never
 //     take it away: the role someone has at an item is the highest of what they were given on it, on every folder
 //     above it and on the place, and what the place gives them by itself (owner, project admin). RoleAt computes it.
-//   - A viewer may open, download and see who has access; an editor may also upload and make folders in it, and share
-//     it further. Only managers decide who has access to a shared folder as a whole, and only they may delete it.
+//   - A viewer may open, download (a file, or a folder with everything in it as one zip, the top folder included) and
+//     see who has access; an editor may also upload and make folders in it, and share it further. Only managers decide
+//     who has access to a shared folder as a whole, and only they may delete it.
 //   - Renaming, moving, deleting and restoring an item change the folder it is in (or goes back to), so they need the
 //     right to put things into that folder, as an upload does: someone given one folder or file works inside it, but
 //     cannot rename it, take it out of the folder it is in, or put it back into one they cannot add to, and so never
@@ -185,10 +186,13 @@ const (
 
 	// List is seeing what is in a folder: the place's top folder, or a folder item.
 	List Action = "list"
-	// Download is reading a file's content. It concerns an item.
+	// Download is reading content: a file's, or everything in a folder (the place's top folder, or a folder item) as
+	// one zip. Access only widens down the tree, so whoever may download a folder may download everything in it.
 	Download Action = "download"
 	// Upload is putting a new file into a folder (the top folder, or a folder item), which can replace a file there
 	// (the replaced one goes to the trash), or keep both under a new name. Moving something into a folder needs it too.
+	// Every request of a resumable upload (starting it, each part, finishing and cancelling it) is an upload into its
+	// folder.
 	Upload Action = "upload"
 	// MakeFolder is making a new folder in a folder.
 	MakeFolder Action = "make-folder"
@@ -263,10 +267,10 @@ func Decide(person Person, action Action, place *Place) bool {
 // What each role may do in a place's top folder. The owner of a "My files" has nothing to manage and nobody to show
 // there: it is theirs alone, and only items in it are shared.
 var atTop = map[Role]map[Action]bool{
-	Viewer:  actions(List, SeeAccess),
-	Editor:  actions(List, SeeAccess, Upload, MakeFolder, SeeTrash),
-	Manager: actions(List, SeeAccess, Upload, MakeFolder, SeeTrash, ManageAccess, DeleteSharedFolder),
-	Owner:   actions(List, Upload, MakeFolder, SeeTrash),
+	Viewer:  actions(List, Download, SeeAccess),
+	Editor:  actions(List, Download, SeeAccess, Upload, MakeFolder, SeeTrash),
+	Manager: actions(List, Download, SeeAccess, Upload, MakeFolder, SeeTrash, ManageAccess, DeleteSharedFolder),
+	Owner:   actions(List, Download, Upload, MakeFolder, SeeTrash),
 }
 
 // What each role may do at an item. A manager of a shared folder, and the owner of a "My files", are editors of

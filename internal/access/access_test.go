@@ -201,9 +201,10 @@ var everyAction = []Action{Enter, SeeUsage, MakeSharedFolder, List, Download, Up
 // What the spec gives each role, written out here rather than taken from the package.
 var (
 	// In the top folder of their own My files: everything but showing or managing access, which is about items.
-	ownerAtTop = []Action{List, Upload, MakeFolder, SeeTrash}
+	// Downloading the top folder is the whole place as one zip.
+	ownerAtTop = []Action{List, Download, Upload, MakeFolder, SeeTrash}
 	// In a shared folder's top folder.
-	viewerAtTop  = []Action{List, SeeAccess}
+	viewerAtTop  = []Action{List, Download, SeeAccess}
 	editorAtTop  = append(slices.Clone(viewerAtTop), Upload, MakeFolder, SeeTrash)
 	managerAtTop = append(slices.Clone(editorAtTop), ManageAccess, DeleteSharedFolder)
 	// At an item, in any place. Owners of a My files and managers of a shared folder are editors of every item in it.
@@ -459,10 +460,14 @@ func TestTheRulesHangTogether(t *testing.T) {
 				if may(SeeTrash) && (!Decide(p, Delete, child) || !Decide(p, Restore, child)) {
 					t.Errorf("%s may see the trash but not delete and restore what is in the top folder", where)
 				}
-				for _, a := range []Action{Download, Rename, Move, Delete, Restore, Share} {
+				for _, a := range []Action{Rename, Move, Delete, Restore, Share} {
 					if may(a) {
 						t.Errorf("%s may %s, which concerns an item, in a top folder", where, a)
 					}
+				}
+				// Whoever may open the top folder may download it whole, as one zip.
+				if may(Download) != may(List) {
+					t.Errorf("%s: may list %v, may download %v: want both or neither", where, may(List), may(Download))
 				}
 				// Whoever decides who has access to a shared folder, or may delete it, may do everything else in it.
 				if may(ManageAccess) || may(DeleteSharedFolder) {
@@ -484,7 +489,7 @@ func TestTheRulesHangTogether(t *testing.T) {
 			// Access on a folder applies to everything inside it: what the person may do at the top folder or at a folder
 			// they may also do at anything in it. (Restoring depends on who deleted each item.)
 			for _, a := range []Action{List, Download, Upload, MakeFolder, Rename, Move, Delete, SeeAccess, Share} {
-				if len(l.Path) == 0 && (a == Download || a == Rename || a == Move || a == Delete || a == Share) {
+				if len(l.Path) == 0 && (a == Rename || a == Move || a == Delete || a == Share) {
 					continue
 				}
 				if may(a) && !Decide(p, a, child) {

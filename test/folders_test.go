@@ -242,16 +242,13 @@ func TestFoldersPutOnTheStorageDirectlyOpen(t *testing.T) {
 		t.Fatalf("Archive still lists %q", names(l.Items))
 	}
 
-	// The place's own top folder removed directly: the next change into it makes it again (an upload says to try
-	// again, and the try works).
+	// The place's own top folder removed directly: the next change into it makes it again, an upload included (it
+	// arrives in the hidden uploads folder, and is moved into the top folder made again).
 	d.Storage.Delete(t, rekasTop, true)
 	if it := madeFolder(t, c, placeID, 0, "New"); it.Name != "New" {
 		t.Fatalf("got %+v", it)
 	}
 	d.Storage.Delete(t, rekasTop, true)
-	if res := uploadInto(t, c, placeID, 0, "a.txt", []byte("a"), ""); res.Status != http.StatusConflict {
-		t.Fatalf("an upload into a top folder that is gone: got %d %s, want 409", res.Status, res.Body)
-	}
 	uploadedInto(t, c, placeID, 0, "a.txt", []byte("a"))
 	if got := onStorage(t, d, rekasTop); !slices.Equal(got, []string{"a.txt"}) {
 		t.Fatalf("Réka's top folder on the storage holds %q", got)

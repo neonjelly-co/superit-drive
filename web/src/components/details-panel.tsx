@@ -75,17 +75,20 @@ export function DetailsPanel(props: Props) {
 				)}
 			</dl>
 			{!here && (
-				<div className="mt-6">
+				<div className="mt-6 flex flex-wrap gap-2">
 					{item.kind === "folder" ? (
-						<Button onClick={() => onOpen(item)}>
-							<FolderOpen aria-hidden /> Open
-						</Button>
+						<>
+							<Button onClick={() => onOpen(item)}>
+								<FolderOpen aria-hidden /> Open
+							</Button>
+							{can.includes("download") && (
+								<a href={api.zipUrl(placeId, item.id)} download className={link}>
+									<Download aria-hidden className="size-4" /> Download as zip
+								</a>
+							)}
+						</>
 					) : (
-						<a
-							href={api.downloadUrl(placeId, item.id)}
-							download
-							className="inline-flex h-9 items-center gap-1.5 rounded-md border border-border bg-card px-3 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50"
-						>
+						<a href={api.downloadUrl(placeId, item.id)} download className={link}>
 							<Download aria-hidden className="size-4" /> Download
 						</a>
 					)}
@@ -132,6 +135,10 @@ export function DetailsPanel(props: Props) {
 		</aside>
 	);
 }
+
+/** A link that looks like the interface's outline button. */
+export const link =
+	"inline-flex h-9 items-center gap-1.5 rounded-md border border-border bg-card px-3 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50";
 
 /** Where an item is, as the person may see it: the place's name (when they can open it) and the folders below it. */
 export function whereOf(placeName: string | undefined, path: FolderRef[]): string {

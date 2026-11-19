@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -145,6 +146,29 @@ func (x *Index) sizeInside(ctx context.Context, id int64) (int64, error) {
 		SELECT IFNULL(SUM(items.size), 0) FROM inside JOIN items ON items.id = inside.id WHERE items.is_folder = 0`,
 		id, MaxDepth).Scan(&size)
 	return size, err
+}
+
+// CountInside counts the live items of the place with the ids given and everything inside them, at any depth: up to
+// limit, where it stops counting.
+func (x *Index) CountInside(ctx context.Context, placeID int64, ids []int64, limit int) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = x.db.QueryRowContext(ctx, `
+		WITH RECURSIVE inside (id, depth) AS (
+			SELECT id, 0 FROM items
+			WHERE place_id = ? AND trashed_at IS NULL AND id IN (SELECT value FROM json_each(?))
+			UNION ALL
+			SELECT items.id, inside.depth + 1 FROM items JOIN inside ON items.parent_id = inside.id
+			WHERE inside.depth < ?
+		)
+		SELECT COUNT(*) FROM (SELECT 1 FROM inside LIMIT ?)`, placeID, string(list), MaxDepth, limit).Scan(&n)
+	return n, err
 }
 
 // TrashItem finds the item with id in the place's trash, a folder's Size summed as in TrashItems. Something inside a

@@ -136,10 +136,40 @@ export class ApiError extends Error {
 		message: string,
 		/** For a name that is taken (409): what kind of item has it. */
 		readonly exists?: "file" | "folder",
+		/** More the Drive said: for a transfer that is not its turn (503), busy and when to try again. */
+		readonly more: {
+			busy?: boolean;
+			retryAfter?: number;
+			/** For a part of an upload in progress that does not fit (409): where what has arrived ends. */
+			offset?: number;
+			/** False when the storage cannot resume, and the upload starts again from the beginning. */
+			resumable?: boolean;
+		} = {},
 	) {
 		super(message);
 	}
 }
+
+/** An error the browser gave because the connection broke, not the Drive. */
+const unreachable = (what: string) => new ApiError(0, `${what} could not reach the Drive. Check your connection.`);
+
+/** A resumable upload in progress: started, its parts on their way, not yet finished. */
+export type Session = {
+	id: string;
+	name: string;
+	size: number;
+	/** How much of the file has arrived: where the next part starts. */
+	offset: number;
+	/** Whether an upload cut off goes on from offset; when false, the file is sent as one part and starts again. */
+	resumable: boolean;
+	/** The most one part may hold. */
+	partSize: number;
+	/** True while it waits its turn for one of the Drive's transfer slots. */
+	waiting: boolean;
+};
+
+/** Larger files are uploaded resumably, in parts; smaller ones in one request. */
+export const RESUMABLE_FROM = 32 * 1024 * 1024;
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
 	let res: Response;
@@ -154,7 +184,12 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 	}
 	const data = await res.json().catch(() => null);
 	if (!res.ok) {
-		throw new ApiError(res.status, data?.error ?? `The Drive answered with an error (${res.status}).`, data?.exists);
+		throw new ApiError(res.status, data?.error ?? `The Drive answered with an error (${res.status}).`, data?.exists, {
+			busy: data?.busy,
+			offset: data?.offset,
+			resumable: data?.resumable,
+			retryAfter: Number(res.headers.get("Retry-After")) || undefined,
+		});
 	}
 	return data as T;
 }
@@ -167,15 +202,63 @@ const granteePath = (placeId: number, itemId: number | null, to: Grantee) =>
 		? `${accessPath(placeId, itemId)}/everyone`
 		: `${accessPath(placeId, itemId)}/members/${encodeURIComponent(to.userId)}`;
 
+
+type Uploaded = Item & { replaced?: boolean };
+
+/**
+ * Sends bytes with XMLHttpRequest rather than fetch, because only it reports how much has been sent. It resolves
+ * with the answer when its status is `ok`, and rejects with an ApiError otherwise; abort stops it.
+ */
+function send<T>(
+	method: string,
+	path: string,
+	body: Blob,
+	ok: number,
+	onProgress: (sent: number) => void,
+	signal?: AbortSignal,
+): Promise<T> {
+	return new Promise((resolve, reject) => {
+		const xhr = new XMLHttpRequest();
+		xhr.open(method, path);
+		xhr.setRequestHeader("Accept", "application/json");
+		xhr.setRequestHeader("Content-Type", "application/octet-stream");
+		xhr.responseType = "json";
+		xhr.upload.onprogress = (e) => onProgress(e.loaded);
+		xhr.onload = () => {
+			const answer = xhr.response as
+				| (T & { error?: string; exists?: "file" | "folder"; busy?: boolean; offset?: number; resumable?: boolean })
+				| null;
+			if (xhr.status === ok && answer) {
+				resolve(answer);
+				return;
+			}
+			const retryAfter = Number(xhr.getResponseHeader("Retry-After")) || undefined;
+			reject(
+				new ApiError(xhr.status, answer?.error ?? `The Drive answered with an error (${xhr.status}).`, answer?.exists, {
+					busy: answer?.busy,
+					retryAfter,
+					offset: answer?.offset,
+					resumable: answer?.resumable,
+				}),
+			);
+		};
+		xhr.onerror = () => reject(unreachable("The upload"));
+		xhr.onabort = () => reject(new DOMException("The upload was cancelled.", "AbortError"));
+		signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+		if (signal?.aborted) xhr.abort();
+		else xhr.send(body);
+	});
+}
+
 /** The address of a folder of a place: the place itself for its top folder (null). */
-const folderPath = (placeId: number, folderId: number | null) =>
+const inFolder = (placeId: number, folderId: number | null) =>
 	folderId === null ? `/api/places/${placeId}` : `/api/places/${placeId}/items/${folderId}`;
 
 /**
- * Uploads one file into a folder of a place: its bytes as the request's body, its name in the address. The Drive
- * stores the whole file or nothing. When the name is taken it refuses with an ApiError whose `exists` says by what,
- * unless `existing` says to replace the file there or keep both. XMLHttpRequest rather than fetch, because only it
- * reports how much has been sent.
+ * Uploads one file into a folder of a place in one request: its bytes as the request's body, its name in the address.
+ * The Drive stores the whole file or nothing. When the name is taken it refuses with an ApiError whose `exists` says
+ * by what, unless `existing` says to replace the file there or keep both. When it is not its turn for one of the
+ * Drive's transfer slots, the ApiError says `busy`: send it again with the same `turn`, which keeps its place in line.
  */
 function upload(
 	placeId: number,
@@ -183,28 +266,16 @@ function upload(
 	file: File,
 	name: string,
 	existing: Existing | undefined,
+	turn: string,
 	onProgress: (sent: number) => void,
-): Promise<Item & { replaced?: boolean }> {
-	const query = new URLSearchParams({ name });
+	signal?: AbortSignal,
+): Promise<Uploaded> {
+	const query = new URLSearchParams({ name, turn });
 	if (existing) query.set("existing", existing);
-	const path = folderId === null ? `/api/places/${placeId}/files` : `/api/places/${placeId}/items/${folderId}/files`;
-	return new Promise((resolve, reject) => {
-		const xhr = new XMLHttpRequest();
-		xhr.open("POST", `${path}?${query}`);
-		xhr.setRequestHeader("Accept", "application/json");
-		xhr.setRequestHeader("Content-Type", "application/octet-stream");
-		xhr.responseType = "json";
-		xhr.upload.onprogress = (e) => onProgress(e.loaded);
-		xhr.onload = () => {
-			const body = xhr.response as (Item & { replaced?: boolean; error?: string; exists?: "file" | "folder" }) | null;
-			if (xhr.status === 201 && body) resolve(body);
-			else reject(new ApiError(xhr.status, body?.error ?? `The Drive answered with an error (${xhr.status}).`, body?.exists));
-		};
-		xhr.onerror = () =>
-			reject(new ApiError(0, "The upload could not reach the Drive. Check your connection and try again."));
-		xhr.send(file);
-	});
+	return send<Uploaded>("POST", `${inFolder(placeId, folderId)}/files?${query}`, file, 201, onProgress, signal);
 }
+
+const sessionPath = (placeId: number, id: string) => `/api/places/${placeId}/uploads/${id}`;
 
 export const api = {
 	me: () => call<Me>("GET", "/api/me"),
@@ -229,9 +300,9 @@ export const api = {
 		call<{ access: Access[] }>("DELETE", granteePath(placeId, itemId, from)).then((r) => r.access),
 	usage: () => call<Usage>("GET", "/api/usage"),
 	/** What is in a folder of a place (null: its top folder). */
-	list: (placeId: number, folderId: number | null) => call<Listing>("GET", `${folderPath(placeId, folderId)}/items`),
+	list: (placeId: number, folderId: number | null) => call<Listing>("GET", `${inFolder(placeId, folderId)}/items`),
 	newFolder: (placeId: number, folderId: number | null, name: string) =>
-		call<Item>("POST", `${folderPath(placeId, folderId)}/folders`, { name }),
+		call<Item>("POST", `${inFolder(placeId, folderId)}/folders`, { name }),
 	rename: (placeId: number, itemId: number, name: string) =>
 		call<Item>("POST", `/api/places/${placeId}/items/${itemId}/rename`, { name }),
 	/** Moves an item into a folder of the same place (null: its top folder). */
@@ -243,6 +314,34 @@ export const api = {
 	restore: (placeId: number, itemId: number) =>
 		call<{ item: Item; path: FolderRef[] }>("POST", `/api/places/${placeId}/trash/${itemId}/restore`),
 	upload,
+	/**
+	 * Starts a resumable upload of a large file into a folder of a place. As for an upload in one request, a name that
+	 * is taken is refused with `exists` unless `existing` says what to do: before anything is sent.
+	 */
+	startUpload: (placeId: number, folderId: number | null, name: string, size: number, existing: Existing | undefined) => {
+		const query = new URLSearchParams({ name, size: String(size) });
+		if (existing) query.set("existing", existing);
+		return call<Session>("POST", `${inFolder(placeId, folderId)}/uploads?${query}`);
+	},
+	/** Where a resumable upload stands: how much has arrived, and whether it waits its turn. */
+	uploadState: (placeId: number, id: string) => call<Session>("GET", sessionPath(placeId, id)),
+	/** Sends one part of a resumable upload, from offset, which must be where what has arrived ends. */
+	uploadPart: (placeId: number, id: string, offset: number, part: Blob, onProgress: (sent: number) => void, signal?: AbortSignal) =>
+		send<{ offset: number }>("PUT", `${sessionPath(placeId, id)}?offset=${offset}`, part, 200, onProgress, signal),
+	/** Moves a whole resumable upload into its folder. A name taken meanwhile is refused with `exists`, as at the start. */
+	finishUpload: (placeId: number, id: string, existing: Existing | undefined) =>
+		call<Uploaded>("POST", `${sessionPath(placeId, id)}/finish${existing ? `?existing=${existing}` : ""}`),
+	/** Cancels a resumable upload: what arrived of it is removed. */
+	cancelUpload: (placeId: number, id: string) => call<null>("DELETE", sessionPath(placeId, id)),
 	/** The address that downloads a file under its original name. */
 	downloadUrl: (placeId: number, itemId: number) => `/api/places/${placeId}/items/${itemId}/download`,
+	/**
+	 * The address that downloads a folder of a place (null: its top folder) as one zip; with items, only those items
+	 * of it.
+	 */
+	zipUrl: (placeId: number, folderId: number | null, items?: number[]) => {
+		const query = new URLSearchParams();
+		for (const id of items ?? []) query.append("item", String(id));
+		return `${inFolder(placeId, folderId)}/zip${items ? `?${query}` : ""}`;
+	},
 };
