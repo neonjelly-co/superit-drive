@@ -26,17 +26,24 @@ func (d *Drive) TopGrantsFor(ctx context.Context, member string) (map[int64][]in
 	return d.index.TopGrantsFor(ctx, member)
 }
 
+// GrantedTo returns every item something was given on to the member or to everyone in the project, the most recently
+// given first: where "Shared with me" looks. Whether each counts is for the access package to say.
+func (d *Drive) GrantedTo(ctx context.Context, member string) ([]index.Granted, error) {
+	return d.index.GrantedTo(ctx, member)
+}
+
 // Give gives to a role on an item of the place (nil: on the place as a whole, which only a shared folder can be), in
 // place of what they had there; by is the member giving it. check, when not nil, is shown everything given there
 // afterwards and can refuse with an error. It is a change inside the place, so it takes the place's lock: nothing is
-// given in a shared folder that went to the trash (ErrPlaceGone), nor on an item that did (index.ErrNoItem).
-func (d *Drive) Give(ctx context.Context, p index.Place, item *index.Item, to index.Grantee, role, by string, check func(after []index.Grant) error) error {
+// given in a shared folder that went to the trash (ErrPlaceGone), nor on an item that did (index.ErrNoItem). added says
+// whether nothing was given to them there before: a new share, not a role changed.
+func (d *Drive) Give(ctx context.Context, p index.Place, item *index.Item, to index.Grantee, role, by string, check func(after []index.Grant) error) (added bool, err error) {
 	if item == nil && p.Kind != index.SharedFolder {
-		return errors.New("access is given on a shared folder as a whole, and on items; not on a My files as a whole")
+		return false, errors.New("access is given on a shared folder as a whole, and on items; not on a My files as a whole")
 	}
 	leave, err := d.inPlace(ctx, p)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer leave()
 	return d.index.Give(ctx, p.ID, folderID(item), to, role, d.now(), by, check)

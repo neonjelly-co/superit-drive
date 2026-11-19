@@ -3,12 +3,17 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
+	"github.com/neonjelly-co/superit-drive/internal/mail"
 	"github.com/neonjelly-co/superit-drive/internal/members"
 )
 
@@ -47,11 +52,18 @@ type accessJSON struct {
 // (the owner of a My files; on a shared folder, every project admin), then what was given, from the top down, each
 // in the order it was given. Grants that count for nothing (access.Counts) are left out.
 func (s *Server) accessList(ctx context.Context, who access.Person, p index.Place, path []index.Item) ([]accessJSON, error) {
-	ids := idsOf(path)
-	grants, err := s.drive.GrantsOn(ctx, p, ids)
+	grants, err := s.drive.GrantsOn(ctx, p, idsOf(path))
 	if err != nil {
 		return nil, err
 	}
+	return s.accessLines(who, p, path, grants), nil
+}
+
+// accessLines is accessList with the grants on the place's top folder and on path already gathered: also for where an
+// item would be, before a move.
+func (s *Server) accessLines(who access.Person, p index.Place, path []index.Item, grants []index.Grant) []accessJSON {
+	ids := idsOf(path)
+	grants = slices.Clone(grants)
 	where := s.accessPlace(p, ids, grants)
 	list := s.members.Current()
 	out := []accessJSON{}
@@ -98,7 +110,7 @@ func (s *Server) accessList(ctx context.Context, who access.Person, p index.Plac
 		}
 		out = append(out, e)
 	}
-	return out, nil
+	return out
 }
 
 // pathOfCall is the item a request is about, after the folders above it; none for a place as a whole.
@@ -209,9 +221,79 @@ func (s *Server) giveAccess(who grantee) func(http.ResponseWriter, *http.Request
 		if c.item == nil {
 			check = s.keepsAManager(*c.place)
 		}
-		err := s.drive.Give(r.Context(), *c.place, c.item, to, string(body.Role), c.member.UserID, check)
+		added, err := s.drive.Give(r.Context(), *c.place, c.item, to, string(body.Role), c.member.UserID, check)
+		if added && !to.Everyone {
+			if m, ok := s.members.Current().Lookup(to.Member); ok {
+				s.tellShared(c, m, body.Role)
+			}
+		}
 		s.changedAccess(w, r, c, err)
 	}
+}
+
+// tellShared mails a member that the person asking has just shared something with them by name: a new share, not a
+// role changed or given again, and never to the person sharing. Sharing with everyone in the project sends nothing. It
+// returns at once: the mail is sent in the background, and whatever happens to it, the share stands.
+//
+// The mail says only what the member may now see: the sharer's name, the item's name (or the shared folder's, when it
+// was given as a whole), the project's, and a link to it at DRIVE_ADDRESS. It never names a folder above what was
+// shared, nor the shared folder an item is in.
+func (s *Server) tellShared(c call, to members.Member, role access.Role) {
+	if !s.mail.On() || to.UserID == c.member.UserID || s.address == nil {
+		return
+	}
+	link := url.Values{"place": {strconv.FormatInt(c.place.ID, 10)}}
+	what, name := "the shared folder", c.place.Name
+	switch {
+	case c.item == nil:
+	case c.item.Folder:
+		what, name = "the folder", c.item.Name
+		link.Set("folder", strconv.FormatInt(c.item.ID, 10))
+	default:
+		// A file has no page of its own: the folder it is in, when they may open it, and otherwise "Shared with me",
+		// which lists it.
+		what, name = "the file", c.item.Name
+		if !access.Decide(personOf(to), access.List, c.access.Up(len(c.access.Path)-1)) {
+			link = url.Values{"shared": {""}}
+		} else if c.item.ParentID != 0 {
+			link.Set("folder", strconv.FormatInt(c.item.ParentID, 10))
+		}
+	}
+	address := *s.address
+	address.Path, address.RawQuery = "/", strings.TrimSuffix(link.Encode(), "=")
+	sharer, name := mail.Clean(nameOf(c.member)), mail.Clean(name)
+	var can string
+	switch role {
+	case access.Viewer:
+		can = "You can open and download it."
+	case access.Editor:
+		can = "As an editor you can also upload, rename, move and delete, and share it further."
+	case access.Manager:
+		can = "As a manager you can also decide who has access to it, and delete it."
+	}
+	body := fmt.Sprintf("%s shared %s “%s” with you in the Drive of %s.\n%s\n\nOpen it: %s\n",
+		sharer, what, name, mail.Clean(s.project), can, address.String())
+	s.mail.Send(mail.Message{
+		To:      to.Email,
+		Subject: fmt.Sprintf("%s shared “%s” with you", sharer, name),
+		Body:    body,
+		About:   []any{"mail", "shared with you", "recipient", to.UserID, "place", c.place.ID, "item", itemID(c.item)},
+	})
+}
+
+// nameOf is a member's name as people read it: their display name, or their email address.
+func nameOf(m members.Member) string {
+	if strings.TrimSpace(m.DisplayName) != "" {
+		return m.DisplayName
+	}
+	return m.Email
+}
+
+func itemID(it *index.Item) int64 {
+	if it == nil {
+		return 0
+	}
+	return it.ID
 }
 
 // roleRefused says which roles can be given where the request tried to give one that cannot.

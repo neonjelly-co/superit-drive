@@ -237,6 +237,73 @@ func (x *Index) DropGone(ctx context.Context, placeID, folderID, id int64, name 
 	})
 }
 
+// ErrUploading: an upload in progress goes into the folder, or into a folder inside it.
+var ErrUploading = errors.New("an upload in progress goes into it")
+
+// MoveToPlace moves a live item of one place, with everything in it, into a folder of another place (folderID 0: its
+// top folder) under name. The storage has already moved it there, so a row the index still holds under that name there
+// is out of date and is dropped first. It keeps its id, and so do the items inside it.
+//
+// What was given on the item and on everything inside it goes with them (the foreign key on the grants' item and
+// place follows the item). What was given on the folders above it in its old place stays with them, so it no longer
+// reaches the item. An item in the old place's trash that was deleted out of it stays there, and goes back to that
+// place's top folder. It refuses (ErrUploading) while an upload in progress goes into it or into a folder inside it:
+// that upload belongs to the old place.
+func (x *Index) MoveToPlace(ctx context.Context, fromPlace, id, toPlace, folderID int64, name string) (Item, error) {
+	err := x.write(ctx, func(tx *sql.Tx) error {
+		if busy, err := uploading(ctx, tx, fromPlace, id); err != nil {
+			return err
+		} else if busy {
+			return ErrUploading
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM items
+			WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL`,
+			toPlace, folderID, name); err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, insideItem+`
+			UPDATE items SET place_id = ? WHERE id IN (SELECT id FROM inside)`, id, fromPlace, MaxDepth, toPlace)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n < 1 {
+			return fmt.Errorf("moving item %d to another place in the index: %w", id, ErrNoItem)
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE items SET parent_id = ?, name = ? WHERE id = ? AND place_id = ?`,
+			parent(folderID), name, id, toPlace)
+		return err
+	})
+	if err != nil {
+		return Item{}, err
+	}
+	return x.Item(ctx, toPlace, id)
+}
+
+// insideItem is a live item of a place (its id, the place's id) and everything inside it, at any depth (MaxDepth).
+const insideItem = `
+	WITH RECURSIVE inside (id, depth) AS (
+		SELECT id, 0 FROM items WHERE id = ? AND place_id = ? AND trashed_at IS NULL
+		UNION ALL
+		SELECT items.id, inside.depth + 1 FROM items JOIN inside ON items.parent_id = inside.id
+		WHERE inside.depth < ?
+	)`
+
+// Uploading says whether an upload in progress goes into the live item of the place, or into a folder inside it.
+func (x *Index) Uploading(ctx context.Context, placeID, id int64) (bool, error) {
+	return uploading(ctx, x.db, placeID, id)
+}
+
+func uploading(ctx context.Context, q querier, placeID, id int64) (bool, error) {
+	rows, err := q.QueryContext(ctx, insideItem+`
+		SELECT 1 FROM uploads WHERE place_id = ? AND folder_id IN (SELECT id FROM inside) LIMIT 1`, id, placeID, MaxDepth, placeID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	return rows.Next(), rows.Err()
+}
+
 // Relocate gives a live item a new folder in its place (folderID 0: the top folder) and a new name: a rename, a move,
 // or both. The storage has already moved it, so a row the index still holds under the new name there is out of date
 // and is dropped first.

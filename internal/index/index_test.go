@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -157,10 +158,10 @@ func TestASharedFolderAndItsManagers(t *testing.T) {
 	ledger := put(t, x, clients, 0, "Ledger.xlsx", false, 40)
 
 	dora := Grantee{Member: "u-dora"}
-	if err := x.Give(ctx, clients.ID, 0, dora, "manager", now, "u-bence", nil); err != nil {
+	if _, err := x.Give(ctx, clients.ID, 0, dora, "manager", now, "u-bence", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := x.Give(ctx, clients.ID, 0, dora, "owner", now, "u-bence", nil); err == nil {
+	if _, err := x.Give(ctx, clients.ID, 0, dora, "owner", now, "u-bence", nil); err == nil {
 		t.Fatal("a role the index does not hold was given")
 	}
 	if given, _ := x.TopGrantsFor(ctx, "u-dora"); len(given[clients.ID]) != 1 || given[clients.ID][0].Role != "manager" || len(given) != 1 {
@@ -404,19 +405,19 @@ func TestAGrantOnAnItemLivesAndGoesWithIt(t *testing.T) {
 	toReka := Grantee{Member: "u-reka"}
 	everyone := Grantee{Everyone: true}
 
-	if err := x.Give(ctx, bence.ID, clients.ID, toReka, "viewer", now, "u-bence", nil); err != nil {
-		t.Fatal(err)
+	if added, err := x.Give(ctx, bence.ID, clients.ID, toReka, "viewer", now, "u-bence", nil); err != nil || !added {
+		t.Fatalf("a first grant to Réka: added %v, %v", added, err)
 	}
-	if err := x.Give(ctx, bence.ID, offer.ID, everyone, "editor", now, "u-bence", nil); err != nil {
+	if _, err := x.Give(ctx, bence.ID, offer.ID, everyone, "editor", now, "u-bence", nil); err != nil {
 		t.Fatal(err)
 	}
 	// "everyone" is not a member, even one whose user id is "everyone".
-	if err := x.Give(ctx, bence.ID, offer.ID, Grantee{Member: "everyone"}, "viewer", now, "u-bence", nil); err != nil {
+	if _, err := x.Give(ctx, bence.ID, offer.ID, Grantee{Member: "everyone"}, "viewer", now, "u-bence", nil); err != nil {
 		t.Fatal(err)
 	}
 	// Giving again replaces the role, and who gave it.
-	if err := x.Give(ctx, bence.ID, clients.ID, toReka, "editor", now.Add(time.Second), "u-dora", nil); err != nil {
-		t.Fatal(err)
+	if added, err := x.Give(ctx, bence.ID, clients.ID, toReka, "editor", now.Add(time.Second), "u-dora", nil); err != nil || added {
+		t.Fatalf("Réka's role changed: added %v, %v", added, err)
 	}
 	got, err := x.GrantsOn(ctx, bence.ID, []int64{clients.ID, offer.ID})
 	if err != nil || len(got) != 3 {
@@ -442,7 +443,7 @@ func TestAGrantOnAnItemLivesAndGoesWithIt(t *testing.T) {
 	}
 
 	// Not on an item of another place, through Give or behind its back; not on one in the trash.
-	if err := x.Give(ctx, reka.ID, offer.ID, toReka, "editor", now, "u-reka", nil); !errors.Is(err, ErrNoItem) {
+	if _, err := x.Give(ctx, reka.ID, offer.ID, toReka, "editor", now, "u-reka", nil); !errors.Is(err, ErrNoItem) {
 		t.Fatalf("a grant on Bence's item through Réka's place: %v", err)
 	}
 	if _, err := x.db.ExecContext(ctx, "INSERT INTO grants (place_id, item_id, grantee, member, role, given_at) VALUES (?, ?, 'member', 'u-reka', 'editor', 0)", reka.ID, offer.ID); err == nil {
@@ -462,7 +463,7 @@ func TestAGrantOnAnItemLivesAndGoesWithIt(t *testing.T) {
 		t.Fatalf("Clients in the trash: %+v, %v", tr, err)
 	}
 	for _, it := range []Item{clients, offer} {
-		if err := x.Give(ctx, bence.ID, it.ID, Grantee{Member: "u-dora"}, "viewer", now, "u-bence", nil); !errors.Is(err, ErrNoItem) {
+		if _, err := x.Give(ctx, bence.ID, it.ID, Grantee{Member: "u-dora"}, "viewer", now, "u-bence", nil); !errors.Is(err, ErrNoItem) {
 			t.Fatalf("a grant on %s in the trash: %v", it.Name, err)
 		}
 	}
@@ -604,5 +605,103 @@ func TestCountInside(t *testing.T) {
 		if n, err := x.CountInside(ctx, bence.ID, c.ids, c.limit); err != nil || n != c.want {
 			t.Errorf("%v up to %d: got %d, %v; want %d", c.ids, c.limit, n, err, c.want)
 		}
+	}
+}
+
+// Moved into another place, an item takes everything in it along, with what was given on each of them; what was given
+// on the folders above it in its old place stays there and no longer reaches it. Not while an upload goes into it.
+func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	now := time.Now()
+	bence := place(t, x, "u-bence")
+	team, err := x.AddSharedFolder(ctx, "Team", "Shared folders/Team", "u-bence", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := put(t, x, bence, 0, "Clients", true, 0)
+	bakery := put(t, x, bence, clients.ID, "Bakery", true, 0)
+	y2026 := put(t, x, bence, bakery.ID, "2026", true, 0)
+	offer := put(t, x, bence, y2026.ID, "Offer.pdf", false, 84)
+	old := put(t, x, bence, bakery.ID, "Old.pdf", false, 3)
+	if err := x.Trash(ctx, bence.ID, old.ID, now, "e1", "u-bence"); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range []struct {
+		on   int64
+		to   Grantee
+		role string
+	}{{clients.ID, Grantee{Member: "u-reka"}, "viewer"}, {bakery.ID, Grantee{Member: "u-dora"}, "editor"}, {offer.ID, Grantee{Everyone: true}, "viewer"}} {
+		if _, err := x.Give(ctx, bence.ID, g.on, g.to, g.role, now, "u-bence", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := x.GrantedTo(ctx, "u-dora"); err != nil || !slices.Equal(got, []Granted{{bence.ID, offer.ID}, {bence.ID, bakery.ID}}) {
+		t.Fatalf("granted to Dóra before the move: %+v, %v", got, err)
+	}
+
+	// An upload in progress into a folder inside it belongs to the old place: the move waits for it.
+	up := Upload{ID: "0123456789abcdef0123456789abcdef", PlaceID: bence.ID, FolderID: y2026.ID, Member: "u-dora", Name: "Big.bin",
+		Size: 10, Started: now, Touched: now}
+	if err := x.AddUpload(ctx, up); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery"); !errors.Is(err, ErrUploading) {
+		t.Fatalf("moving Bakery with an upload into 2026: %v", err)
+	}
+	if err := x.RemoveUpload(ctx, up.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A row the index still holds under the name there is out of date: the storage has already moved Bakery there.
+	put(t, x, team, 0, "Bakery", false, 1)
+	moved, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery")
+	if err != nil || moved.ID != bakery.ID || moved.PlaceID != team.ID || moved.ParentID != 0 || len(moved.Above) != 0 {
+		t.Fatalf("Bakery moved into Team: %+v, %v", moved, err)
+	}
+	if it, err := x.Item(ctx, team.ID, offer.ID); err != nil || len(it.Above) != 2 || it.Above[0].ID != bakery.ID {
+		t.Fatalf("Offer.pdf in Team: %+v, %v", it, err)
+	}
+	for _, id := range []int64{bakery.ID, y2026.ID, offer.ID} {
+		if _, err := x.Item(ctx, bence.ID, id); !errors.Is(err, ErrNoItem) {
+			t.Fatalf("item %d is still found in Bence's My files: %v", id, err)
+		}
+	}
+	if children, _ := x.Children(ctx, team.ID, 0); len(children) != 1 || children[0].ID != bakery.ID || !children[0].Folder {
+		t.Fatalf("Team's top folder: %+v", children)
+	}
+	var lines []string
+	got, _ := x.GrantsOn(ctx, team.ID, []int64{bakery.ID, y2026.ID, offer.ID})
+	for _, g := range got {
+		lines = append(lines, fmt.Sprintf("%d %v %s %s", g.Item, g.Everyone, g.Member, g.Role))
+	}
+	want := []string{"0 false u-bence manager", fmt.Sprintf("%d false u-dora editor", bakery.ID), fmt.Sprintf("%d true  viewer", offer.ID)}
+	if !slices.Equal(lines, want) {
+		t.Fatalf("grants in Team on the way to Offer.pdf: %q, want %q", lines, want)
+	}
+	if got, _ := x.GrantsOn(ctx, bence.ID, []int64{clients.ID}); len(got) != 1 || got[0].Member != "u-reka" {
+		t.Fatalf("grants left on Clients: %+v", got)
+	}
+	if got, _ := x.GrantedTo(ctx, "u-dora"); !slices.Equal(got, []Granted{{team.ID, offer.ID}, {team.ID, bakery.ID}}) {
+		t.Fatalf("granted to Dóra after the move: %+v", got)
+	}
+	// What was deleted out of Bakery earlier stays in Bence's trash, and goes back to his top folder.
+	if tr, err := x.TrashItem(ctx, bence.ID, old.ID); err != nil || tr.PlaceID != bence.ID {
+		t.Fatalf("Old.pdf in the trash: %+v, %v", tr, err)
+	}
+	if _, err := x.Item(ctx, bence.ID, bakery.ID); !errors.Is(err, ErrNoItem) {
+		t.Fatal("Old.pdf's folder is still found in Bence's My files")
+	}
+	if _, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery"); !errors.Is(err, ErrNoItem) {
+		t.Fatalf("moving Bakery out of Bence's My files again: %v", err)
+	}
+	rows, err := x.db.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken := rows.Next()
+	rows.Close()
+	if broken {
+		t.Fatal("a row refers to one that is not there after the move")
 	}
 }

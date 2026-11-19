@@ -161,6 +161,25 @@ func (d *Drive) inPlace(ctx context.Context, p index.Place) (release func(), err
 	return l.RUnlock, nil
 }
 
+// inPlaces is inPlace for a change in two places at once, such as a move from one into the other: it holds both
+// places' locks, the one with the lower id first, so that two such changes in opposite directions never each hold one
+// and wait for the other.
+func (d *Drive) inPlaces(ctx context.Context, a, b index.Place) (release func(), err error) {
+	if a.ID > b.ID {
+		a, b = b, a
+	}
+	first, err := d.inPlace(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	second, err := d.inPlace(ctx, b)
+	if err != nil {
+		first()
+		return nil, err
+	}
+	return func() { second(); first() }, nil
+}
+
 // wholePlaceWait is how long moving a whole shared folder waits for the changes inside it to end.
 const wholePlaceWait = 10 * time.Second
 
