@@ -161,6 +161,25 @@ func (d *Drive) inPlace(ctx context.Context, p index.Place) (release func(), err
 	return l.RUnlock, nil
 }
 
+// inPlaces is inPlace for a change in two places at once, such as a move from one into the other: it holds both
+// places' locks, the one with the lower id first, so that two such changes in opposite directions never each hold one
+// and wait for the other.
+func (d *Drive) inPlaces(ctx context.Context, a, b index.Place) (release func(), err error) {
+	if a.ID > b.ID {
+		a, b = b, a
+	}
+	first, err := d.inPlace(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	second, err := d.inPlace(ctx, b)
+	if err != nil {
+		first()
+		return nil, err
+	}
+	return func() { second(); first() }, nil
+}
+
 // wholePlaceWait is how long moving a whole shared folder waits for the changes inside it to end.
 const wholePlaceWait = 10 * time.Second
 
@@ -324,7 +343,11 @@ func (d *Drive) List(ctx context.Context, p index.Place, folder *index.Item) ([]
 		seen = append(seen, index.Seen{Name: e.Name, Folder: e.Folder, Size: e.Size, Changed: e.Changed})
 	}
 	keep := func(name string) bool { return d.claimed(dir + "/" + name) }
-	if err := d.index.SetChildren(ctx, p.ID, folderID(folder), seen, keep, stale); err != nil {
+	err = d.index.SetChildren(ctx, p.ID, folderID(folder), seen, keep, stale)
+	if errors.Is(err, index.ErrNoFolder) {
+		return nil, ErrGone // it moved to another place, or went, while it was being listed
+	}
+	if err != nil {
 		return nil, err
 	}
 	return d.index.Children(ctx, p.ID, folderID(folder))

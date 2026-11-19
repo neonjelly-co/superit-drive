@@ -115,32 +115,36 @@ func (x *Index) TopGrantsFor(ctx context.Context, member string) (map[int64][]Gr
 // Give gives to a role on one item of a place, or on its top folder (itemID 0), in place of what was given to them
 // there; by is the member who gives it. The item must be in the place and not in the trash (ErrNoItem otherwise).
 // check, when not nil, is shown everything given there afterwards, while nobody else can change it; an error from it
-// changes nothing and is returned.
-func (x *Index) Give(ctx context.Context, placeID, itemID int64, to Grantee, role string, at time.Time, by string, check func(after []Grant) error) error {
-	return x.write(ctx, func(tx *sql.Tx) error {
+// changes nothing and is returned. added says whether nothing was given to them there before: a new share, rather
+// than a role changed or given again.
+func (x *Index) Give(ctx context.Context, placeID, itemID int64, to Grantee, role string, at time.Time, by string, check func(after []Grant) error) (added bool, err error) {
+	err = x.write(ctx, func(tx *sql.Tx) error {
 		if itemID != 0 {
 			if _, err := item(ctx, tx, placeID, itemID); err != nil {
 				return err
 			}
 		}
+		before, err := grantsOnOne(ctx, tx, placeID, itemID)
+		if err != nil {
+			return err
+		}
+		added = true
+		after := make([]Grant, 0, len(before)+1)
+		for _, g := range before {
+			if g.Grantee != to {
+				after = append(after, g)
+			} else {
+				added = false
+			}
+		}
+		after = append(after, Grant{Item: itemID, Grantee: to, Role: role, Given: at, By: by})
 		if check != nil {
-			before, err := grantsOnOne(ctx, tx, placeID, itemID)
-			if err != nil {
-				return err
-			}
-			after := make([]Grant, 0, len(before)+1)
-			for _, g := range before {
-				if g.Grantee != to {
-					after = append(after, g)
-				}
-			}
-			after = append(after, Grant{Item: itemID, Grantee: to, Role: role, Given: at, By: by})
 			if err := check(after); err != nil {
 				return err
 			}
 		}
 		grantee, member := to.columns()
-		_, err := tx.ExecContext(ctx, `
+		_, err = tx.ExecContext(ctx, `
 			INSERT INTO grants (place_id, item_id, grantee, member, role, given_at, given_by) VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (place_id, IFNULL(item_id, 0), grantee, IFNULL(member, '')) DO UPDATE
 			SET role = excluded.role, given_at = excluded.given_at, given_by = excluded.given_by
@@ -148,6 +152,37 @@ func (x *Index) Give(ctx context.Context, placeID, itemID int64, to Grantee, rol
 			placeID, parent(itemID), grantee, member, role, at.UnixMilli(), nullable(by))
 		return err
 	})
+	return added && err == nil, err
+}
+
+// A Granted item is one that something was given on, to a member or to everyone in the project: where to look when
+// working out what was shared with them.
+type Granted struct {
+	Place, Item int64
+}
+
+// GrantedTo returns every item that something was given on to the member, or to everyone in the project, each once,
+// the most recently given first. It says nothing about whether it counts, whether the item is in the trash, or whether
+// the person may open it: internal/access decides that, on the whole way down to each.
+func (x *Index) GrantedTo(ctx context.Context, member string) ([]Granted, error) {
+	rows, err := x.db.QueryContext(ctx, `
+		SELECT place_id, item_id FROM grants
+		WHERE item_id IS NOT NULL AND (grantee = 'everyone' OR member = ?)
+		GROUP BY place_id, item_id
+		ORDER BY MAX(given_at) DESC, item_id DESC`, member)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Granted
+	for rows.Next() {
+		var g Granted
+		if err := rows.Scan(&g.Place, &g.Item); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
 }
 
 // TakeAway takes away what was given to from on one item of a place, or on its top folder (itemID 0), if anything

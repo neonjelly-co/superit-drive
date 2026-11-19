@@ -65,7 +65,11 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 		return index.Item{}, storageError(err)
 	}
 	d.changed(folderKey{p.ID, folderID(in)})
-	return d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()})
+	it, err := d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()})
+	if errors.Is(err, index.ErrNoFolder) {
+		return index.Item{}, ErrGone // its folder moved away, or went, meanwhile; a listing finds the new one there
+	}
+	return it, err
 }
 
 // free says, with a *Taken error, whether something is already at the storage path p, called name.
@@ -100,26 +104,124 @@ func (d *Drive) Rename(ctx context.Context, p index.Place, it index.Item, name s
 // Move puts a live item of the place, with everything in it, into another folder of the place (nil: its top
 // folder), under its own name. It keeps its id. A folder cannot go into itself or a folder inside it.
 func (d *Drive) Move(ctx context.Context, p index.Place, it index.Item, to *index.Item) (index.Item, error) {
-	if to != nil {
-		if !to.Folder {
-			return index.Item{}, ErrNotAFolder
-		}
-		if to.ID == it.ID {
-			return index.Item{}, ErrIntoItself
-		}
-		for _, above := range to.Above {
-			if above.ID == it.ID {
-				return index.Item{}, ErrIntoItself
-			}
-		}
-		if len(to.Above)+2 > index.MaxDepth {
-			return index.Item{}, ErrTooDeep
-		}
+	if err := CanGoInto(it, to); err != nil {
+		return index.Item{}, err
 	}
 	if folderID(to) == it.ParentID {
 		return it, nil
 	}
 	return d.relocate(ctx, p, it, to, it.Name)
+}
+
+// CanGoInto says whether the item can be put into the folder to (nil: a top folder), wherever that is: ErrNotAFolder
+// when to is a file, ErrIntoItself when it is the item or inside it, ErrTooDeep when it is too deep.
+func CanGoInto(it index.Item, to *index.Item) error {
+	if to == nil {
+		return nil
+	}
+	if !to.Folder {
+		return ErrNotAFolder
+	}
+	if to.ID == it.ID {
+		return ErrIntoItself
+	}
+	for _, above := range to.Above {
+		if above.ID == it.ID {
+			return ErrIntoItself
+		}
+	}
+	if len(to.Above)+2 > index.MaxDepth {
+		return ErrTooDeep
+	}
+	return nil
+}
+
+// MoveToPlace puts a live item of the place from, with everything in it, into a folder of another place (nil: its top
+// folder), under its own name: one move on the storage, then the index. It keeps its id, and so does everything in it;
+// what was given on them goes with them, and what was given on the folders above it in from stays there. Nothing is
+// ever replaced: a name taken there is a *Taken error. An upload in progress into it, or into a folder in it, makes it
+// wait (ErrBusy), as one under way does.
+//
+// It is a change inside both places, so it holds both places' locks, always the one with the lower id first: two moves
+// in opposite directions cannot each hold one and wait for the other. Neither place may have gone to the trash
+// meanwhile (ErrPlaceGone).
+func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item, to index.Place, into *index.Item) (index.Item, error) {
+	if from.ID == to.ID {
+		return index.Item{}, errors.New("a move inside one place is Move")
+	}
+	if err := CanGoInto(it, into); err != nil {
+		return index.Item{}, err
+	}
+	src, ok := itemPath(from, it)
+	if !ok {
+		return index.Item{}, ErrGone
+	}
+	dir, ok := folderPath(to, into)
+	if !ok {
+		return index.Item{}, ErrGone
+	}
+	dest, ok := pathIn(dir, it.Name)
+	if !ok {
+		return index.Item{}, ErrGone
+	}
+	leave, err := d.inPlaces(ctx, from, to)
+	if err != nil {
+		return index.Item{}, err
+	}
+	defer leave()
+	release, ok := d.claim(src, dest)
+	if !ok || (it.Folder && d.busyInside(src)) {
+		if ok {
+			release()
+		}
+		return index.Item{}, ErrBusy
+	}
+	defer release()
+	stale := d.since(folderKey{from.ID, it.ParentID})
+	if busy, err := d.index.Uploading(ctx, from.ID, it.ID); err != nil {
+		return index.Item{}, err
+	} else if busy {
+		return index.Item{}, ErrBusy
+	}
+	if err := d.ensureTop(ctx, to, into); err != nil {
+		return index.Item{}, err
+	}
+	if err := d.free(ctx, dest, it.Name); err != nil {
+		return index.Item{}, err
+	}
+
+	err = d.moveOnStorage(ctx, it.Folder, src, dest)
+	switch {
+	case errors.Is(err, storage.ErrExists):
+		return index.Item{}, &Taken{Name: it.Name}
+	case errors.Is(err, storage.ErrNotFound):
+		// The item has gone from the storage, or the folder it was going to has.
+		sctx, cancel := context.WithTimeout(ctx, storageTimeout)
+		_, err := d.storage.Stat(sctx, src)
+		cancel()
+		if errors.Is(err, storage.ErrNotFound) {
+			if err := d.index.DropGone(ctx, from.ID, it.ParentID, it.ID, it.Name, stale); err != nil {
+				return index.Item{}, err
+			}
+		}
+		return index.Item{}, ErrGone
+	case err != nil:
+		return index.Item{}, storageError(err)
+	}
+	// A listing of the item itself under its old place, under way, is out of date too.
+	d.changed(folderKey{from.ID, it.ParentID}, folderKey{to.ID, folderID(into)}, folderKey{from.ID, it.ID})
+	moved, err := d.index.MoveToPlace(ctx, from.ID, it.ID, to.ID, folderID(into), it.Name)
+	switch {
+	case errors.Is(err, index.ErrUploading):
+		// An upload started between the look above and now: put the item back where it was, so the two agree.
+		d.putBack(ctx, it.Folder, src, dest)
+		return index.Item{}, ErrBusy
+	case errors.Is(err, index.ErrNoFolder):
+		// The folder it went into moved away, or went, meanwhile.
+		d.putBack(ctx, it.Folder, src, dest)
+		return index.Item{}, ErrGone
+	}
+	return moved, err
 }
 
 // relocate moves a live item on the storage to the folder to (nil: the place's top folder) under name, then in the
@@ -177,5 +279,20 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 		return index.Item{}, storageError(err)
 	}
 	d.changed(folderKey{p.ID, it.ParentID}, folderKey{p.ID, folderID(to)})
-	return d.index.Relocate(ctx, p.ID, it.ID, folderID(to), name)
+	moved, err := d.index.Relocate(ctx, p.ID, it.ID, folderID(to), name)
+	if errors.Is(err, index.ErrNoFolder) {
+		// The folder it went into moved to another place, or went, meanwhile: put it back, so the two agree.
+		d.putBack(ctx, it.Folder, from, dest)
+		return index.Item{}, ErrGone
+	}
+	return moved, err
+}
+
+// putBack moves an item back on the storage from to, where a move had just put it, to from, after the index refused
+// the move; logged when it cannot (a listing of either folder then sets the index right).
+func (d *Drive) putBack(ctx context.Context, folder bool, from, to string) {
+	if err := d.moveOnStorage(context.WithoutCancel(ctx), folder, to, from); err != nil {
+		d.log.Error("an item moved on the storage could not be put back after the index refused the move; a listing of either folder sets the index right",
+			"from", from, "to", to, "error", err)
+	}
 }

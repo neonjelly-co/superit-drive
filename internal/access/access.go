@@ -33,6 +33,11 @@
 //     trash, or to be the one who put the item there.
 //   - A shared folder in the trash can only be restored, by a manager.
 //   - A "My files" whose owner has left the member list is held: nobody may do anything there.
+//   - Moving between places, in version 1, is only out of one's own "My files" into a shared folder, where it becomes
+//     the project's: its owner may move it out (MoveOut), and it may go into a folder of a shared folder where they may
+//     upload (MoveIn). Every other move stays inside its place.
+//   - "Shared with me" lists what someone may open without being able to open the folder it is in (SharedWithMe): the
+//     highest point of a place their access reaches, given on it to them or to everyone in the project.
 //
 // Guests and public links add their rules here.
 package access
@@ -200,9 +205,17 @@ const (
 	// into its folder: a new name can clash with what is there.
 	Rename Action = "rename"
 	// Move is taking a file or folder out of its folder, which needs the right to Upload into that folder, to put it
-	// into another folder of the same place, where the person must be allowed to Upload too. (Moving between places
-	// needs a decision on both, and comes with the move warning.) It concerns an item.
+	// into another folder of the same place, where the person must be allowed to Upload too. Moving it into another
+	// place also needs MoveOut here and MoveIn there. It concerns an item.
 	Move Action = "move"
+	// MoveOut is taking a file or folder out of its place into another one: whoever may Move it, and is the owner of the
+	// "My files" it is in. It goes only into a shared folder (MoveIn), where it becomes the project's, after a warning
+	// that says who will see it there. Nothing leaves a shared folder this way, and nobody moves what was shared with
+	// them out of someone else's "My files". It concerns an item.
+	MoveOut Action = "move-out"
+	// MoveIn is putting a file or folder from another place into a folder (the top folder, or a folder item): as an
+	// upload into it, and only into a shared folder, which belongs to the project.
+	MoveIn Action = "move-in"
 	// Delete is moving a file or folder into its place's trash, out of its folder: it needs the right to Upload into
 	// that folder. It concerns an item.
 	Delete Action = "delete"
@@ -227,7 +240,7 @@ const (
 )
 
 // InAPlace is every action that happens in a place, in the order an interface lists them.
-var InAPlace = []Action{List, Download, Upload, MakeFolder, Rename, Move, Delete, SeeTrash, Restore,
+var InAPlace = []Action{List, Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeTrash, Restore,
 	SeeAccess, Share, ManageAccess, DeleteSharedFolder, RestoreSharedFolder}
 
 // Decide says whether person may do action at place: in its top folder when place.Path is empty, and at the last item
@@ -242,6 +255,14 @@ func Decide(person Person, action Action, place *Place) bool {
 	role := RoleAt(person, place)
 	if place.Deleted {
 		return place.Kind == SharedFolder && len(place.Path) == 0 && action == RestoreSharedFolder && role == Manager
+	}
+	switch action {
+	case MoveIn:
+		// As an upload into the folder, and only into a shared folder: what comes in from elsewhere becomes the project's.
+		return place.Kind == SharedFolder && Decide(person, Upload, place)
+	case MoveOut:
+		// Only out of one's own My files, by whoever may move it there: its owner.
+		return len(place.Path) > 0 && role == Owner && Decide(person, Move, place)
 	}
 	if len(place.Path) == 0 {
 		return atTop[role][action]
@@ -262,6 +283,21 @@ func Decide(person Person, action Action, place *Place) bool {
 		return place.DeletedBy == person.UserID || Decide(person, SeeTrash, place.Up(0))
 	}
 	return true
+}
+
+// SharedWithMe says whether "Shared with me" lists, for the person, the live item place is about: they may open it, and
+// not the folder it is in. Access only widens down the tree, so their access starts right there, given on the item
+// itself to them or to everyone in the project, and they can open nothing above it: the place is not among theirs
+// (their own My files, a shared folder they have a role on as a whole), and the names above it are not theirs to see.
+// What is inside a shared folder is reached by opening it, and is not listed again, whatever role was given on it.
+//
+// Whatever no longer counts is not listed, as nothing else is open to them: a held My files, an item in a shared folder
+// in the trash, a grant to someone else.
+func SharedWithMe(person Person, place *Place) bool {
+	if place == nil || len(place.Path) == 0 || place.Deleted {
+		return false
+	}
+	return Decide(person, List, place) && !Decide(person, List, place.Up(len(place.Path)-1))
 }
 
 // What each role may do in a place's top folder. The owner of a "My files" has nothing to manage and nobody to show

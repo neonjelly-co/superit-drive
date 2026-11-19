@@ -357,7 +357,14 @@ func (d *Drive) restoreInto(ctx context.Context, p index.Place, t index.TrashIte
 		return index.Item{}, ErrGone
 	}
 	d.changed(folderKey{p.ID, folderID(dest)}, folderKey{p.ID, trashFolder})
-	return d.index.Restore(ctx, p.ID, t.ID, folderID(dest), name)
+	it, err := d.index.Restore(ctx, p.ID, t.ID, folderID(dest), name)
+	if errors.Is(err, index.ErrNoFolder) {
+		// The folder it went back into moved to another place, or went, meanwhile: back into the trash, and the top
+		// folder is tried instead.
+		d.putBack(ctx, t.Folder, from, to)
+		return index.Item{}, ErrGone
+	}
+	return it, err
 }
 
 // Tidy removes for good everything that has been in a trash for 30 days, in every place, and the uploads abandoned

@@ -88,6 +88,9 @@ func (x *Index) AddReplaced(ctx context.Context, placeID, folderID int64, s Seen
 // date and is dropped first.
 func (x *Index) Restore(ctx context.Context, placeID, id, folderID int64, name string) (Item, error) {
 	err := x.write(ctx, func(tx *sql.Tx) error {
+		if err := liveFolder(ctx, tx, placeID, folderID); err != nil {
+			return err
+		}
 		_, err := tx.ExecContext(ctx, `
 			DELETE FROM items WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL`,
 			placeID, folderID, name)

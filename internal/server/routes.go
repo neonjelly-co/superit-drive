@@ -36,6 +36,9 @@ func (s *Server) routes() []route {
 		{pattern: "GET /api/members", action: access.Enter, serve: s.memberList},
 		{pattern: "GET /api/places", action: access.Enter, serve: s.places},
 		{pattern: "GET /api/usage", action: access.SeeUsage, serve: s.usage},
+		// What others shared with the person that they reach only through it (shared_with_me.go): each item is decided
+		// there by access.SharedWithMe.
+		{pattern: "GET /api/shared-with-me", action: access.Enter, serve: s.sharedWithMe},
 
 		// Shared folders as a whole (shared.go).
 		{pattern: "POST /api/places", action: access.MakeSharedFolder, serve: s.newSharedFolder},
@@ -62,7 +65,10 @@ func (s *Server) routes() []route {
 		{pattern: "POST /api/places/{place}/folders", action: access.MakeFolder, place: "place", serve: s.newFolder},
 		{pattern: "POST /api/places/{place}/items/{item}/folders", action: access.MakeFolder, place: "place", item: "item", serve: s.newFolder},
 		{pattern: "POST /api/places/{place}/items/{item}/rename", action: access.Rename, place: "place", item: "item", serve: s.rename},
+		// Moves (moves.go): inside the place, or out of one's own My files into a shared folder, decided again where it
+		// goes; and, before one, who would see it there.
 		{pattern: "POST /api/places/{place}/items/{item}/move", action: access.Move, place: "place", item: "item", serve: s.move},
+		{pattern: "GET /api/places/{place}/items/{item}/move", action: access.Move, place: "place", item: "item", serve: s.movePreview},
 		{pattern: "DELETE /api/places/{place}/items/{item}", action: access.Delete, place: "place", item: "item", serve: s.delete},
 
 		{pattern: "GET /api/places/{place}/trash", action: access.SeeTrash, place: "place", serve: s.trash},
@@ -401,72 +407,7 @@ func (s *Server) rename(w http.ResponseWriter, r *http.Request, c call) {
 	writeJSON(w, http.StatusOK, itemOf(it))
 }
 
-// move puts a file or folder, with everything in it, into another folder of the same place: "to" is the folder's id,
-// or null for the place's top folder. The folder is looked up in the place the request was decided on, and the person
-// must be allowed to put things into it (access.Upload), decided there as for any other request: someone given a
-// folder can move things within it, but not out of it into a folder they cannot add to. (Moves between places come
-// with the move warning, and need a decision on each.)
-//
-//	POST /api/places/{place}/items/{item}/move     {"to": 42}
-func (s *Server) move(w http.ResponseWriter, r *http.Request, c call) {
-	var body struct {
-		To json.RawMessage `json:"to"`
-	}
-	if !s.readBody(w, r, &body) {
-		return
-	}
-	var to *index.Item
-	switch raw := strings.TrimSpace(string(body.To)); raw {
-	case "":
-		s.refuse(w, r, http.StatusBadRequest, "The Drive could not read this request.")
-		return
-	case "null":
-	default:
-		id, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil || id <= 0 {
-			s.refuse(w, r, http.StatusBadRequest, "The Drive could not read this request.")
-			return
-		}
-		folder, err := s.drive.Item(r.Context(), *c.place, id)
-		if errors.Is(err, index.ErrNoItem) {
-			s.refuse(w, r, http.StatusNotFound, noSuchDestination)
-			return
-		}
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		to = &folder
-	}
-	var into []index.Item
-	if to != nil {
-		into = pathTo(*to)
-	}
-	where, err := s.accessAt(r.Context(), *c.place, idsOf(into))
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	if !access.Decide(personOf(c.member), access.Upload, where) {
-		// The same answer as for a folder that is not there.
-		s.refuse(w, r, http.StatusNotFound, noSuchDestination)
-		return
-	}
-	it, err := s.drive.Move(r.Context(), *c.place, *c.item, to)
-	var taken *drive.Taken
-	switch {
-	case err == nil:
-		writeJSON(w, http.StatusOK, itemOf(it))
-	case errors.As(err, &taken):
-		s.refuseTaken(w, r, taken, "There is already something called “"+taken.Name+"” in that folder. Rename one of them first.")
-	default:
-		s.changeFailed(w, r, err, c.item.Name)
-	}
-}
-
 var errCannotGoBack = errors.New("the person may not put it back where it would go")
-
-const noSuchDestination = "The folder to move it into is not in the Drive, or you cannot add to it. Reload the page and try again."
 
 // changeFailed answers a change to a file or folder that did not happen. name is the name it concerned.
 func (s *Server) changeFailed(w http.ResponseWriter, r *http.Request, err error, name string) {
@@ -487,6 +428,9 @@ func (s *Server) changeFailed(w http.ResponseWriter, r *http.Request, err error,
 		s.refuse(w, r, http.StatusBadRequest, "Folders can go at most "+strconv.Itoa(index.MaxDepth-1)+" deep.")
 	case errors.Is(err, drive.ErrGone):
 		s.refuse(w, r, http.StatusNotFound, "This is no longer on the Drive storage. Reload the page to see what is there now.")
+	case errors.Is(err, index.ErrNoItem):
+		// It went to the trash, or somewhere else, after guard found it: the same answer guard gives from now on.
+		s.refuse(w, r, http.StatusNotFound, notHere)
 	case errors.Is(err, drive.ErrFull):
 		s.refuse(w, r, http.StatusInsufficientStorage, "The Drive storage is full.")
 	default:

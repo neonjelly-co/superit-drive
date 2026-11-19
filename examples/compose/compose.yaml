@@ -47,6 +47,13 @@ services:
       DRIVE_STORAGE_PASSWORD: ${DRIVE_STORAGE_PASSWORD:?set DRIVE_STORAGE_PASSWORD in .env}
       DRIVE_STORAGE_FOLDER: ${DRIVE_STORAGE_FOLDER:-/}
       DRIVE_CAPACITY: ${DRIVE_CAPACITY:-}
+      # The mail server for "shared with you" mail; all empty: no mail.
+      DRIVE_SMTP_HOST: ${DRIVE_SMTP_HOST:-}
+      DRIVE_SMTP_PORT: ${DRIVE_SMTP_PORT:-}
+      DRIVE_SMTP_TLS: ${DRIVE_SMTP_TLS:-}
+      DRIVE_SMTP_USER: ${DRIVE_SMTP_USER:-}
+      DRIVE_SMTP_PASSWORD: ${DRIVE_SMTP_PASSWORD:-}
+      DRIVE_MAIL_FROM: ${DRIVE_MAIL_FROM:-}
     volumes:
       # The folder holding the member list, not the file: a file mount would not see the file replaced.
       - ./members:/members:ro

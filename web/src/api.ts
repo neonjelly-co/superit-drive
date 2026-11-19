@@ -18,6 +18,8 @@ export type Action =
 	| "make-folder"
 	| "rename"
 	| "move"
+	| "move-out"
+	| "move-in"
 	| "delete"
 	| "see-trash"
 	| "restore"
@@ -122,6 +124,33 @@ export type TrashItem = {
 	/** The folder it goes back to when restored; empty for the top folder. */
 	from: FolderRef[];
 };
+
+/** A member as a list names them. */
+export type Person = { userId: string; email: string; displayName: string };
+
+/**
+ * An item of "Shared with me": something shared with the person, by name or with everyone in the project, that they
+ * reach only through that share. `place` is the place it is in, by id only (never a shared folder's name, which they
+ * cannot open); `owner` is whose My files it is in. They open it at its own address: a folder at
+ * `/?place=…&folder=…`, a file by its download address.
+ */
+export type SharedItem = Item & {
+	place: number;
+	placeKind: "my-files" | "shared-folder";
+	owner?: Person;
+	role: RoleAt;
+	/** Who shared it with them, while they are in the project; toEveryone when it was shared with everyone. */
+	sharedBy?: Person;
+	toEveryone?: boolean;
+	/** When it was shared (ISO 8601). */
+	shared: string;
+};
+
+/**
+ * Who would see an item where a move would put it, as "who can see this" would show it there, before it moves.
+ * becomesProjects: it would leave the person's My files for a shared folder, and become the project's.
+ */
+export type MovePreview = { becomesProjects: boolean; access: Access[]; seenBy: SeenBy };
 
 /** About how much space the Drive's files take, and the storage's size when it is known. Bytes. */
 export type Usage = { used: number; capacity?: number };
@@ -305,9 +334,20 @@ export const api = {
 		call<Item>("POST", `${inFolder(placeId, folderId)}/folders`, { name }),
 	rename: (placeId: number, itemId: number, name: string) =>
 		call<Item>("POST", `/api/places/${placeId}/items/${itemId}/rename`, { name }),
-	/** Moves an item into a folder of the same place (null: its top folder). */
-	move: (placeId: number, itemId: number, to: number | null) =>
-		call<Item>("POST", `/api/places/${placeId}/items/${itemId}/move`, { to }),
+	/**
+	 * Moves an item into a folder (null: the top folder) of its own place, or of toPlace: out of the person's own My
+	 * files into a shared folder, after the warning.
+	 */
+	move: (placeId: number, itemId: number, to: number | null, toPlace?: number) =>
+		call<Item & { place: number }>("POST", `/api/places/${placeId}/items/${itemId}/move`, toPlace === undefined ? { to } : { to, place: toPlace }),
+	/** Who would see an item in a folder of toPlace (null: its top folder), before it moves there. */
+	movePreview: (placeId: number, itemId: number, toPlace: number, to: number | null) => {
+		const query = new URLSearchParams({ place: String(toPlace) });
+		if (to !== null) query.set("to", String(to));
+		return call<MovePreview>("GET", `/api/places/${placeId}/items/${itemId}/move?${query}`);
+	},
+	/** What others shared with the person that they reach only through it, the most recently shared first. */
+	sharedWithMe: () => call<{ items: SharedItem[] }>("GET", "/api/shared-with-me").then((r) => r.items),
 	/** Moves an item into the place's trash. */
 	remove: (placeId: number, itemId: number) => call<TrashItem>("DELETE", `/api/places/${placeId}/items/${itemId}`),
 	trash: (placeId: number) => call<{ items: TrashItem[] }>("GET", `/api/places/${placeId}/trash`).then((r) => r.items),

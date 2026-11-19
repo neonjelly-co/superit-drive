@@ -70,6 +70,12 @@ a test keeps the two equal.)
 | `DRIVE_MEMBERS_FILE` | yes | Path of the member list file. |
 | `DRIVE_DATA_DIR` | yes | Folder for the index. The container image sets it to `/data`. |
 | `DRIVE_LISTEN` | no, `:8080` | Address the web server listens on. |
+| `DRIVE_SMTP_HOST` | no | Mail server the Drive sends its own mail through (see [Mail](#mail)), such as `smtp.example.com`. Empty: the Drive sends no mail, and sharing works without it. |
+| `DRIVE_SMTP_PORT` | no, `587` | Port of the mail server. |
+| `DRIVE_SMTP_TLS` | no | How the connection to the mail server is encrypted: `starttls`, `implicit` (TLS from the first byte) or `none`. Empty: `implicit` on port 465, `starttls` on any other. `none` only without a login. |
+| `DRIVE_SMTP_USER` | no | Login name for the mail server. Empty when it needs none. |
+| `DRIVE_SMTP_PASSWORD` | no | Password for the mail server, with `DRIVE_SMTP_USER`. |
+| `DRIVE_MAIL_FROM` | no | Address the Drive's mail comes from, such as `drive@files.example.com` or `Drive <drive@files.example.com>`. Needed with `DRIVE_SMTP_HOST`. |
 
 ### Layout on the storage
 
@@ -158,6 +164,9 @@ its siblings. Taking access away, or giving less, counts from the next request, 
 | Rename, move or delete it: also needs editor of the folder it is in | | yes | yes |
 | Restore it from the trash: also needs editor of the folder it goes back to, and either the place's whole trash or having put it there | | yes | yes |
 
+Moving something into another place is only for the owner of a "My files": out of it, into a folder of a shared folder
+where they may upload (see [Moving into a shared folder](#moving-into-a-shared-folder)).
+
 | In a shared folder as a whole (its top folder) | Viewer | Editor | Manager |
 |---|---|---|---|
 | List it, download it as a zip, see who has access to it | yes | yes | yes |
@@ -184,8 +193,8 @@ lists each grant and where it comes from.
 **Someone given part of a place.** A member given a folder deep in someone's "My files" (or in a shared folder they
 have no role on as a whole) works inside it as their role allows, and nothing about the rest reaches them:
 
-- the place is not in their places; the folder's address (`/?place=…&folder=…` in the interface, its id in the API)
-  opens it, and its files download at their own address. Finding such items is "Shared with me", a later ticket;
+- the place is not in their places; they find what they were given in "Shared with me" (below), the folder's address
+  (`/?place=…&folder=…` in the interface, its id in the API) opens it, and its files download at their own address;
 - a listing's path starts at the highest folder they can open (`fromTop` is false): the names of the folders above it
   are never sent, nor in "who can see this", which says "from a folder above" for access given there, nor in the
   trash entry a delete answers with;
@@ -220,6 +229,28 @@ by user id), and the folder's own `role` and `can`. Grants live in the index as 
 place as a whole), keyed on the item's id, so they follow it through rename, move, replace and the trash, and go
 with it when it is removed for good or the storage no longer has it.
 
+**Shared with me.** It lists what others shared with the person, by name or with everyone in the project, that they
+reach only through that share: an item in someone else's "My files", or in a shared folder they have no role on as a
+whole. Each is the highest item they can open on its way down (`access.SharedWithMe`): a folder shared with them is
+listed, and what is inside it is not listed again, whatever was given on it, because they reach it by opening the
+folder; taking the folder away brings what was shared inside it on its own into the list. Nothing in their own My files,
+or in a shared folder in their places, is listed. Every item something was given on to them or to everyone is a
+candidate, and each is decided on the whole way down to it, every time, like any other request: whatever no longer counts
+is left out (a held My files, an item or a shared folder in the trash, a share taken away, an item gone from the
+storage). The most recently shared first.
+
+```
+GET    /api/shared-with-me
+       200 {"items": [{"id", "name", "kind", "size", "changed", "can", "seenBy",   the item, as a listing gives it
+                       "place", "placeKind",                   its place by id and kind, never a shared folder's name
+                       "owner": {"userId", "email", "displayName"},    whose My files it is in (none in a shared folder)
+                       "role", "sharedBy": {…}, "toEveryone", "shared"}]}    who shared it (while a member), and when
+```
+
+In the interface, "Shared with me" sits between the shared folders and the Trash. A folder from it opens at its own
+address, with the breadcrumb starting at "Shared with me", then the folder; a file downloads at its own address, and its
+details (who can see it, and sharing it further, for an editor) open beside the list.
+
 People see a shared folder's name. Its top folder on the storage has that name, with ` (2)` and so on added when
 another shared folder, one in the trash included, holds that folder or something is already there: a new shared folder
 never takes over files nobody gave it. So two shared folders can share a name. Making one is refused only when the
@@ -236,6 +267,67 @@ has an admin). Access shared on items in it stays with them while it is in the t
 Each place has a lock in memory: every change inside it (giving or taking access included, and a listing, which makes a
 missing top folder again) holds it shared, and moving the whole shared folder into the trash or out of it holds it alone, waiting up to ten seconds for
 the changes under way. A change that starts after the shared folder went to the trash finds it gone.
+
+### Moving into a shared folder
+
+A move stays inside its place, except one: the owner of a "My files" may move a file or folder from it into a folder of
+a shared folder where they may upload (`access.MoveOut` at the item, `access.MoveIn` where it goes). It then belongs to
+the project. On the storage it moves into the shared folder's folder (one `MOVE`); in the index it keeps its id, and so
+does everything in it, with what was given on each of them (the grants' foreign key on the item and its place cascades);
+what was given on the folders above it in the My files stays there and no longer reaches it. What was deleted out of it
+earlier stays in the My files' trash and goes back to its top folder.
+
+Every other move between places is refused with 400 and says which there are: out of a shared folder (into another, or
+into a My files), and out of someone else's My files (what was shared with someone stays where its owner keeps it). A
+place or a folder the person cannot add to answers as one that does not exist (404). The move holds both places' locks,
+always the one with the lower id first, so that two moves never each hold one and wait for the other; it waits (409)
+while an upload in progress goes into what is moved, as that upload belongs to the old place.
+
+Before such a move the interface warns that it becomes the project's, and says who will see it there. The Drive says
+who before anything moves, as "who can see this" would show it there: the project admins, the shared folder's managers,
+what was given on the folders on the way down, and what was given on the item itself, which it keeps. It is decided as
+the move itself would be, and names a folder above the destination only when the mover can open it.
+
+```
+GET    /api/places/{place}/items/{item}/move?to=42[&place=7]    who would see it there (no "to": the top folder)
+       200 {"becomesProjects", "access": [...as GET …/access answers...], "seenBy": {"everyone", "members"}}
+POST   /api/places/{place}/items/{item}/move    {"to": 42 | null, "place": 7}    "place" only for another place
+       200 the item, with "place"    400 a move between places that is not allowed    404 a place or folder that is not
+       there or that the person cannot add to    409 a name taken there, or something in it being uploaded
+```
+
+### Mail
+
+The Drive sends one kind of mail so far: "shared with you", to a member something was just shared with by name. With
+`DRIVE_SMTP_HOST` empty it sends none and attempts none, and nothing else changes: sharing works the same. The line the
+Drive logs at start says where mail goes (`mail="smtp.example.com:587 (starttls)"`) or `mail=off`.
+
+- **When:** a new share to a named member, on a file, a folder or a shared folder as a whole. Not for everyone in the
+  project, not for a role changed or given again, not for access taken away, and never to the person sharing (a
+  project admin taking a role on a shared folder).
+- **What it says,** in short plain text in English: who shared what, in which project, the role, and a link at
+  `DRIVE_ADDRESS`: a folder at `/?place=…&folder=…`, a shared folder at `/?place=…`, and a file at the folder it is in
+  when the member can open it, otherwise at "Shared with me" (`/?shared`). It never names a folder above what was
+  shared, nor the shared folder an item is in.
+
+  ```
+  Subject: Bence Tóth shared “Clients” with you
+
+  Bence Tóth shared the folder “Clients” with you in the Drive of Kovács Accounting.
+  You can open and download it.
+
+  Open it: https://files.example.com/?folder=12&place=3
+  ```
+- **How:** over SMTP from `DRIVE_MAIL_FROM`, with STARTTLS (or TLS from the first byte on port 465, or as
+  `DRIVE_SMTP_TLS` says), signing in with `AUTH PLAIN` when there is a login; the server's certificate is checked
+  against the system's authorities (the image has them). It uses Go's standard library only.
+- **Never in the way:** a mail is queued (up to 64) and sent in the background, one at a time, within 30 seconds each;
+  the share is answered at once whatever happens to it. A mail that fails is logged with what it was about (the
+  recipient's user id, the place and item ids) and why, never with its text or the recipient's address, and is not
+  tried again; so is one dropped because the queue is full. Mail still queued when the Drive stops is not sent.
+- **Names from people** (display names, file names) have line breaks and other control characters taken out and are
+  encoded (RFC 2047) in the subject, the recipient must be one plain address, and the headers are only those the Drive
+  writes: no name can add a header or a recipient.
 
 ### Large transfers and the memory figure
 
@@ -315,8 +407,10 @@ does today: a member signs in through the reverse proxy and works in their "My f
 makes folders, renames and moves things, deletes them into a 30-day trash and restores them, and sees about how much
 space is used. Members make shared folders, owned by the project, and work in them the same way; managers make other
 members managers and delete shared folders into the trash, and project admins manage every one. Members share files
-and folders with other members, or with everyone in the project, as viewers or editors. "Shared with me", guests,
-public links are not built yet. Large files upload in parts that resume after a broken connection, downloads resume
+and folders with other members, or with everyone in the project, as viewers or editors, find what was shared with them
+in "Shared with me", get a mail when something is shared with them by name (with the mail settings), and move things
+from their own My files into a shared folder after a warning that says who will see them there. Guests and public links
+are not built yet. Large files upload in parts that resume after a broken connection, downloads resume
 and seek, and folders upload whole and download as zips.
 
 It needs:
@@ -472,7 +566,8 @@ make image        # the container image superit-drive:dev
 **Tests.** `test/` holds the tests through the Drive's HTTP interface. Each one starts the real binary against a
 throwaway Apache `mod_dav` container (the stand-in storage, `test/webdav/`) with a temporary data folder, and acts
 only as a browser or an outsider would: requests with the proxy's headers, and WebDAV with the storage login to see
-what is on the storage. Start from `test/harness` and an existing test. The stand-in storage also has folders that
+what is on the storage. Start from `test/harness` and an existing test. Mail goes to a throwaway SMTP server in the
+test itself (`internal/mail/mailtest`). The stand-in storage also has folders that
 refuse or ignore one thing each, such as `MOVE` or `Range`, for the storage check's tests (`test/webdav/storage.conf`).
 Next to the code are unit tests where a rule needs a table: the access rules in `internal/access`, settings, the
 member list, the names that may become paths, the index's ids, and a check that every route goes through the
@@ -524,6 +619,8 @@ cmd/superit-drive/     main: runs the Drive, or the storage check (`check-storag
 internal/app/          wires everything together and serves until stopped
 internal/settings/     every environment variable
 internal/members/      the member list file, re-read when it changes
+internal/mail/         the Drive's own mail over SMTP, sent in the background; mailtest/ is a throwaway SMTP server
+                       for tests
 internal/access/       the one authorisation function (Decide), the role at an item (RoleAt), and their table test
 internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify → own page (for changes) →
                        place → item in it, or in its trash, or the person's upload in progress into it → the access
