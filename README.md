@@ -259,8 +259,8 @@ figure (`internal/transfers`):
 
 Measured with `make test-memory` (below): the image in a container with `--memory=64m --memory-swap=64m`, against the
 stand-in storage, idles at about 4.5 MiB; with 40 downloads (half of them read at 8 MiB/s) and 10 resumable uploads
-of 256 MiB each at once, it peaked at 47 MiB, of which about 13.5 MiB was the Drive's own memory and 30 MiB network
-buffers, and never reached the limit.
+of 256 MiB each at once, it peaked at 46 to 47 MiB over two runs, of which about 13 MiB was the Drive's own memory
+and 29 to 30 MiB network buffers, and never reached the limit (Docker Desktop on an Apple Silicon Mac, arm64).
 
 **Downloads** honour `Range` for one part of a file (`bytes=a-b`, `bytes=a-`, `bytes=-n`): 206 with `Content-Range`,
 or 416 with `Content-Range: bytes */<size>` for a part after the end. They carry the storage's `ETag` and
