@@ -76,22 +76,48 @@ Under `DRIVE_STORAGE_FOLDER`:
 
 ```
 My files/
-    reka@example.com/      one top folder per member's "My files", named after their email address
-    bence@example.com/     when they first open the Drive; the index ties it to their user id
-        Tax notes.pdf      their files, with their real names
+    reka@example.com/          one top folder per member's "My files", named after their email address
+    bence@example.com/         when they first open the Drive; the index ties it to their user id
+        Tax notes.pdf          their files and folders, with their real names, at any depth
+        Clients/Bakery Ltd/
+.superit-drive/                the Drive's own folders, hidden from WebDAV programs that hide dot-names
+    trash/
+        My files/reka@example.com/          each place's trash, beside the place's own path
+            2026-11-19 7f3a9c1e/Offer.docx  one folder per deleted item: the day it was deleted and a random
+                                            part, holding the item (a whole folder, for a folder) by its real name
 ```
 
-Files keep their real names, up to 255 bytes. An upload is one `PUT` straight to the file's place, with its
-`Content-Length` and `If-None-Match: *`: the storage writes the whole file or nothing (Apache's `mod_dav`, which a
-Storage Box runs, writes to a hidden temporary file and renames it at the end), and an upload never replaces anything
-that is there. Shared folders, and hidden folders for the trash, uploads in progress and the index copy, come with
-their tickets.
+Files and folders keep their real names, up to 255 bytes, exactly as given; the interface sends names in Unicode's
+composed form (NFC), so a name from Safari on macOS matches the same name from another browser. Making a folder,
+renaming and moving are each one change on the storage (`MKCOL`, or `MOVE` with `Overwrite: F`), after a look that
+the name is free, and nothing ever replaces what is there.
+
+An upload is one `PUT` straight to the file's place, with its `Content-Length` and `If-None-Match: *`: the storage
+writes the whole file or nothing (Apache's `mod_dav`, which a Storage Box runs, writes to a hidden temporary file and
+renames it at the end). When the name is taken, the interface asks first: **replace** moves the file that is there
+into the trash and then uploads (it is moved back if the upload fails), and the file keeps its place, its id and so,
+later, its sharing; **keep both** stores the upload as `Name (2).ext`, `Name (3).ext` and so on. A file never replaces
+a folder.
+
+**The trash.** Deleting moves the item, with everything in it, into the place's trash on the storage; restoring
+moves it back to the folder it came from (or the place's top folder when that folder is gone), adding ` (2)` to its
+name if the name is taken there. Items keep their ids throughout. The Drive removes an item for good 30 days after it
+was deleted: when it starts, every hour, and before showing the Trash view. Entries in a trash that the index does not
+know (left by a change the Drive did not finish) are removed once the day in their names is 30 days past.
+
+**Space used** is the Drive's own sum of the sizes of the files its index knows, in every place, the trash included,
+shown in the sidebar as "about" against `DRIVE_CAPACITY` (or alone, without it). Files put on the storage directly
+count once the Drive has listed their folder.
+
+Uploads in progress and the index copy get hidden folders of their own beside `trash/`, and shared folders a top
+folder each, with their tickets.
 
 ## Running it yourself
 
 The Drive runs without Superit, as one container against any WebDAV server that passes the storage check. What it
-does today: a member signs in through the reverse proxy, sees their "My files", uploads files into it and downloads
-them. Folders, the trash, sharing, guests, public links and large or resumable transfers are not built yet.
+does today: a member signs in through the reverse proxy and works in their "My files": uploads and downloads files,
+makes folders, renames and moves things, deletes them into a 30-day trash and restores them, and sees about how much
+space is used. Shared folders, sharing, guests, public links and large or resumable transfers are not built yet.
 
 It needs:
 
@@ -246,8 +272,13 @@ only as a browser or an outsider would: requests with the proxy's headers, and W
 what is on the storage. Start from `test/harness` and an existing test. The stand-in storage also has folders that
 refuse or ignore one thing each, such as `MOVE` or `Range`, for the storage check's tests (`test/webdav/storage.conf`).
 Next to the code are unit tests where a rule needs a table: the access rules in `internal/access`, settings, the
-member list, and a check that every route goes through the authorisation function. The interface has no tests of its
-own; check it in a browser.
+member list, the names that may become paths, the index's ids, and a check that every route goes through the
+authorisation function. The interface has no tests of its own; check it in a browser.
+
+The harness builds the Drive with the build tag `testclock`, which is the only difference from a released Drive: in
+it, `SUPERIT_DRIVE_TEST_CLOCK_SHIFT` (a Go duration such as `744h`) moves the Drive's clock forward, so a test can
+restart a Drive (`Drive.Restart`) 31 days later and see the trash emptied. A Drive built without the tag reads no such
+variable.
 
 **Running it locally.**
 
@@ -284,9 +315,10 @@ internal/settings/     every environment variable
 internal/members/      the member list file, re-read when it changes
 internal/access/       the one authorisation function (Decide) and its table test
 internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify → own page (for changes) →
-                       place → access.Decide → item in that place
-internal/drive/        the Drive's operations, joining the index and the storage
+                       place → access.Decide → item in that place, or in its trash
+internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash
 internal/index/        the SQLite index; schema changes are numbered files in migrations/
+internal/clock/        the Drive's clock, which test builds can move forward
 internal/storage/      the WebDAV client
 internal/storagecheck/ `superit-drive check-storage`: can a WebDAV server hold the Drive's files?
 web/                   the interface (Vite, React, Tailwind with the Pilot light tokens); built into web/dist

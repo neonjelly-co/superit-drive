@@ -1,31 +1,154 @@
 package drive
 
 import (
+	"context"
+	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
 )
 
-// Names in the index come from storage listings, which a misbehaving WebDAV server could fill with anything. Only a
-// plain name becomes a path, so no name can reach outside its place. (Uploads are refused earlier, by CheckName,
-// which the tests through HTTP cover.)
-func TestOnlyAPlainNameBecomesAPath(t *testing.T) {
-	rekas := index.Place{ID: 1, Kind: index.MyFiles, Owner: "u-reka", Folder: "My files/reka@example.com"}
-	ok := map[string]string{
-		"Tax notes.pdf":   "My files/reka@example.com/Tax notes.pdf",
-		".hidden":         "My files/reka@example.com/.hidden",
-		"...":             "My files/reka@example.com/...",
-		`back\slash`:      `My files/reka@example.com/back\slash`,
-		"line\nbreak.txt": "My files/reka@example.com/line\nbreak.txt", // odd, but a name a storage can hold
+// Names in the index come from storage listings, which a misbehaving WebDAV server could fill with anything, and from
+// people. Only plain names become a path, at any depth, so no name can reach outside its place.
+func TestOnlyPlainNamesBecomeAPath(t *testing.T) {
+	top := "My files/reka@example.com"
+	ok := map[string][]string{
+		"My files/reka@example.com":                          nil,
+		"My files/reka@example.com/Tax notes.pdf":            {"Tax notes.pdf"},
+		"My files/reka@example.com/.hidden":                  {".hidden"},
+		"My files/reka@example.com/...":                      {"..."},
+		`My files/reka@example.com/back\slash`:               {`back\slash`},
+		"My files/reka@example.com/line\nbreak.txt":          {"line\nbreak.txt"}, // odd, but a name a storage can hold
+		"My files/reka@example.com/Drafts/2026/Offer.docx":   {"Drafts", "2026", "Offer.docx"},
+		"My files/reka@example.com/Drafts/..x/x../Offer.pdf": {"Drafts", "..x", "x..", "Offer.pdf"},
 	}
-	for name, want := range ok {
-		if got, ok := pathIn(rekas, name); !ok || got != want {
-			t.Errorf("pathIn(%q) = %q, %v; want %q", name, got, ok, want)
+	for want, names := range ok {
+		if got, ok := pathIn(top, names...); !ok || got != want {
+			t.Errorf("pathIn(%q) = %q, %v; want %q", names, got, ok, want)
 		}
 	}
-	for _, name := range []string{"", ".", "..", "../bence@example.com/Payslip.pdf", "a/b", "/", "x/../../y"} {
-		if got, ok := pathIn(rekas, name); ok {
-			t.Errorf("pathIn(%q) = %q; want no path", name, got)
+	bad := [][]string{
+		{""}, {"."}, {".."}, {"../bence@example.com/Payslip.pdf"}, {"a/b"}, {"/"}, {"x/../../y"},
+		{"Drafts", ".."}, {"Drafts", "..", "..", "bence@example.com"}, {"Drafts", "", "x"}, {"Drafts", "2026/../.."},
+		{"..", "Drafts"},
+	}
+	for _, names := range bad {
+		if got, ok := pathIn(top, names...); ok {
+			t.Errorf("pathIn(%q) = %q; want no path", names, got)
 		}
+	}
+	if got, ok := pathIn("", "a"); ok {
+		t.Errorf(`pathIn("", "a") = %q; want no path`, got)
+	}
+
+	// An item's path is made from the names of the folders above it, so a bad name anywhere above stops it too.
+	rekas := index.Place{ID: 1, Kind: index.MyFiles, Owner: "u-reka", Folder: top}
+	deep := index.Item{Name: "Payslip.pdf", Above: []index.Item{{Name: "Drafts"}, {Name: ".."}, {Name: ".."}}}
+	if got, ok := itemPath(rekas, deep); ok {
+		t.Errorf("itemPath = %q; want no path", got)
+	}
+	if got, ok := pathIn(trashTop(rekas), "2026-11-19 7f3a9c1e", "Offer.docx"); !ok ||
+		got != ".superit-drive/trash/My files/reka@example.com/2026-11-19 7f3a9c1e/Offer.docx" {
+		t.Errorf("a trash path: %q, %v", got, ok)
+	}
+}
+
+// "Keep both" and a restore into a taken name use the first free name of these.
+func TestNumberedNames(t *testing.T) {
+	cases := []struct {
+		name   string
+		n      int
+		folder bool
+		want   string
+	}{
+		{"Report.pdf", 2, false, "Report (2).pdf"},
+		{"Report.pdf", 3, false, "Report (3).pdf"},
+		{"Report (2).pdf", 3, false, "Report (3).pdf"},
+		{"Report (2) (2).pdf", 2, false, "Report (2) (2).pdf"},
+		{"Meeting (2026).pdf", 2, false, "Meeting (2026) (2).pdf"},
+		{"archive.tar.gz", 2, false, "archive.tar (2).gz"},
+		{".bashrc", 2, false, ".bashrc (2)"},
+		{"no extension", 2, false, "no extension (2)"},
+		{"Photos.2026", 2, true, "Photos.2026 (2)"},
+		{"Drafts (4)", 5, true, "Drafts (5)"},
+		{"trailing dot.", 2, false, "trailing dot (2)."},
+	}
+	for _, c := range cases {
+		if got := numbered(c.name, c.n, c.folder); got != c.want {
+			t.Errorf("numbered(%q, %d, %v) = %q, want %q", c.name, c.n, c.folder, got, c.want)
+		}
+	}
+
+	// Never longer than 255 bytes, never a broken character, and the extension kept.
+	long := strings.Repeat("é", 125) + "x.pdf" // 255 bytes
+	got := numbered(long, 12, false)
+	if len(got) > MaxNameBytes || !utf8.ValidString(got) || !strings.HasSuffix(got, " (12).pdf") {
+		t.Errorf("numbered(255 bytes) = %q (%d bytes)", got, len(got))
+	}
+	longExtension := "a." + strings.Repeat("x", 252)
+	if got := numbered(longExtension, 2, false); len(got) > MaxNameBytes || !strings.HasSuffix(got, " (2)") {
+		t.Errorf("numbered(long extension) = %q (%d bytes)", got, len(got))
+	}
+}
+
+// A listing that read the storage before an upload ended must not drop the upload's new item when it writes to the
+// index afterwards: the next listing would add it back under a new id, and access (later) hangs on ids. Nor may a
+// listing that read the storage before a rename bring back the old name.
+func TestAListingThatStartedBeforeAChangeLeavesTheIndexAlone(t *testing.T) {
+	ctx := context.Background()
+	x, err := index.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	d := New(x, nil, Options{})
+	p, err := x.AddMyFiles(ctx, "u-reka", "My files/reka@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := folderKey{p.ID, 0}
+	never := func(string) bool { return false }
+
+	// The listing starts and reads the storage: nothing there yet.
+	stale := d.since(key)
+	// Meanwhile an upload ends: on the storage, then in the index, as Upload does it.
+	d.changed(key)
+	uploaded, err := x.PutItem(ctx, p.ID, 0, index.Seen{Name: "a.txt", Size: 1, Changed: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The listing writes what it saw.
+	if err := x.SetChildren(ctx, p.ID, 0, nil, never, stale); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := x.Children(ctx, p.ID, 0)
+	if len(items) != 1 || items[0].ID != uploaded.ID {
+		t.Fatalf("after a listing that started before the upload ended: %+v, want a.txt with id %d", items, uploaded.ID)
+	}
+
+	// A listing that starts after the change is applied: what the storage shows wins.
+	stale = d.since(key)
+	if err := x.SetChildren(ctx, p.ID, 0, []index.Seen{{Name: "a.txt", Size: 5}}, never, stale); err != nil {
+		t.Fatal(err)
+	}
+	items, _ = x.Children(ctx, p.ID, 0)
+	if len(items) != 1 || items[0].ID != uploaded.ID || items[0].Size != 5 {
+		t.Fatalf("after a fresh listing: %+v", items)
+	}
+
+	// A rename while a listing is under way: the listing saw the old name, and must not bring it back.
+	stale = d.since(key)
+	d.changed(key)
+	if _, err := x.Relocate(ctx, p.ID, uploaded.ID, 0, "b.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.SetChildren(ctx, p.ID, 0, []index.Seen{{Name: "a.txt", Size: 5}}, never, stale); err != nil {
+		t.Fatal(err)
+	}
+	items, _ = x.Children(ctx, p.ID, 0)
+	if len(items) != 1 || items[0].Name != "b.txt" || items[0].ID != uploaded.ID {
+		t.Fatalf("after a listing that started before a rename: %+v", items)
 	}
 }

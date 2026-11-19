@@ -5,21 +5,32 @@
 // login can read it:
 //
 //	My files/
-//	    reka@example.com/        one top folder per member's "My files", named after their email address
-//	        Tax notes 2026.pdf   files with their real names (files.go: upload, download, the name rules)
+//	    reka@example.com/          one top folder per member's "My files", named after their email address
+//	        Tax notes 2026.pdf     files and folders with their real names, at any depth
+//	        Drafts/
 //	    bence@example.com/
+//	.superit-drive/                the Drive's own hidden folders
+//	    trash/
+//	        My files/reka@example.com/          one trash per place, beside the place's own path
+//	            2026-11-19 7f3a9c1e/Offer.docx  one folder per deleted item: the day it was deleted, a random part,
+//	                                            and in it the item under its real name
 //
-// Shared folders and the hidden folders for the trash, uploads in progress and the index copy are added by the
-// tickets that bring them.
+// Shared folders, and the hidden folders for uploads in progress and the index copy, are added by the tickets that
+// bring them.
+//
+// Every change is two steps, the storage and then the index. files.go has uploads, downloads and the name rules,
+// folders.go new folders, renames and moves, trash.go the trash, and this file the places, paths and listings.
 package drive
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
@@ -29,6 +40,10 @@ import (
 
 // MyFilesFolder is the folder on the storage that holds every member's "My files".
 const MyFilesFolder = "My files"
+
+// HiddenFolder is the folder on the storage that holds the Drive's own folders, beside the places. Its name starts
+// with a dot, so WebDAV programs that hide such names do not show it among the files.
+const HiddenFolder = ".superit-drive"
 
 // storageTimeout bounds one listing or folder change on the storage.
 const storageTimeout = 30 * time.Second
@@ -44,20 +59,40 @@ func storageError(err error) error {
 	return fmt.Errorf("%w: %w", ErrStorage, err)
 }
 
+// Options are what a Drive needs besides its index and storage.
+type Options struct {
+	// Now is the clock; time.Now when nil.
+	Now func() time.Time
+	// Log receives what the Drive does on its own, such as emptying the trash. Nothing is logged when nil.
+	Log *slog.Logger
+}
+
 // Drive is one Drive: its index and its storage.
 type Drive struct {
 	index   *index.Index
 	storage *storage.Client
+	now     func() time.Time
+	log     *slog.Logger
 
-	// writing holds the storage paths of uploads in flight, so two uploads of one name cannot both pass the check
-	// that the name is free and the second replace the first.
+	// writing holds the storage paths being changed (an upload in flight, a rename or move on its way), so two
+	// changes of one name cannot both pass the check that it is free, and a listing leaves the name alone.
 	mu      sync.Mutex
 	writing map[string]bool
+
+	// generations counts the Drive's own changes to each folder; a listing that began before one is not applied.
+	generations generations
 }
 
 // New makes a Drive.
-func New(x *index.Index, s *storage.Client) *Drive {
-	return &Drive{index: x, storage: s, writing: map[string]bool{}}
+func New(x *index.Index, s *storage.Client, o Options) *Drive {
+	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}}
+	if d.now == nil {
+		d.now = time.Now
+	}
+	if d.log == nil {
+		d.log = slog.New(slog.DiscardHandler)
+	}
+	return d
 }
 
 // Place finds a place by its id.
@@ -112,27 +147,194 @@ func folderName(m members.Member) string {
 	return name
 }
 
-// List reads the place's top folder from the storage, brings the index in step, and returns what the index holds.
-// If the top folder has gone from the storage, it is made again, empty.
-func (d *Drive) List(ctx context.Context, p index.Place) ([]index.Item, error) {
+// pathIn is the storage path reached from top (a place's top folder, or its folder in the trash) through names, one
+// folder or item name each. Every path the Drive makes from a name passes through here. ok is false when any name is
+// not one plain segment ("", ".", "..", or one holding a "/", which only a misbehaving server could list): such a
+// name never becomes a path, so no name a person or the storage supplies can reach outside its place, at any depth.
+func pathIn(top string, names ...string) (p string, ok bool) {
+	if top == "" {
+		return "", false
+	}
+	p = top
+	for _, name := range names {
+		if name == "" || name == "." || name == ".." || strings.Contains(name, "/") {
+			return "", false
+		}
+		p += "/" + name
+	}
+	return p, true
+}
+
+// itemPath is where a live item of the place is on the storage: under the place's top folder, through the folders
+// above it.
+func itemPath(p index.Place, it index.Item) (string, bool) {
+	names := make([]string, 0, len(it.Above)+1)
+	for _, f := range it.Above {
+		names = append(names, f.Name)
+	}
+	return pathIn(p.Folder, append(names, it.Name)...)
+}
+
+// folderPath is where a folder of the place is on the storage; nil is the place's top folder.
+func folderPath(p index.Place, folder *index.Item) (string, bool) {
+	if folder == nil {
+		return pathIn(p.Folder)
+	}
+	return itemPath(p, *folder)
+}
+
+// folderID is a folder's id as the index takes it: 0 for the place's top folder.
+func folderID(folder *index.Item) int64 {
+	if folder == nil {
+		return 0
+	}
+	return folder.ID
+}
+
+// ErrGone: the item, or the folder it is in or was going to, is no longer on the storage.
+var ErrGone = errors.New("no longer on the storage")
+
+// Item finds the live item with id in the place, at any depth.
+func (d *Drive) Item(ctx context.Context, p index.Place, id int64) (index.Item, error) {
+	return d.index.Item(ctx, p.ID, id)
+}
+
+// List reads one folder of the place from the storage (nil: its top folder), brings the index in step, and returns
+// what the index holds. A top folder that has gone from the storage is made again, empty; any other folder that has
+// gone is dropped from the index, and List returns ErrGone.
+func (d *Drive) List(ctx context.Context, p index.Place, folder *index.Item) ([]index.Item, error) {
+	dir, ok := folderPath(p, folder)
+	if !ok {
+		return nil, ErrGone
+	}
+	// Taken before the storage is asked: a change the Drive makes from here on means this listing may be out of date.
+	stale := d.since(folderKey{p.ID, folderID(folder)})
+	var parentStale func() bool
+	if folder != nil {
+		parentStale = d.since(folderKey{p.ID, folder.ParentID})
+	}
+
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
 	defer cancel()
-	entries, err := d.storage.List(sctx, p.Folder)
+	entries, err := d.storage.List(sctx, dir)
 	if errors.Is(err, storage.ErrNotFound) {
-		entries, err = nil, d.storage.MakeFolder(sctx, p.Folder)
+		if folder != nil {
+			if err := d.index.DropGone(ctx, p.ID, folder.ParentID, folder.ID, folder.Name, parentStale); err != nil {
+				return nil, err
+			}
+			return nil, ErrGone
+		}
+		entries, err = nil, d.storage.MakeFolder(sctx, dir)
 	}
 	if err != nil {
 		return nil, storageError(err)
 	}
 	seen := make([]index.Seen, 0, len(entries))
 	for _, e := range entries {
-		if _, ok := pathIn(p, e.Name); !ok {
+		if _, ok := pathIn(dir, e.Name); !ok {
 			continue // a name no path can be made from: never listed, so never opened
 		}
 		seen = append(seen, index.Seen{Name: e.Name, Folder: e.Folder, Size: e.Size, Changed: e.Changed})
 	}
-	if err := d.index.SetTopItems(ctx, p.ID, seen); err != nil {
+	keep := func(name string) bool { return d.claimed(dir + "/" + name) }
+	if err := d.index.SetChildren(ctx, p.ID, folderID(folder), seen, keep, stale); err != nil {
 		return nil, err
 	}
-	return d.index.TopItems(ctx, p.ID)
+	return d.index.Children(ctx, p.ID, folderID(folder))
+}
+
+// ensureTop makes the place's top folder on the storage if it has gone (someone removed it directly), before something
+// is put into it; folder is where it goes, nil for the top folder. One request when the folder is there.
+func (d *Drive) ensureTop(ctx context.Context, p index.Place, folder *index.Item) error {
+	if folder != nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, storageTimeout)
+	defer cancel()
+	err := d.storage.CreateFolder(ctx, p.Folder)
+	switch {
+	case err == nil || errors.Is(err, storage.ErrExists):
+		return nil
+	case errors.Is(err, storage.ErrNotFound):
+		return storageError(d.storage.MakeFolder(ctx, p.Folder))
+	}
+	return storageError(err)
+}
+
+// claim marks storage paths as being changed. ok is false when another change holds any of them; then none is held.
+func (d *Drive) claim(paths ...string) (release func(), ok bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, p := range paths {
+		if d.writing[p] {
+			return nil, false
+		}
+	}
+	for _, p := range paths {
+		d.writing[p] = true
+	}
+	return func() {
+		d.mu.Lock()
+		for _, p := range paths {
+			delete(d.writing, p)
+		}
+		d.mu.Unlock()
+	}, true
+}
+
+// claimed says whether a change holds the storage path p.
+func (d *Drive) claimed(p string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.writing[p]
+}
+
+// busyInside says whether a change holds a path inside the folder at dir, such as an upload into it.
+func (d *Drive) busyInside(dir string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for p := range d.writing {
+		if strings.HasPrefix(p, dir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// A folderKey names one folder of one place for the generation counters: folder 0 is the place's top folder, and
+// trashFolder the place's trash.
+type folderKey struct{ place, folder int64 }
+
+const trashFolder = -1
+
+// generations counts the Drive's own changes per folder, in a fixed number of counters that folders share (a shared
+// counter only makes a listing skip its update more often). They live in memory: a listing never outlasts the Drive.
+type generations [256]atomic.Uint64
+
+func (g *generations) at(k folderKey) *atomic.Uint64 {
+	h := uint64(k.place)*0x9e3779b97f4a7c15 + uint64(k.folder)
+	h ^= h >> 31
+	return &g[h%uint64(len(g))]
+}
+
+// changed records that the Drive changed what is in these folders. Call it after the change is made on the storage
+// and before it is written to the index: then a listing that read the storage before the change sees, when it comes
+// to write, that it is out of date.
+func (d *Drive) changed(keys ...folderKey) {
+	for _, k := range keys {
+		d.generations.at(k).Add(1)
+	}
+}
+
+// since returns a check that says whether the Drive changed the folder after since was called.
+func (d *Drive) since(k folderKey) func() bool {
+	counter := d.generations.at(k)
+	start := counter.Load()
+	return func() bool { return counter.Load() != start }
+}
+
+// Used is about how much space the Drive's files take: the sum of the sizes of every file the index knows, in every
+// place, the trash included. Files put on the storage directly count once a listing has seen them.
+func (d *Drive) Used(ctx context.Context) (int64, error) {
+	return d.index.Used(ctx)
 }

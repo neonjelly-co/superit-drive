@@ -7,6 +7,7 @@ package test
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/neonjelly-co/superit-drive/test/harness"
 )
@@ -36,12 +37,42 @@ type (
 	}
 	itemsJSON struct {
 		Items []itemJSON `json:"items"`
+		// Path is the folders from the top of the place down to the one listed; empty for the top folder.
+		Path []folderJSON `json:"path"`
 	}
 	itemJSON struct {
-		ID      int64   `json:"id"`
-		Name    string  `json:"name"`
-		Kind    string  `json:"kind"`
-		Size    *int64  `json:"size"`
-		Changed *string `json:"changed"`
+		ID       int64   `json:"id"`
+		Name     string  `json:"name"`
+		Kind     string  `json:"kind"`
+		Size     *int64  `json:"size"`
+		Changed  *string `json:"changed"`
+		Replaced bool    `json:"replaced"` // uploads only
+	}
+	folderJSON struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	trashJSON struct {
+		ID       int64        `json:"id"`
+		Name     string       `json:"name"`
+		Kind     string       `json:"kind"`
+		Size     int64        `json:"size"`
+		Deleted  time.Time    `json:"deleted"`
+		Removed  time.Time    `json:"removed"`
+		Replaced bool         `json:"replaced"`
+		From     []folderJSON `json:"from"`
+	}
+	restoredJSON struct {
+		Item itemJSON     `json:"item"`
+		Path []folderJSON `json:"path"`
+	}
+	usageJSON struct {
+		Used     *int64 `json:"used"`
+		Capacity *int64 `json:"capacity"`
+	}
+	conflictJSON struct {
+		Error  string `json:"error"`
+		Exists string `json:"exists"`
+		Name   string `json:"name"`
 	}
 )

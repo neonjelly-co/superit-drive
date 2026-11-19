@@ -5,8 +5,9 @@
 // The package knows nothing about HTTP, the index or the storage. Callers describe who is asking, what they want to do
 // and where, and get a yes or a no. That keeps the rules in one place where a table test can cover every case.
 //
-// Version 1 so far: a member may use the Drive, and may list, download from and upload into their own "My files".
-// Shared folders, sharing, guests and public links add their rules here.
+// Version 1 so far: a member may use the Drive and see about how much space it uses, and may do everything in their own
+// "My files": list, download, upload, make folders, rename, move, delete into the trash, and see and restore from its
+// trash. Shared folders, sharing, guests and public links add their rules here.
 package access
 
 import "github.com/neonjelly-co/superit-drive/internal/members"
@@ -42,8 +43,25 @@ const (
 	List Action = "list"
 	// Download is reading a file's content. A viewer may, once sharing exists ("open and download").
 	Download Action = "download"
-	// Upload is putting a new file into a folder of a place. An editor may, once sharing exists; a viewer may not.
+	// Upload is putting a new file into a folder of a place, which can replace a file there (the replaced one goes to
+	// the trash). An editor may, once sharing exists; a viewer may not.
 	Upload Action = "upload"
+	// MakeFolder is making a new folder in a folder of a place. An editor may, once sharing exists.
+	MakeFolder Action = "make-folder"
+	// Rename is giving a file or folder a new name. An editor may, once sharing exists.
+	Rename Action = "rename"
+	// Move is putting a file or folder into another folder of the same place. An editor may, once sharing exists.
+	// (Moving between places needs a decision on both, and comes with shared folders.)
+	Move Action = "move"
+	// Delete is moving a file or folder into its place's trash. An editor may, once sharing exists.
+	Delete Action = "delete"
+	// SeeTrash is seeing what is in a place's trash.
+	SeeTrash Action = "see-trash"
+	// Restore is moving something out of a place's trash, back into the place. Whoever could have deleted it may.
+	Restore Action = "restore"
+	// SeeUsage is seeing about how much space the Drive uses, as the sidebar's meter shows it. It concerns no place:
+	// it is the whole project's figure, and says nothing about anyone's files.
+	SeeUsage Action = "see-usage"
 )
 
 // Decide says whether person may do action in place. place is nil for actions that concern no place.
@@ -53,9 +71,9 @@ func Decide(person Person, action Action, place *Place) bool {
 		return false
 	}
 	switch action {
-	case Enter:
+	case Enter, SeeUsage:
 		return place == nil
-	case List, Download, Upload:
+	case List, Download, Upload, MakeFolder, Rename, Move, Delete, SeeTrash, Restore:
 		return place != nil && ownsMyFiles(person, place)
 	}
 	return false

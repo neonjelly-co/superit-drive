@@ -20,18 +20,19 @@ func TestDecide(t *testing.T) {
 
 	people := map[string]Person{"member": reka, "admin": admin, "no user id": nobody}
 	places := map[string]*Place{"no place": nil, "Réka's My files": rekasFiles, "the admin's My files": adminsFiles, "My files without an owner": ownerless}
-	actions := []Action{Enter, List, Download, Upload}
+	actions := []Action{Enter, SeeUsage, List, Download, Upload, MakeFolder, Rename, Move, Delete, SeeTrash, Restore}
 
 	// Every combination that is allowed. Everything else must be refused.
 	allowed := map[string]bool{
-		"member enter no place":               true,
-		"admin enter no place":                true,
-		"member list Réka's My files":         true,
-		"admin list the admin's My files":     true,
-		"member download Réka's My files":     true,
-		"admin download the admin's My files": true,
-		"member upload Réka's My files":       true,
-		"admin upload the admin's My files":   true,
+		"member enter no place":     true,
+		"admin enter no place":      true,
+		"member see-usage no place": true,
+		"admin see-usage no place":  true,
+	}
+	// In their own My files, a member may do everything; nobody else may do anything there, admins included.
+	for _, a := range []Action{List, Download, Upload, MakeFolder, Rename, Move, Delete, SeeTrash, Restore} {
+		allowed[fmt.Sprintf("member %s Réka's My files", a)] = true
+		allowed[fmt.Sprintf("admin %s the admin's My files", a)] = true
 	}
 
 	for pn, p := range people {
@@ -52,7 +53,7 @@ func TestDecide(t *testing.T) {
 
 func TestUnknownActionIsRefused(t *testing.T) {
 	p := Person{UserID: "u1", Role: members.RoleAdmin}
-	if Decide(p, Action("delete"), &Place{Kind: MyFiles, Owner: "u1"}) {
+	if Decide(p, Action("share"), &Place{Kind: MyFiles, Owner: "u1"}) {
 		t.Fatal("an action without a rule must be refused")
 	}
 }

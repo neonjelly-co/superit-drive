@@ -3,18 +3,21 @@ import type { Upload } from "../uploads";
 import { FileIcon } from "./file-icon";
 
 /**
- * A small panel in the corner of the list that shows each upload: waiting, how far along, uploaded, or why not. It
- * stays until the person closes it, so a refusal is not missed; it can be closed once nothing is on its way.
+ * A small panel in the corner of the list that shows each upload: waiting, waiting for the person's answer about a
+ * name that is taken, how far along, uploaded (or replaced), skipped, or why not. It stays until the person closes
+ * it, so a refusal is not missed; it can be closed once nothing is on its way.
  */
 export function UploadsPanel({ uploads, onClose }: { uploads: Upload[]; onClose: () => void }) {
 	if (uploads.length === 0) return null;
-	const going = uploads.filter((u) => u.state === "waiting" || u.state === "uploading").length;
+	const going = uploads.filter((u) => u.state === "waiting" || u.state === "uploading" || u.state === "asking").length;
 	const done = uploads.filter((u) => u.state === "done").length;
 	const failed = uploads.filter((u) => u.state === "failed").length;
+	const skipped = uploads.filter((u) => u.state === "skipped").length;
 
 	let summary: string;
 	if (going > 0) summary = `Uploading ${going} ${going === 1 ? "file" : "files"}`;
-	else if (failed === 0) summary = `${done} ${done === 1 ? "file" : "files"} uploaded`;
+	else if (failed === 0 && skipped === 0) summary = `${done} ${done === 1 ? "file" : "files"} uploaded`;
+	else if (failed === 0) summary = `${done} uploaded, ${skipped} skipped`;
 	else if (done === 0) summary = `${failed} could not be uploaded`;
 	else summary = `${done} uploaded, ${failed} could not be`;
 
@@ -51,9 +54,11 @@ function Row({ upload: u }: { upload: Upload }) {
 	const percent = u.size > 0 ? Math.min(100, Math.floor((u.sent / u.size) * 100)) : 0;
 	const status = {
 		waiting: "Waiting",
+		asking: "Waiting for you",
 		uploading: `${percent}%`,
-		done: "Uploaded",
+		done: u.existing === "replace" ? "Replaced" : "Uploaded",
 		failed: "Not uploaded",
+		skipped: "Skipped",
 	}[u.state];
 	return (
 		<li className="border-b border-border px-4 py-2.5 text-sm last:border-0">
