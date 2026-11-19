@@ -1,6 +1,6 @@
 import { RotateCw } from "lucide-react";
 import type { ReactNode } from "react";
-import type { Item } from "../api";
+import { api, type Item } from "../api";
 import { formatChanged, formatChangedFull, formatSize } from "../format";
 import { FileIcon } from "./file-icon";
 
@@ -14,6 +14,8 @@ function inOrder(items: Item[]): Item[] {
 }
 
 type Props = {
+	/** The place the items are in. */
+	placeId?: number;
 	items?: Item[];
 	loading: boolean;
 	error?: Error | null;
@@ -21,10 +23,11 @@ type Props = {
 };
 
 /**
- * The list of layout D: one row per item with its name, when it changed and its size. Later tickets add the tick
- * boxes, "who can see it", and the bulk bar that replaces the header row.
+ * The list of layout D: one row per item with its name, when it changed and its size. Clicking a file's name downloads
+ * it. Later tickets open folders and files by their names, and add the tick boxes, "who can see it", and the bulk bar
+ * that replaces the header row.
  */
-export function ItemList({ items, loading, error, onRetry }: Props) {
+export function ItemList({ placeId, items, loading, error, onRetry }: Props) {
 	return (
 		<div className="mt-5 overflow-hidden rounded-xl border border-border bg-card">
 			<table className="w-full table-fixed text-sm">
@@ -53,12 +56,12 @@ export function ItemList({ items, loading, error, onRetry }: Props) {
 								<RotateCw aria-hidden className="size-4" /> Try again
 							</button>
 						</Message>
-					) : loading || !items ? (
+					) : loading || !items || placeId === undefined ? (
 						<Message>Loading your files…</Message>
 					) : items.length === 0 ? (
-						<Message>Nothing here yet.</Message>
+						<Message>Nothing here yet. Drop files here to upload.</Message>
 					) : (
-						inOrder(items).map((item) => <Row key={item.id} item={item} />)
+						inOrder(items).map((item) => <Row key={item.id} placeId={placeId} item={item} />)
 					)}
 				</tbody>
 			</table>
@@ -66,15 +69,28 @@ export function ItemList({ items, loading, error, onRetry }: Props) {
 	);
 }
 
-function Row({ item }: { item: Item }) {
+function Row({ placeId, item }: { placeId: number; item: Item }) {
 	return (
 		<tr className="border-b border-border last:border-0 hover:bg-muted/50">
 			<td className="px-4 py-2.5">
 				<span className="flex min-w-0 items-center gap-2.5">
 					<FileIcon item={item} />
-					<span className="truncate font-medium" title={item.name}>
-						{item.name}
-					</span>
+					{item.kind === "file" ? (
+						// The Drive sends the file as an attachment under its original name; download makes the browser save it
+						// rather than open it.
+						<a
+							href={api.downloadUrl(placeId, item.id)}
+							download
+							title={`Download ${item.name}`}
+							className="truncate font-medium underline-offset-4 hover:underline focus-visible:underline"
+						>
+							{item.name}
+						</a>
+					) : (
+						<span className="truncate font-medium" title={item.name}>
+							{item.name}
+						</span>
+					)}
 				</span>
 			</td>
 			<td className="px-4 py-2.5 text-muted-foreground">
