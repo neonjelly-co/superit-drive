@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { FolderOpen, FolderPlus, Plus, Trash2, Upload } from "lucide-react";
-import { type MouseEvent, useRef } from "react";
+import { FolderOpen, FolderPlus, FolderUp, Plus, Trash2, Upload } from "lucide-react";
+import { type MouseEvent, useEffect, useRef } from "react";
 import { api, type Place } from "../api";
+import { type Chosen, chosenFolder } from "../uploads";
 import { formatCapacity, formatSize } from "../format";
 import { hrefOf, type Where } from "../location";
 import { Button } from "./button";
@@ -13,21 +14,31 @@ type Props = {
 	go: (w: Where) => void;
 	/** The shared folders the person can open, by name. */
 	sharedFolders: Extract<Place, { kind: "shared-folder" }>[];
-	/** Called with the files the person chose; undefined while there is nowhere to upload to. */
-	onUpload?: (files: File[]) => void;
+	/**
+	 * Called with the files the person chose, or with every file of a folder they chose whole (each with the folders it
+	 * is in); undefined while there is nowhere to upload to.
+	 */
+	onUpload?: (chosen: Chosen[]) => void;
 	/** Called for "New folder"; undefined while there is no folder to make one in (such as in the trash). */
 	onNewFolder?: () => void;
 	/** Called for "New shared folder". */
 	onNewSharedFolder: () => void;
 };
 
+/** Whether this browser lets a person choose a whole folder to upload (an input with webkitdirectory). */
+const foldersChoosable = typeof document !== "undefined" && "webkitdirectory" in document.createElement("input");
+
 /**
- * The left sidebar of layout D. In the full design it holds, from the top: Upload and New folder, My files, the shared
- * folders by name, New shared folder, Shared with me, Trash, and the storage meter at the bottom. Each arrives with the
- * ticket that makes it work; "Shared with me" is still to come.
+ * The left sidebar of layout D. In the full design it holds, from the top: Upload (files, or a whole folder where the
+ * browser offers it) and New folder, My files, the shared folders by name, New shared folder, Shared with me, Trash,
+ * and the storage meter at the bottom. Each arrives with the ticket that makes it work; "Shared with me" is still to
+ * come.
  */
 export function Sidebar({ project, where, go, sharedFolders, onUpload, onNewFolder, onNewSharedFolder }: Props) {
 	const chooser = useRef<HTMLInputElement>(null);
+	const folderChooser = useRef<HTMLInputElement>(null);
+	// React does not know the attribute; the browser does.
+	useEffect(() => folderChooser.current?.setAttribute("webkitdirectory", ""), []);
 	const link = (to: Where) => (e: MouseEvent) => {
 		if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; // a new tab, as the person asked
 		e.preventDefault();
@@ -57,9 +68,28 @@ export function Sidebar({ project, where, go, sharedFolders, onUpload, onNewFold
 					onChange={(e) => {
 						const files = Array.from(e.currentTarget.files ?? []);
 						e.currentTarget.value = ""; // so choosing the same file again is noticed
-						if (files.length > 0) onUpload?.(files);
+						if (files.length > 0) onUpload?.(files.map((file) => ({ file, folders: [] })));
 					}}
 				/>
+				{foldersChoosable && (
+					<>
+						<Button className="justify-start" disabled={!onUpload} onClick={() => folderChooser.current?.click()}>
+							<FolderUp aria-hidden /> Upload folder
+						</Button>
+						<input
+							ref={folderChooser}
+							type="file"
+							multiple
+							hidden
+							tabIndex={-1}
+							onChange={(e) => {
+								const files = Array.from(e.currentTarget.files ?? []);
+								e.currentTarget.value = "";
+								if (files.length > 0) onUpload?.(chosenFolder(files));
+							}}
+						/>
+					</>
+				)}
 				<Button className="justify-start" disabled={!onNewFolder} onClick={onNewFolder}>
 					<FolderPlus aria-hidden /> New folder
 				</Button>
