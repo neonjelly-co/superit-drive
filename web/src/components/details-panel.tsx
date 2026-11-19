@@ -1,11 +1,15 @@
 import { Download, FolderInput, FolderOpen, PenLine, Trash2, X } from "lucide-react";
-import { api, type FolderRef, type Item } from "../api";
+import { type Action, api, type FolderRef, type Item } from "../api";
 import { formatChangedFull, formatSize } from "../format";
 import { Button } from "./button";
 import { FileIcon } from "./file-icon";
 
 type Props = {
 	placeId: number;
+	/** The place's name as people see it: "My files", or a shared folder's name. */
+	placeName: string;
+	/** What the person may do in the place. */
+	can: Action[];
 	item: Item;
 	/** The folders from the top down to the one the item is in; empty for the top folder. */
 	path: FolderRef[];
@@ -23,8 +27,9 @@ type Props = {
  * item's details, and Rename, Move and Delete. "Who can see this", giving access and the public link come with
  * sharing.
  */
-export function DetailsPanel({ placeId, item, path, onClose, onOpen, onRename, onMove, onDelete, busy }: Props) {
-	const where = ["My files", ...path.map((f) => f.name)].join(" › ");
+export function DetailsPanel({ placeId, placeName, can, item, path, onClose, onOpen, onRename, onMove, onDelete, busy }: Props) {
+	const where = [placeName, ...path.map((f) => f.name)].join(" › ");
+	const changes = can.includes("rename") || can.includes("move") || can.includes("delete");
 	return (
 		<aside aria-label="Details" className="relative w-96 shrink-0 overflow-auto border-l border-border bg-card p-6 pb-24">
 			<button
@@ -72,20 +77,30 @@ export function DetailsPanel({ placeId, item, path, onClose, onOpen, onRename, o
 					</a>
 				)}
 			</div>
-			<div className="mt-8 flex flex-wrap gap-2 border-t border-border pt-5">
-				<Button onClick={onRename} disabled={busy}>
-					<PenLine aria-hidden /> Rename
-				</Button>
-				<Button onClick={onMove} disabled={busy}>
-					<FolderInput aria-hidden /> Move
-				</Button>
-				<Button variant="danger" onClick={onDelete} disabled={busy}>
-					<Trash2 aria-hidden /> Delete
-				</Button>
-			</div>
-			<p className="mt-3 text-sm text-muted-foreground">
-				Deleted items go to the trash, where you can restore them for 30 days.
-			</p>
+			{changes && (
+				<div className="mt-8 flex flex-wrap gap-2 border-t border-border pt-5">
+					{can.includes("rename") && (
+						<Button onClick={onRename} disabled={busy}>
+							<PenLine aria-hidden /> Rename
+						</Button>
+					)}
+					{can.includes("move") && (
+						<Button onClick={onMove} disabled={busy}>
+							<FolderInput aria-hidden /> Move
+						</Button>
+					)}
+					{can.includes("delete") && (
+						<Button variant="danger" onClick={onDelete} disabled={busy}>
+							<Trash2 aria-hidden /> Delete
+						</Button>
+					)}
+				</div>
+			)}
+			{can.includes("delete") && (
+				<p className="mt-3 text-sm text-muted-foreground">
+					Deleted items go to the trash, where they can be restored for 30 days.
+				</p>
+			)}
 		</aside>
 	);
 }

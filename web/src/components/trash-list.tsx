@@ -1,25 +1,41 @@
 import { RotateCcw, RotateCw } from "lucide-react";
 import type { ReactNode } from "react";
-import type { TrashItem } from "../api";
 import { formatChanged, formatChangedFull, formatSize, formatUntil } from "../format";
 import { Button } from "./button";
 import { FileIcon } from "./file-icon";
 
+/** One thing in the trash: an item of a place, or a whole shared folder. */
+export type TrashRow = {
+	key: string;
+	name: string;
+	kind: "file" | "folder" | "shared-folder";
+	/** A file's size, or what the files in a folder add up to. */
+	size: number;
+	/** When it went to the trash, and when the Drive removes it for good (ISO 8601). */
+	deleted: string;
+	removed: string;
+	/** True when an upload replaced it, rather than a person deleting it. */
+	replaced?: boolean;
+	/** Where it goes back to when restored, such as "Clients › Bakery Ltd". */
+	backTo: string;
+};
+
 type Props = {
-	items?: TrashItem[];
+	rows?: TrashRow[];
 	loading: boolean;
 	error?: Error | null;
 	onRetry: () => void;
-	onRestore: (item: TrashItem) => void;
-	/** The item being restored, if any. */
-	restoring?: number;
+	onRestore: (row: TrashRow) => void;
+	/** The key of the row being restored, if any. */
+	restoring?: string;
 };
 
 /**
- * The Trash view: what was deleted (or replaced by an upload), when, where it goes back to, and when the Drive removes
- * it for good. Restore puts it back where it was.
+ * The Trash view: what was deleted (or replaced by an upload) in "My files" and in the shared folders the person may
+ * restore from, and shared folders deleted whole; when, where each goes back to, and when the Drive removes it for
+ * good. Restore puts it back where it was.
  */
-export function TrashList({ items, loading, error, onRetry, onRestore, restoring }: Props) {
+export function TrashList({ rows, loading, error, onRetry, onRestore, restoring }: Props) {
 	return (
 		<div className="mt-5 overflow-hidden rounded-xl border border-border bg-card">
 			<table className="w-full table-fixed text-sm">
@@ -53,40 +69,43 @@ export function TrashList({ items, loading, error, onRetry, onRestore, restoring
 								<RotateCw aria-hidden /> Try again
 							</Button>
 						</Message>
-					) : loading || !items ? (
+					) : loading || !rows ? (
 						<Message>Loading…</Message>
-					) : items.length === 0 ? (
+					) : rows.length === 0 ? (
 						<Message>The trash is empty.</Message>
 					) : (
-						items.map((item) => (
-							<tr key={item.id} className="border-b border-border last:border-0">
+						rows.map((row) => (
+							<tr key={row.key} className="border-b border-border last:border-0">
 								<td className="px-4 py-2.5">
 									<span className="flex min-w-0 items-center gap-2.5">
-										<FileIcon item={item} />
+										<FileIcon item={row} />
 										<span className="min-w-0">
-											<span className="block truncate font-medium" title={item.name}>
-												{item.name}
+											<span className="block truncate font-medium" title={row.name}>
+												{row.name}
 											</span>
-											{item.replaced && <span className="block text-muted-foreground">Replaced by an upload</span>}
+											{row.replaced && <span className="block text-muted-foreground">Replaced by an upload</span>}
+											{row.kind === "shared-folder" && (
+												<span className="block text-muted-foreground">Shared folder, with everything in it</span>
+											)}
 										</span>
 									</span>
 								</td>
-								<td className="truncate px-4 py-2.5 text-muted-foreground">
-									{["My files", ...item.from.map((f) => f.name)].join(" › ")}
+								<td className="truncate px-4 py-2.5 text-muted-foreground" title={row.backTo}>
+									{row.backTo}
 								</td>
 								<td className="px-4 py-2.5 text-muted-foreground">
-									<time dateTime={item.deleted} title={formatChangedFull(item.deleted)}>
-										{formatChanged(item.deleted)}
+									<time dateTime={row.deleted} title={formatChangedFull(row.deleted)}>
+										{formatChanged(row.deleted)}
 									</time>
 								</td>
 								<td className="px-4 py-2.5 text-muted-foreground">
-									<time dateTime={item.removed} title={formatChangedFull(item.removed)}>
-										{formatUntil(item.removed)}
+									<time dateTime={row.removed} title={formatChangedFull(row.removed)}>
+										{formatUntil(row.removed)}
 									</time>
 								</td>
-								<td className="px-4 py-2.5 text-right text-muted-foreground tabular-nums">{formatSize(item.size)}</td>
+								<td className="px-4 py-2.5 text-right text-muted-foreground tabular-nums">{formatSize(row.size)}</td>
 								<td className="px-4 py-1.5 text-right">
-									<Button small onClick={() => onRestore(item)} disabled={restoring !== undefined} aria-label={`Restore ${item.name}`}>
+									<Button small onClick={() => onRestore(row)} disabled={restoring !== undefined} aria-label={`Restore ${row.name}`}>
 										<RotateCcw aria-hidden /> Restore
 									</Button>
 								</td>

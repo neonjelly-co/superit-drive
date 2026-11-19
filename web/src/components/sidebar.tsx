@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { FolderPlus, Trash2, Upload } from "lucide-react";
+import { FolderOpen, FolderPlus, Plus, Trash2, Upload } from "lucide-react";
 import { type MouseEvent, useRef } from "react";
-import { api } from "../api";
+import { api, type Place } from "../api";
 import { formatCapacity, formatSize } from "../format";
 import { hrefOf, type Where } from "../location";
 import { Button } from "./button";
@@ -11,18 +11,22 @@ type Props = {
 	project?: string;
 	where: Where;
 	go: (w: Where) => void;
+	/** The shared folders the person can open, by name. */
+	sharedFolders: Extract<Place, { kind: "shared-folder" }>[];
 	/** Called with the files the person chose; undefined while there is nowhere to upload to. */
 	onUpload?: (files: File[]) => void;
 	/** Called for "New folder"; undefined while there is no folder to make one in (such as in the trash). */
 	onNewFolder?: () => void;
+	/** Called for "New shared folder". */
+	onNewSharedFolder: () => void;
 };
 
 /**
  * The left sidebar of layout D. In the full design it holds, from the top: Upload and New folder, My files, the shared
  * folders by name, New shared folder, Shared with me, Trash, and the storage meter at the bottom. Each arrives with the
- * ticket that makes it work; shared folders and "Shared with me" are still to come.
+ * ticket that makes it work; "Shared with me" is still to come.
  */
-export function Sidebar({ project, where, go, onUpload, onNewFolder }: Props) {
+export function Sidebar({ project, where, go, sharedFolders, onUpload, onNewFolder, onNewSharedFolder }: Props) {
 	const chooser = useRef<HTMLInputElement>(null);
 	const link = (to: Where) => (e: MouseEvent) => {
 		if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; // a new tab, as the person asked
@@ -62,13 +66,33 @@ export function Sidebar({ project, where, go, onUpload, onNewFolder }: Props) {
 			</div>
 			<nav aria-label="Places" className="mt-4 space-y-0.5">
 				<a
-					href={hrefOf({ view: "files", folder: null })}
-					onClick={link({ view: "files", folder: null })}
-					aria-current={where.view === "files" ? "page" : undefined}
-					className={nav(where.view === "files")}
+					href={hrefOf({ view: "files", place: null, folder: null })}
+					onClick={link({ view: "files", place: null, folder: null })}
+					aria-current={where.view === "files" && where.place === null ? "page" : undefined}
+					className={nav(where.view === "files" && where.place === null)}
 				>
 					My files
 				</a>
+				<h2 className="px-2.5 pt-4 pb-1 text-sm text-muted-foreground">Shared folders</h2>
+				{sharedFolders.map((f) => {
+					const here = where.view === "files" && where.place === f.id;
+					return (
+						<a
+							key={f.id}
+							href={hrefOf({ view: "files", place: f.id, folder: null })}
+							onClick={link({ view: "files", place: f.id, folder: null })}
+							aria-current={here ? "page" : undefined}
+							className={nav(here)}
+							title={f.name}
+						>
+							<FolderOpen aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+							<span className="truncate">{f.name}</span>
+						</a>
+					);
+				})}
+				<button type="button" onClick={onNewSharedFolder} className={`${nav(false)} text-muted-foreground`}>
+					<Plus aria-hidden className="size-4 shrink-0" /> New shared folder
+				</button>
 				<div className="pt-4" />
 				<a
 					href={hrefOf({ view: "trash" })}

@@ -8,7 +8,61 @@ export type Me = {
 	project: string;
 };
 
-export type Place = { id: number; kind: "my-files" };
+/** What the Drive may let a person do in a place (internal/access). It decides again on every request. */
+export type Action =
+	| "list"
+	| "download"
+	| "upload"
+	| "make-folder"
+	| "rename"
+	| "move"
+	| "delete"
+	| "see-trash"
+	| "restore"
+	| "see-access"
+	| "manage-access"
+	| "delete-shared-folder"
+	| "restore-shared-folder";
+
+/** A role on a shared folder. Project admins are managers of every shared folder. */
+export type Role = "viewer" | "editor" | "manager";
+
+/**
+ * A place the person can open: their own "My files", or a shared folder (owned by the project) with their role on it.
+ * `can` is what they may do there.
+ */
+export type Place =
+	| { id: number; kind: "my-files"; can: Action[] }
+	| { id: number; kind: "shared-folder"; name: string; role: Role; can: Action[] };
+
+/** A shared folder in the trash. */
+export type DeletedPlace = {
+	id: number;
+	kind: "shared-folder";
+	name: string;
+	/** What the files in it add up to, its own trash included. */
+	size: number;
+	/** When it went to the trash, and when the Drive removes it for good (ISO 8601). */
+	deleted: string;
+	removed: string;
+};
+
+/** A member of the project, from the member list. */
+export type Member = { userId: string; email: string; displayName: string; role: "admin" | "member" };
+
+/** Someone with a role on a shared folder. */
+export type Person = {
+	userId: string;
+	email?: string;
+	displayName?: string;
+	role: Role;
+	/** Given on this shared folder, so it can be taken away. */
+	given: boolean;
+	/** Holds the admin role on the project: a manager of every shared folder. */
+	admin: boolean;
+	/** No longer in the project. */
+	former?: boolean;
+};
 
 export type Item = {
 	id: number;
@@ -119,7 +173,22 @@ function upload(
 
 export const api = {
 	me: () => call<Me>("GET", "/api/me"),
+	members: () => call<{ members: Member[] }>("GET", "/api/members").then((r) => r.members),
+	/** My files first, then every shared folder the person has a role on. */
 	places: () => call<{ places: Place[] }>("GET", "/api/places").then((r) => r.places),
+	/** Makes a shared folder; the person becomes its manager. */
+	newSharedFolder: (name: string) => call<Place>("POST", "/api/places", { name }),
+	/** Moves a shared folder, with everything in it, into the trash. */
+	deleteSharedFolder: (placeId: number) => call<DeletedPlace>("DELETE", `/api/places/${placeId}`),
+	/** The shared folders in the trash that the person may restore. */
+	deletedSharedFolders: () => call<{ places: DeletedPlace[] }>("GET", "/api/places/deleted").then((r) => r.places),
+	restoreSharedFolder: (placeId: number) => call<Place>("POST", `/api/places/${placeId}/restore`),
+	/** Who has access to a shared folder. */
+	access: (placeId: number) => call<{ people: Person[] }>("GET", `/api/places/${placeId}/access`).then((r) => r.people),
+	giveAccess: (placeId: number, userId: string, role: Role) =>
+		call<{ people: Person[] }>("PUT", `/api/places/${placeId}/access/${encodeURIComponent(userId)}`, { role }).then((r) => r.people),
+	takeAccess: (placeId: number, userId: string) =>
+		call<{ people: Person[] }>("DELETE", `/api/places/${placeId}/access/${encodeURIComponent(userId)}`).then((r) => r.people),
 	usage: () => call<Usage>("GET", "/api/usage"),
 	/** What is in a folder of a place (null: its top folder). */
 	list: (placeId: number, folderId: number | null) => call<Listing>("GET", `${folderPath(placeId, folderId)}/items`),
