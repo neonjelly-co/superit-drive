@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -175,8 +176,202 @@ func TestPathsCannotLeaveTheDrivesFolder(t *testing.T) {
 		if _, err := c.Open(context.Background(), p); !errors.Is(err, ErrBadPath) {
 			t.Errorf("Open(%q): got %v, want ErrBadPath", p, err)
 		}
+		if _, err := c.OpenPart(context.Background(), p, 0, 1); !errors.Is(err, ErrBadPath) {
+			t.Errorf("OpenPart(%q): got %v, want ErrBadPath", p, err)
+		}
+		if err := c.PutPart(context.Background(), p, 0, strings.NewReader("x"), 1, 1); !errors.Is(err, ErrBadPath) {
+			t.Errorf("PutPart(%q): got %v, want ErrBadPath", p, err)
+		}
+		if err := c.Move(context.Background(), p, "a.txt"); !errors.Is(err, ErrBadPath) {
+			t.Errorf("Move(%q, a.txt): got %v, want ErrBadPath", p, err)
+		}
+		if err := c.Move(context.Background(), "a.txt", p); !errors.Is(err, ErrBadPath) {
+			t.Errorf("Move(a.txt, %q): got %v, want ErrBadPath", p, err)
+		}
+		if err := c.Delete(context.Background(), p); !errors.Is(err, ErrBadPath) {
+			t.Errorf("Delete(%q): got %v, want ErrBadPath", p, err)
+		}
+		if err := c.DeleteFolder(context.Background(), p); !errors.Is(err, ErrBadPath) {
+			t.Errorf("DeleteFolder(%q): got %v, want ErrBadPath", p, err)
+		}
+	}
+	// Nor is the Drive's own folder ever deleted.
+	for _, dir := range []string{"", "/", "//"} {
+		if err := c.DeleteFolder(context.Background(), dir); err == nil {
+			t.Errorf("DeleteFolder(%q) was not refused", dir)
+		}
 	}
 	if called {
 		t.Error("a refused path reached the storage")
+	}
+}
+
+// Reading part of a file is tested against real Apache through the storage check in the test/ package. This covers
+// what is asked for and how each answer is read.
+func TestOpenPartAsksForTheRangeAndChecksTheAnswer(t *testing.T) {
+	cases := []struct {
+		name         string
+		status       int
+		contentRange string
+		wantErr      error // nil for success; errOther for an error of its own
+		wantSize     int64
+	}{
+		{"the part", http.StatusPartialContent, "bytes 1000-1999/262144", nil, 1000},
+		{"the part, length unknown", http.StatusPartialContent, "bytes 1000-1999/*", nil, 1000},
+		{"a shorter part where the file ends", http.StatusPartialContent, "bytes 1000-1499/1500", nil, 500},
+		{"the whole file", http.StatusOK, "", ErrNoRanges, 0},
+		{"another part", http.StatusPartialContent, "bytes 0-999/262144", errOther, 0},
+		{"a longer part", http.StatusPartialContent, "bytes 1000-2999/262144", errOther, 0},
+		{"no Content-Range", http.StatusPartialContent, "", errOther, 0},
+		{"no file", http.StatusNotFound, "", ErrNotFound, 0},
+		{"a refused login", http.StatusUnauthorized, "", ErrUnauthorized, 0},
+		{"a refusal", http.StatusForbidden, "", errOther, 0},
+	}
+	for _, c := range cases {
+		var path, rangeHeader, encoding string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path, rangeHeader, encoding = r.URL.EscapedPath(), r.Header.Get("Range"), r.Header.Get("Accept-Encoding")
+			if c.contentRange != "" {
+				w.Header().Set("Content-Range", c.contentRange)
+			}
+			w.WriteHeader(c.status)
+			_, _ = w.Write([]byte(strings.Repeat("x", int(c.wantSize))))
+		}))
+		base, _ := url.Parse(srv.URL)
+		f, err := New(base, "u", "p", "/drive").OpenPart(context.Background(), "My files/r/a b.bin", 1000, 1000)
+		if err == nil {
+			data, _ := io.ReadAll(f.Body)
+			f.Body.Close()
+			if f.Size != c.wantSize || int64(len(data)) != c.wantSize {
+				t.Errorf("%s: got %d bytes announced as %d, want %d", c.name, len(data), f.Size, c.wantSize)
+			}
+		}
+		srv.Close()
+		checkErr(t, c.name, err, c.wantErr)
+		if path != "/drive/My%20files/r/a%20b.bin" || rangeHeader != "bytes=1000-1999" || encoding != "identity" {
+			t.Errorf("%s: asked for %s with Range %q and Accept-Encoding %q", c.name, path, rangeHeader, encoding)
+		}
+	}
+}
+
+func TestPutPartSaysWhereThePartGoes(t *testing.T) {
+	var method, contentRange, ifNoneMatch, body string
+	var length int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, contentRange, ifNoneMatch, length = r.Method, r.Header.Get("Content-Range"), r.Header.Get("If-None-Match"), r.ContentLength
+		data, _ := io.ReadAll(r.Body)
+		body = string(data)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	base, _ := url.Parse(srv.URL)
+	c := New(base, "u", "p", "/drive")
+	if err := c.PutPart(context.Background(), "a.bin", 4, strings.NewReader("BBBB"), 4, 8); err != nil {
+		t.Fatal(err)
+	}
+	// No If-None-Match: the file is there, and that is the point.
+	if method != http.MethodPut || contentRange != "bytes 4-7/8" || ifNoneMatch != "" || length != 4 || body != "BBBB" {
+		t.Errorf("sent %s with Content-Range %q, If-None-Match %q, Content-Length %d, body %q",
+			method, contentRange, ifNoneMatch, length, body)
+	}
+	if err := c.PutPart(context.Background(), "a.bin", 6, strings.NewReader("BBBB"), 4, 8); err == nil {
+		t.Error("a part that runs past the end of the file was sent")
+	}
+}
+
+func TestMoveNeverReplaces(t *testing.T) {
+	cases := []struct {
+		status int
+		want   error
+	}{
+		{http.StatusCreated, nil},
+		{http.StatusNoContent, nil},
+		{http.StatusPreconditionFailed, ErrExists}, // Overwrite: F and the name is taken
+		{http.StatusNotFound, ErrNotFound},         // nothing to move
+		{http.StatusConflict, ErrNotFound},         // the folder above the new name is missing
+		{http.StatusUnauthorized, ErrUnauthorized},
+		{http.StatusForbidden, errOther},
+		{http.StatusBadGateway, errOther}, // Apache: the destination is on another server
+	}
+	for _, c := range cases {
+		var method, path, destination, overwrite string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			method, path, destination, overwrite = r.Method, r.URL.EscapedPath(), r.Header.Get("Destination"), r.Header.Get("Overwrite")
+			w.WriteHeader(c.status)
+		}))
+		base, _ := url.Parse(srv.URL)
+		err := New(base, "u", "p", "/drive").Move(context.Background(), "My files/r/a.txt", "My files/r/Réka's b.txt")
+		srv.Close()
+		checkErr(t, strconv.Itoa(c.status), err, c.want)
+		if method != "MOVE" || path != "/drive/My%20files/r/a.txt" ||
+			destination != srv.URL+"/drive/My%20files/r/R%C3%A9ka%27s%20b.txt" || overwrite != "F" {
+			t.Errorf("%d: sent %s %s with Destination %q and Overwrite %q", c.status, method, path, destination, overwrite)
+		}
+	}
+}
+
+func TestDeleteAddressesFilesAndFolders(t *testing.T) {
+	cases := []struct {
+		status int
+		want   error
+	}{
+		{http.StatusNoContent, nil},
+		{http.StatusOK, nil},
+		{http.StatusNotFound, ErrNotFound},
+		{http.StatusMultiStatus, errOther}, // some of a folder could not be deleted
+		{http.StatusForbidden, errOther},
+	}
+	for _, c := range cases {
+		var paths []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodDelete {
+				paths = append(paths, r.URL.EscapedPath())
+			}
+			w.WriteHeader(c.status)
+		}))
+		base, _ := url.Parse(srv.URL)
+		store := New(base, "u", "p", "/drive")
+		checkErr(t, "file, "+strconv.Itoa(c.status), store.Delete(context.Background(), "My files/r/a.txt"), c.want)
+		checkErr(t, "folder, "+strconv.Itoa(c.status), store.DeleteFolder(context.Background(), "My files/r/Old"), c.want)
+		srv.Close()
+		if !slices.Equal(paths, []string{"/drive/My%20files/r/a.txt", "/drive/My%20files/r/Old/"}) {
+			t.Errorf("%d: deleted %q", c.status, paths)
+		}
+	}
+}
+
+// A redirect is reported with where it pointed: an http address that a server sends to https, for one.
+func TestAnUnknownAnswerSaysWhatItWas(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://dav.example.com/", http.StatusMovedPermanently)
+	}))
+	defer srv.Close()
+	base, _ := url.Parse(srv.URL)
+	_, err := New(base, "u", "p", "/").List(context.Background(), "")
+	var status *StatusError
+	if !errors.As(err, &status) || status.Status != "301 Moved Permanently" || status.Location != "https://dav.example.com/" {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// errOther stands for an error of the method's own, none of the ones a caller tells apart.
+var errOther = errors.New("an error of its own")
+
+func checkErr(t *testing.T, name string, err, want error) {
+	t.Helper()
+	known := []error{ErrExists, ErrNotFound, ErrFull, ErrUnauthorized, ErrNoRanges, ErrBadPath}
+	switch want {
+	case nil:
+		if err != nil {
+			t.Errorf("%s: got %v, want success", name, err)
+		}
+	case errOther:
+		if err == nil || slices.ContainsFunc(known, func(k error) bool { return errors.Is(err, k) }) {
+			t.Errorf("%s: got %v, want an error of its own", name, err)
+		}
+	default:
+		if !errors.Is(err, want) {
+			t.Errorf("%s: got %v, want %v", name, err, want)
+		}
 	}
 }
