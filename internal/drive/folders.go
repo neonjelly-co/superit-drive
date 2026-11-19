@@ -34,6 +34,11 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 	if !ok {
 		return index.Item{}, &BadName{"This name cannot be used. Choose another name."}
 	}
+	leave, err := d.inPlace(ctx, p)
+	if err != nil {
+		return index.Item{}, err
+	}
+	defer leave()
 	release, ok := d.claim(made)
 	if !ok {
 		return index.Item{}, ErrBusy
@@ -47,7 +52,7 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 	}
 
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
-	err := d.storage.CreateFolder(sctx, made)
+	err = d.storage.CreateFolder(sctx, made)
 	cancel()
 	switch {
 	case errors.Is(err, storage.ErrExists):
@@ -132,6 +137,11 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 	if !ok {
 		return index.Item{}, &BadName{"This name cannot be used. Choose another name."}
 	}
+	leave, err := d.inPlace(ctx, p)
+	if err != nil {
+		return index.Item{}, err
+	}
+	defer leave()
 	release, ok := d.claim(from, dest)
 	if !ok || (it.Folder && d.busyInside(from)) {
 		if ok {
@@ -148,7 +158,7 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 		return index.Item{}, err
 	}
 
-	err := d.moveOnStorage(ctx, it.Folder, from, dest)
+	err = d.moveOnStorage(ctx, it.Folder, from, dest)
 	switch {
 	case errors.Is(err, storage.ErrExists):
 		return index.Item{}, &Taken{Name: name}

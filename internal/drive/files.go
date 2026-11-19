@@ -109,6 +109,11 @@ func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, n
 	if !ok {
 		return Upload{}, &BadName{"This name cannot be used. Choose another name."} // CheckName refuses these first
 	}
+	leave, err := d.inPlace(ctx, p)
+	if err != nil {
+		return Upload{}, err
+	}
+	defer leave()
 	release, ok := d.claim(file)
 	if !ok {
 		return Upload{}, ErrBusy
