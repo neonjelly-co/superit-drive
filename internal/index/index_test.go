@@ -85,8 +85,49 @@ func TestTheMigrationKeepsItemsAndTheirIds(t *testing.T) {
 	if _, err := x.db.ExecContext(ctx, "INSERT INTO items (place_id, name, is_folder, changed_at) VALUES (999, 'x', 0, 0)"); err == nil {
 		t.Fatal("an item of a place that does not exist was accepted: foreign keys are off")
 	}
-	if _, err := x.db.ExecContext(ctx, "INSERT INTO grants (place_id, member, role, given_at) VALUES (999, 'u', 'manager', 0)"); err == nil {
+	if _, err := x.db.ExecContext(ctx, "INSERT INTO grants (place_id, grantee, member, role, given_at) VALUES (999, 'member', 'u', 'manager', 0)"); err == nil {
 		t.Fatal("a role on a place that does not exist was accepted: foreign keys are off")
+	}
+}
+
+// The managers given before sharing (0003) are still managers of the same shared folders after it (0004).
+func TestTheMigrationToSharingKeepsTheManagers(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"0001_places_and_items.sql", "0002_folders_and_trash.sql", "0003_shared_folders.sql"} {
+		script, _ := migrations.ReadFile("migrations/" + name)
+		if _, err := db.ExecContext(ctx, string(script)); err != nil {
+			t.Fatal(name, err)
+		}
+	}
+	for _, q := range []string{
+		"PRAGMA user_version = 3",
+		"INSERT INTO places (id, kind, name, folder, created_at) VALUES (4, 'shared-folder', 'Clients', 'Shared folders/Clients', 0)",
+		"INSERT INTO grants (place_id, member, role, given_at) VALUES (4, 'u-bence', 'manager', 1000), (4, 'u-dora', 'manager', 2000)",
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	x, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	got, err := x.GrantsOn(ctx, 4, nil)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("the grants after the migration: %+v, %v", got, err)
+	}
+	for i, member := range []string{"u-bence", "u-dora"} {
+		if g := got[i]; g.Item != 0 || g.Everyone || g.Member != member || g.Role != "manager" || g.Given.UnixMilli() != int64(1000*(i+1)) || g.By != "" {
+			t.Errorf("grant %d: %+v", i, g)
+		}
 	}
 }
 
@@ -103,11 +144,8 @@ func TestASharedFolderAndItsManagers(t *testing.T) {
 	if clients.Kind != SharedFolder || clients.Name != "Clients" || clients.Owner != "" || clients.Folder != "Shared folders/Clients" {
 		t.Fatalf("got %+v", clients)
 	}
-	if role, _ := x.Given(ctx, clients.ID, "u-bence"); role != "manager" {
-		t.Fatalf("the maker's role: %q, want manager", role)
-	}
-	if role, _ := x.Given(ctx, clients.ID, "u-dora"); role != "" {
-		t.Fatalf("someone else's role: %q, want none", role)
+	if got, _ := x.GrantsOn(ctx, clients.ID, nil); len(got) != 1 || got[0].Member != "u-bence" || got[0].Role != "manager" || got[0].By != "u-bence" {
+		t.Fatalf("the maker's role: %+v, want manager", got)
 	}
 	// Two places never hold the same folder.
 	if _, err := x.AddSharedFolder(ctx, "Clients", "Shared folders/Clients", "u-dora", now); err == nil {
@@ -118,18 +156,19 @@ func TestASharedFolderAndItsManagers(t *testing.T) {
 	}
 	ledger := put(t, x, clients, 0, "Ledger.xlsx", false, 40)
 
-	if err := x.Give(ctx, clients.ID, "u-dora", "manager", now); err != nil {
+	dora := Grantee{Member: "u-dora"}
+	if err := x.Give(ctx, clients.ID, 0, dora, "manager", now, "u-bence", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := x.Give(ctx, clients.ID, "u-dora", "viewer", now); err == nil {
-		t.Fatal("a role the index does not hold yet was given")
+	if err := x.Give(ctx, clients.ID, 0, dora, "owner", now, "u-bence", nil); err == nil {
+		t.Fatal("a role the index does not hold was given")
 	}
-	if given, _ := x.GivenTo(ctx, "u-dora"); given[clients.ID] != "manager" || len(given) != 1 {
+	if given, _ := x.TopGrantsFor(ctx, "u-dora"); len(given[clients.ID]) != 1 || given[clients.ID][0].Role != "manager" || len(given) != 1 {
 		t.Fatalf("Dóra's roles: %v", given)
 	}
 	// Taking a role away shows what would be left, and the check can refuse.
 	refused := errors.New("refused")
-	err = x.TakeAway(ctx, clients.ID, "u-bence", func(left []Grant) error {
+	err = x.TakeAway(ctx, clients.ID, 0, Grantee{Member: "u-bence"}, func(left []Grant) error {
 		if len(left) != 1 || left[0].Member != "u-dora" {
 			t.Errorf("left: %+v", left)
 		}
@@ -138,13 +177,13 @@ func TestASharedFolderAndItsManagers(t *testing.T) {
 	if !errors.Is(err, refused) {
 		t.Fatalf("got %v, want the check's refusal", err)
 	}
-	if role, _ := x.Given(ctx, clients.ID, "u-bence"); role != "manager" {
+	if got, _ := x.GrantsOn(ctx, clients.ID, nil); len(got) != 2 {
 		t.Fatal("a refused take-away took the role away")
 	}
-	if err := x.TakeAway(ctx, clients.ID, "u-bence", func([]Grant) error { return nil }); err != nil {
+	if err := x.TakeAway(ctx, clients.ID, 0, Grantee{Member: "u-bence"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if grants, _ := x.Grants(ctx, clients.ID); len(grants) != 1 || grants[0].Member != "u-dora" {
+	if grants, _ := x.GrantsOn(ctx, clients.ID, nil); len(grants) != 1 || grants[0].Member != "u-dora" {
 		t.Fatalf("roles left: %+v", grants)
 	}
 
@@ -197,7 +236,7 @@ func TestASharedFolderAndItsManagers(t *testing.T) {
 	if _, err := x.DeletedPlace(ctx, clients.ID); !errors.Is(err, ErrNoPlace) {
 		t.Fatalf("still there: %v", err)
 	}
-	if grants, _ := x.Grants(ctx, clients.ID); len(grants) != 0 {
+	if grants, _ := x.GrantsOn(ctx, clients.ID, nil); len(grants) != 0 {
 		t.Fatalf("its roles outlived it: %+v", grants)
 	}
 	if used, _ := x.Used(ctx); used != 0 {
@@ -349,5 +388,110 @@ func TestAListingLeavesTheIndexAloneWhenTheFolderChangedMeanwhile(t *testing.T) 
 	items, _ = x.Children(ctx, p.ID, 0)
 	if len(items) != 1 || !items[0].Folder || items[0].ID == a.ID {
 		t.Fatalf("got %+v", items)
+	}
+}
+
+// A grant on an item hangs on its id: it lasts through rename, move and the trash, goes when the item is removed for
+// good or the storage no longer has it, and is never given on an item of another place or one in the trash.
+func TestAGrantOnAnItemLivesAndGoesWithIt(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	now := time.Now()
+	bence, reka := place(t, x, "u-bence"), place(t, x, "u-reka")
+	clients := put(t, x, bence, 0, "Clients", true, 0)
+	offer := put(t, x, bence, clients.ID, "Offer.pdf", false, 84)
+	notes := put(t, x, bence, 0, "Notes.txt", false, 5)
+	toReka := Grantee{Member: "u-reka"}
+	everyone := Grantee{Everyone: true}
+
+	if err := x.Give(ctx, bence.ID, clients.ID, toReka, "viewer", now, "u-bence", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.Give(ctx, bence.ID, offer.ID, everyone, "editor", now, "u-bence", nil); err != nil {
+		t.Fatal(err)
+	}
+	// "everyone" is not a member, even one whose user id is "everyone".
+	if err := x.Give(ctx, bence.ID, offer.ID, Grantee{Member: "everyone"}, "viewer", now, "u-bence", nil); err != nil {
+		t.Fatal(err)
+	}
+	// Giving again replaces the role, and who gave it.
+	if err := x.Give(ctx, bence.ID, clients.ID, toReka, "editor", now.Add(time.Second), "u-dora", nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := x.GrantsOn(ctx, bence.ID, []int64{clients.ID, offer.ID})
+	if err != nil || len(got) != 3 {
+		t.Fatalf("grants on Clients and Offer.pdf: %+v, %v", got, err)
+	}
+	if g := got[2]; g.Item != clients.ID || g.Member != "u-reka" || g.Role != "editor" || g.By != "u-dora" {
+		t.Fatalf("Réka's grant after giving again: %+v", g)
+	}
+	if g := got[0]; g.Item != offer.ID || !g.Everyone || g.Member != "" || g.Role != "editor" {
+		t.Fatalf("everyone's grant: %+v", g)
+	}
+	if g := got[1]; g.Everyone || g.Member != "everyone" || g.Role != "viewer" {
+		t.Fatalf("the member called everyone: %+v", g)
+	}
+	if inside, _ := x.GrantsInside(ctx, bence.ID, 0); len(inside) != 1 || inside[0].Item != clients.ID {
+		t.Fatalf("grants on what is in the top folder: %+v", inside)
+	}
+	if err := x.TakeAway(ctx, bence.ID, offer.ID, Grantee{Member: "everyone"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := x.GrantsOn(ctx, bence.ID, []int64{offer.ID}); len(got) != 1 || !got[0].Everyone {
+		t.Fatalf("taking the member called everyone's grant took: %+v", got)
+	}
+
+	// Not on an item of another place, through Give or behind its back; not on one in the trash.
+	if err := x.Give(ctx, reka.ID, offer.ID, toReka, "editor", now, "u-reka", nil); !errors.Is(err, ErrNoItem) {
+		t.Fatalf("a grant on Bence's item through Réka's place: %v", err)
+	}
+	if _, err := x.db.ExecContext(ctx, "INSERT INTO grants (place_id, item_id, grantee, member, role, given_at) VALUES (?, ?, 'member', 'u-reka', 'editor', 0)", reka.ID, offer.ID); err == nil {
+		t.Fatal("the index holds a grant in one place on an item of another")
+	}
+	if _, err := x.db.ExecContext(ctx, "INSERT INTO grants (place_id, item_id, grantee, member, role, given_at) VALUES (?, ?, 'member', 'u-reka', 'manager', 0)", bence.ID, notes.ID); err == nil {
+		t.Fatal("the index holds a manager on an item")
+	}
+	if _, err := x.db.ExecContext(ctx, "INSERT INTO grants (place_id, item_id, grantee, member, role, given_at) VALUES (?, ?, 'everyone', 'u-reka', 'viewer', 0)", bence.ID, notes.ID); err == nil {
+		t.Fatal("the index holds a grant to everyone and a member at once")
+	}
+	if err := x.Trash(ctx, bence.ID, clients.ID, now, "e1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range []Item{clients, offer} {
+		if err := x.Give(ctx, bence.ID, it.ID, Grantee{Member: "u-dora"}, "viewer", now, "u-bence", nil); !errors.Is(err, ErrNoItem) {
+			t.Fatalf("a grant on %s in the trash: %v", it.Name, err)
+		}
+	}
+
+	// Through rename, move, the trash and restore, the grants stay with the items.
+	if got, _ := x.GrantsOn(ctx, bence.ID, []int64{clients.ID, offer.ID}); len(got) != 2 {
+		t.Fatalf("grants while in the trash: %+v", got)
+	}
+	if _, err := x.Restore(ctx, bence.ID, clients.ID, 0, "Clients (2)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.Relocate(ctx, bence.ID, offer.ID, 0, "Offer 2026.pdf"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := x.GrantsOn(ctx, bence.ID, []int64{clients.ID, offer.ID}); len(got) != 2 {
+		t.Fatalf("grants after the restore and the move: %+v", got)
+	}
+
+	// Removed for good from the trash, or dropped because the storage no longer has it: its grants go with it.
+	if err := x.Trash(ctx, bence.ID, offer.ID, now, "e2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.RemoveFromTrash(ctx, bence.ID, offer.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.SetChildren(ctx, bence.ID, 0, []Seen{{Name: "Notes.txt", Size: 5}}, func(string) bool { return false }, func() bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := x.GrantsOn(ctx, bence.ID, []int64{clients.ID, offer.ID}); len(got) != 0 {
+		t.Fatalf("grants outlived their items: %+v", got)
+	}
+	var left int
+	if err := x.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM grants").Scan(&left); err != nil || left != 0 {
+		t.Fatalf("%d grants left in the index (%v)", left, err)
 	}
 }

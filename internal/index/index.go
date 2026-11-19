@@ -1,10 +1,10 @@
 // Package index is the Drive's index: one SQLite file in the data folder. It holds the places, the folder tree with
-// every file's size (the space used is summed from them), the trash, the roles given on shared folders and, as later
-// tickets add them, other access, public links and guests. The storage wins for which files exist and what is in them;
-// the index alone holds access.
+// every file's size (the space used is summed from them), the trash, the access given on places and items and, as
+// later tickets add them, public links and guests. The storage wins for which files exist and what is in them; the
+// index alone holds access.
 //
-// index.go opens the file and holds the places; shared.go holds shared folders and the roles given on them, items.go
-// the folder tree, and trash.go the trash.
+// index.go opens the file and holds the places; shared.go holds shared folders, grants.go the access given on them and
+// on items, items.go the folder tree, and trash.go the trash.
 //
 // The schema is changed only by adding a numbered file to migrations/. Each runs once, in order, and the database's
 // user_version records how far it got.
