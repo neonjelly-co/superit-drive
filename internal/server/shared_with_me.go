@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"slices"
@@ -51,51 +52,16 @@ type sharedJSON struct {
 //
 //	GET /api/shared-with-me
 func (s *Server) sharedWithMe(w http.ResponseWriter, r *http.Request, c call) {
-	ctx := r.Context()
-	granted, err := s.drive.GrantedTo(ctx, c.member.UserID)
+	shares, err := s.sharedWith(r.Context(), c.member)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	who := personOf(c.member)
 	list := s.members.Current()
-	places := map[int64]*index.Place{}
 	out := []sharedJSON{}
-	for _, g := range granted {
-		p, seen := places[g.Place]
-		if !seen {
-			found, err := s.drive.Place(ctx, g.Place)
-			switch {
-			case errors.Is(err, index.ErrNoPlace):
-			case err != nil:
-				s.fail(w, r, err)
-				return
-			default:
-				p = &found
-			}
-			places[g.Place] = p
-		}
-		if p == nil {
-			continue // a shared folder in the trash, or gone for good
-		}
-		it, err := s.drive.Item(ctx, *p, g.Item)
-		if errors.Is(err, index.ErrNoItem) {
-			continue // in the trash, inside a folder in the trash, or gone
-		}
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		path := idsOf(pathTo(it))
-		grants, err := s.drive.GrantsOn(ctx, *p, path)
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		where := s.accessPlace(*p, path, grants)
-		if !access.SharedWithMe(who, where) {
-			continue
-		}
+	for _, sh := range shares {
+		p, it, grants, where := &sh.place, sh.item, sh.grants, sh.where
 		e := sharedJSON{
 			listedJSON: listedJSON{itemJSON: itemOf(it), Can: can(who, where), SeenBy: seenBy(list, where)},
 			Place:      p.ID, PlaceKind: string(p.Kind), Role: access.RoleAt(who, where),
@@ -123,4 +89,61 @@ func (s *Server) sharedWithMe(w http.ResponseWriter, r *http.Request, c call) {
 	}
 	slices.SortStableFunc(out, func(a, b sharedJSON) int { return b.Shared.Compare(a.Shared) })
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+// aShare is an item shared with someone that they reach only through that share: its place, the item with the
+// folders above it, what was given on the way down to it, and where the access package saw it.
+type aShare struct {
+	place  index.Place
+	item   index.Item
+	grants []index.Grant
+	where  *access.Place
+}
+
+// sharedWith is everything shared with the member, by name or with everyone in the project, that they reach only
+// through that share (access.SharedWithMe), decided on the whole way down to each item: "Shared with me", and where a
+// search looks besides the member's own places. Whatever no longer counts is left out.
+func (s *Server) sharedWith(ctx context.Context, m members.Member) ([]aShare, error) {
+	granted, err := s.drive.GrantedTo(ctx, m.UserID)
+	if err != nil {
+		return nil, err
+	}
+	who := personOf(m)
+	places := map[int64]*index.Place{}
+	var out []aShare
+	for _, g := range granted {
+		p, seen := places[g.Place]
+		if !seen {
+			found, err := s.drive.Place(ctx, g.Place)
+			switch {
+			case errors.Is(err, index.ErrNoPlace):
+			case err != nil:
+				return nil, err
+			default:
+				p = &found
+			}
+			places[g.Place] = p
+		}
+		if p == nil {
+			continue // a shared folder in the trash, or gone for good
+		}
+		it, err := s.drive.Item(ctx, *p, g.Item)
+		if errors.Is(err, index.ErrNoItem) {
+			continue // in the trash, inside a folder in the trash, or gone
+		}
+		if err != nil {
+			return nil, err
+		}
+		path := idsOf(pathTo(it))
+		grants, err := s.drive.GrantsOn(ctx, *p, path)
+		if err != nil {
+			return nil, err
+		}
+		where := s.accessPlace(*p, path, grants)
+		if !access.SharedWithMe(who, where) {
+			continue
+		}
+		out = append(out, aShare{place: *p, item: it, grants: grants, where: where})
+	}
+	return out, nil
 }

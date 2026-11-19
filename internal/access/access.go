@@ -38,6 +38,7 @@
 //     upload (MoveIn). Every other move stays inside its place.
 //   - "Shared with me" lists what someone may open without being able to open the folder it is in (SharedWithMe): the
 //     highest point of a place their access reaches, given on it to them or to everyone in the project.
+//   - A search by name finds every live item someone may open, and nothing else (Finds).
 //
 // Guests and public links add their rules here.
 package access
@@ -298,6 +299,18 @@ func SharedWithMe(person Person, place *Place) bool {
 		return false
 	}
 	return Decide(person, List, place) && !Decide(person, List, place.Up(len(place.Path)-1))
+}
+
+// Finds says whether a search by name finds, for the person, the live item place is about: anything they may open,
+// wherever it is (their own My files, a shared folder they have a role on, what was shared with them in part of a
+// place), and nothing else: not what is beside or above what they were given, nothing in a held My files, nothing in a
+// shared folder in the trash. A place's top folder is never a result: shared folders are found by name among the
+// person's places.
+func Finds(person Person, place *Place) bool {
+	if place == nil || len(place.Path) == 0 || place.Deleted {
+		return false
+	}
+	return Decide(person, List, place)
 }
 
 // What each role may do in a place's top folder. The owner of a "My files" has nothing to manage and nobody to show

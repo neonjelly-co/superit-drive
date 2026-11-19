@@ -39,6 +39,9 @@ func (s *Server) routes() []route {
 		// What others shared with the person that they reach only through it (shared_with_me.go): each item is decided
 		// there by access.SharedWithMe.
 		{pattern: "GET /api/shared-with-me", action: access.Enter, serve: s.sharedWithMe},
+		// Finding files and folders by name across everything the person can see (search.go): where it looks, and each
+		// result, are decided there through access.
+		{pattern: "GET /api/search", action: access.Enter, serve: s.search},
 
 		// Shared folders as a whole (shared.go).
 		{pattern: "POST /api/places", action: access.MakeSharedFolder, serve: s.newSharedFolder},
