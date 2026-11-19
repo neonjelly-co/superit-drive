@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,7 +36,46 @@ func bareServer(t *testing.T) *Server {
 // examplePath turns a route pattern into an address that matches it.
 func examplePath(pattern string) string {
 	_, p, _ := strings.Cut(pattern, " ")
-	return strings.NewReplacer("{$}", "", "{place}", "1", "{item}", "1", "{file...}", "x.js").Replace(p)
+	return strings.NewReplacer("{$}", "", "{place}", "1", "{item}", "1", "{member}", "u-reka", "{file...}", "x.js").Replace(p)
+}
+
+// Every route that takes a place is tried as an outsider in test/shared_folders_test.go
+// (TestAMemberWithoutARoleCannotTellASharedFolderFromNone): a member without a role on a shared folder must get the
+// same answer from it as from a place that does not exist. This list is that test's; a new route that takes a place
+// fails here until it is added there, and here.
+var placeRoutesTriedByAnOutsider = []string{
+	"DELETE /api/places/{place}",
+	"POST /api/places/{place}/restore",
+	"GET /api/places/{place}/access",
+	"PUT /api/places/{place}/access/{member}",
+	"DELETE /api/places/{place}/access/{member}",
+	"GET /api/places/{place}/items",
+	"GET /api/places/{place}/items/{item}/items",
+	"POST /api/places/{place}/files",
+	"POST /api/places/{place}/items/{item}/files",
+	"POST /api/places/{place}/folders",
+	"POST /api/places/{place}/items/{item}/folders",
+	"GET /api/places/{place}/items/{item}/download",
+	"POST /api/places/{place}/items/{item}/rename",
+	"POST /api/places/{place}/items/{item}/move",
+	"DELETE /api/places/{place}/items/{item}",
+	"GET /api/places/{place}/trash",
+	"POST /api/places/{place}/trash/{item}/restore",
+}
+
+func TestEveryRouteWithAPlaceIsTriedByAnOutsider(t *testing.T) {
+	var got []string
+	for _, rt := range bareServer(t).routes() {
+		if rt.place != "" {
+			got = append(got, rt.pattern)
+		}
+	}
+	want := slices.Clone(placeRoutesTriedByAnOutsider)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("the routes that take a place are\n%q\nbut the outsider test tries\n%q", got, want)
+	}
 }
 
 func TestEveryRouteIsGuarded(t *testing.T) {

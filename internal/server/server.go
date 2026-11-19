@@ -2,9 +2,9 @@
 //
 // Every route is listed in routes.go and registered in Handler, and nowhere else. Each request passes the same steps
 // in guard before its handler runs: who is asking (identify), whether a change came from the Drive's own pages
-// (fromOwnPage), which place it concerns (if any), whether they may (access.Decide), and which item in that place, or
-// in that place's trash (if any). A handler only ever sees a request that passed them all. A test fails if anything
-// outside this file registers a handler.
+// (fromOwnPage), which place it concerns (if any) and the role they were given there, whether they may
+// (access.Decide), and which item in that place, or in that place's trash (if any). A handler only ever sees a request
+// that passed them all. A test fails if anything outside this file registers a handler.
 package server
 
 import (
@@ -69,6 +69,9 @@ type route struct {
 	action  access.Action
 	// place is the name of the path value holding the place's id, or "" when the action concerns no place.
 	place string
+	// inTrash is true when the place must be a shared folder in the trash (to restore it). For every other route a
+	// place in the trash is not found, like one that does not exist.
+	inTrash bool
 	// item is the name of the path value holding the id of an item in that place (at any depth, not in the trash),
 	// or "" when the action concerns the place as a whole. A route with an item must have a place.
 	item string
@@ -77,11 +80,12 @@ type route struct {
 	serve   func(http.ResponseWriter, *http.Request, call)
 }
 
-// call is what a handler gets: who is asking, the place the request concerns (nil for no place) and the item in it or
-// in its trash (nil for none). All have already passed guard.
+// call is what a handler gets: who is asking, the place the request concerns (nil for no place) as the access package
+// saw it, and the item in it or in its trash (nil for none). All have already passed guard.
 type call struct {
 	member  members.Member
 	place   *index.Place
+	access  *access.Place
 	item    *index.Item
 	trashed *index.TrashItem
 }
@@ -90,11 +94,14 @@ type call struct {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	for _, rt := range s.routes() {
-		if (rt.item != "" || rt.trashed != "") && rt.place == "" {
-			panic("server: route " + rt.pattern + " names an item but no place")
+		if (rt.item != "" || rt.trashed != "" || rt.inTrash) && rt.place == "" {
+			panic("server: route " + rt.pattern + " names an item, or a place in the trash, but no place")
 		}
 		if rt.item != "" && rt.trashed != "" {
 			panic("server: route " + rt.pattern + " names an item both in a place and in its trash")
+		}
+		if rt.inTrash && (rt.item != "" || rt.trashed != "") {
+			panic("server: route " + rt.pattern + " names an item in a place in the trash")
 		}
 		mux.Handle(rt.pattern, s.guard(rt))
 	}
@@ -120,9 +127,8 @@ func (s *Server) guard(rt route) http.Handler {
 			return
 		}
 		c := call{member: member}
-		var where *access.Place
 		if rt.place != "" {
-			p, err := s.findPlace(r, rt.place)
+			p, err := s.findPlace(r, rt.place, rt.inTrash)
 			if errors.Is(err, index.ErrNoPlace) {
 				s.refuse(w, r, http.StatusNotFound, noSuchPlace)
 				return
@@ -131,11 +137,16 @@ func (s *Server) guard(rt route) http.Handler {
 				s.fail(w, r, err)
 				return
 			}
+			// The role the index says this person was given there; access decides what it is worth.
+			given, err := s.drive.Given(r.Context(), p, member.UserID)
+			if err != nil {
+				s.fail(w, r, err)
+				return
+			}
 			c.place = &p
-			where = accessPlace(p)
+			c.access = accessPlace(p, given)
 		}
-		who := access.Person{UserID: member.UserID, Role: member.Role}
-		if !access.Decide(who, rt.action, where) {
+		if !access.Decide(personOf(member), rt.action, c.access) {
 			// The same answer as a place that does not exist: nobody learns that someone else's place is there.
 			s.refuse(w, r, http.StatusNotFound, noSuchPlace)
 			return
@@ -177,10 +188,15 @@ const (
 	refusedOrigin = "This change did not come from the Drive's own page, so it was refused."
 )
 
-func (s *Server) findPlace(r *http.Request, name string) (index.Place, error) {
+// findPlace finds the place whose id is the path value name: one that is not in the trash, or, with inTrash, a shared
+// folder that is.
+func (s *Server) findPlace(r *http.Request, name string, inTrash bool) (index.Place, error) {
 	id, err := strconv.ParseInt(r.PathValue(name), 10, 64)
 	if err != nil || id <= 0 {
 		return index.Place{}, index.ErrNoPlace
+	}
+	if inTrash {
+		return s.drive.DeletedPlace(r.Context(), id)
 	}
 	return s.drive.Place(r.Context(), id)
 }
@@ -233,13 +249,21 @@ func originOf(u *url.URL) string {
 	return scheme + "://" + host
 }
 
-// accessPlace describes a place the way the access package needs it.
-func accessPlace(p index.Place) *access.Place {
+// accessPlace describes a place the way the access package needs it, for a person who was given the role given there
+// ("" for none).
+func accessPlace(p index.Place, given string) *access.Place {
 	switch p.Kind {
 	case index.MyFiles:
-		return &access.Place{Kind: access.MyFiles, Owner: p.Owner}
+		return &access.Place{Kind: access.MyFiles, Owner: p.Owner, Deleted: !p.Deleted.IsZero()}
+	case index.SharedFolder:
+		return &access.Place{Kind: access.SharedFolder, Deleted: !p.Deleted.IsZero(), Given: access.Role(given)}
 	}
 	return &access.Place{} // a kind access has no rule for: refused
+}
+
+// personOf describes a member the way the access package needs it.
+func personOf(m members.Member) access.Person {
+	return access.Person{UserID: m.UserID, Role: m.Role}
 }
 
 // refuse answers with an error the person can read: JSON for the API, plain text otherwise.
