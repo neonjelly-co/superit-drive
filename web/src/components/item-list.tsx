@@ -1,6 +1,7 @@
 import { RotateCw } from "lucide-react";
 import type { ReactNode } from "react";
-import { api, type Item } from "../api";
+import { whoCanSee } from "../access";
+import { api, type Item, type Member } from "../api";
 import { formatChanged, formatChangedFull, formatSize } from "../format";
 import { FileIcon } from "./file-icon";
 
@@ -27,15 +28,22 @@ type Props = {
 	/** The item whose details are shown, if any. */
 	selected?: number;
 	onSelect: (item: Item) => void;
+	/** The person looking, and the project's members, for "who can see it". */
+	me?: string;
+	members?: Member[];
+	/** True when the person may put files and folders here: the empty list says how. */
+	canAdd: boolean;
 };
 
 /**
- * The list of layout D: one row per item with its name, when it changed and its size. The click rule is the same for
- * files and folders: clicking a name opens it (a folder opens in the list; a file downloads, until opening files in
- * the browser arrives), and clicking anywhere else on the row selects it and shows its details beside the list. Later
- * tickets add the tick boxes, "who can see it", and the bulk bar that replaces the header row.
+ * The list of layout D: one row per item with its name, who can see it in one plain sentence, when it changed and its
+ * size. The click rule is the same for files and folders: clicking a name opens it (a folder opens in the list; a file
+ * downloads, until opening files in the browser arrives), and clicking anywhere else on the row selects it and shows
+ * its details, and who can see it, beside the list. A later ticket adds the tick boxes and the bulk bar that replaces
+ * the header row.
  */
-export function ItemList({ placeId, items, loading, error, onRetry, retryLabel, onOpen, selected, onSelect }: Props) {
+export function ItemList(props: Props) {
+	const { placeId, items, loading, error, onRetry, retryLabel, onOpen, selected, onSelect, me, members, canAdd } = props;
 	return (
 		<div className="mt-5 overflow-hidden rounded-xl border border-border bg-card">
 			<table className="w-full table-fixed text-sm">
@@ -43,6 +51,9 @@ export function ItemList({ placeId, items, loading, error, onRetry, retryLabel, 
 					<tr className="h-11 border-b border-border text-left text-muted-foreground">
 						<th scope="col" className="px-4 font-normal">
 							Name
+						</th>
+						<th scope="col" className="w-56 px-4 font-normal">
+							Who can see it
 						</th>
 						<th scope="col" className="w-32 px-4 font-normal">
 							Changed
@@ -67,7 +78,9 @@ export function ItemList({ placeId, items, loading, error, onRetry, retryLabel, 
 					) : loading || !items || placeId === undefined ? (
 						<Message>Loading…</Message>
 					) : items.length === 0 ? (
-						<Message>Nothing here yet. Drop files here to upload, or make a folder with “New folder”.</Message>
+						<Message>
+							{canAdd ? "Nothing here yet. Drop files here to upload, or make a folder with “New folder”." : "Nothing here yet."}
+						</Message>
 					) : (
 						inOrder(items).map((item) => (
 							<Row
@@ -77,6 +90,7 @@ export function ItemList({ placeId, items, loading, error, onRetry, retryLabel, 
 								selected={item.id === selected}
 								onOpen={onOpen}
 								onSelect={onSelect}
+								seen={item.seenBy ? whoCanSee(item.seenBy, me, members) : ""}
 							/>
 						))
 					)}
@@ -92,9 +106,11 @@ type RowProps = {
 	selected: boolean;
 	onOpen: (folder: Item) => void;
 	onSelect: (item: Item) => void;
+	/** Who can see it, in one plain sentence. */
+	seen: string;
 };
 
-function Row({ placeId, item, selected, onOpen, onSelect }: RowProps) {
+function Row({ placeId, item, selected, onOpen, onSelect, seen }: RowProps) {
 	return (
 		<tr
 			// The row selects; its name opens. Keyboard: Tab reaches the name (Enter opens it) and the row (Enter selects).
@@ -139,6 +155,9 @@ function Row({ placeId, item, selected, onOpen, onSelect }: RowProps) {
 					)}
 				</span>
 			</td>
+			<td className="truncate px-4 py-2.5" title={seen}>
+				{seen}
+			</td>
 			<td className="px-4 py-2.5 text-muted-foreground">
 				{item.changed && (
 					<time dateTime={item.changed} title={formatChangedFull(item.changed)}>
@@ -156,7 +175,7 @@ function Row({ placeId, item, selected, onOpen, onSelect }: RowProps) {
 function Message({ children }: { children: ReactNode }) {
 	return (
 		<tr>
-			<td colSpan={3} className="px-4 py-10 text-center text-muted-foreground">
+			<td colSpan={4} className="px-4 py-10 text-center text-muted-foreground">
 				<div className="flex flex-col items-center">{children}</div>
 			</td>
 		</tr>

@@ -19,14 +19,17 @@ type TrashItem struct {
 	// RestoreTo is the folder it was in when it went to the trash, or 0 for the place's top folder (and when that
 	// folder has been removed for good).
 	RestoreTo int64
+	// DeletedBy is the user id of the member who put it in the trash (by deleting it, or replacing it with an upload),
+	// or "" when that is not known.
+	DeletedBy string
 }
 
-const trashColumns = itemColumns + ", items.trashed_at, items.trashed_why = 'replaced', items.trash_folder, IFNULL(items.restore_to, 0)"
+const trashColumns = itemColumns + ", items.trashed_at, items.trashed_why = 'replaced', items.trash_folder, IFNULL(items.restore_to, 0), IFNULL(items.trashed_by, '')"
 
 func scanTrashItem(row interface{ Scan(...any) error }) (TrashItem, error) {
 	var t TrashItem
 	var deleted int64
-	it, err := scanItem(row, &deleted, &t.Replaced, &t.Entry, &t.RestoreTo)
+	it, err := scanItem(row, &deleted, &t.Replaced, &t.Entry, &t.RestoreTo, &t.DeletedBy)
 	t.Item = it
 	t.Deleted = time.UnixMilli(deleted).UTC()
 	return t, err
@@ -48,14 +51,15 @@ func scanTrashItems(rows *sql.Rows, err error) ([]TrashItem, error) {
 	return out, rows.Err()
 }
 
-// Trash records that a live item of the place is now in the place's trash, in the folder entry there. It keeps its
-// id, and everything in it stays in it.
-func (x *Index) Trash(ctx context.Context, placeID, id int64, at time.Time, entry string) error {
+// Trash records that a live item of the place is now in the place's trash, in the folder entry there, put there by the
+// member by. It keeps its id, and everything in it stays in it.
+func (x *Index) Trash(ctx context.Context, placeID, id int64, at time.Time, entry, by string) error {
 	return x.write(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, `
-			UPDATE items SET trashed_at = ?, trash_folder = ?, trashed_why = 'deleted', restore_to = parent_id, parent_id = NULL
+			UPDATE items
+			SET trashed_at = ?, trash_folder = ?, trashed_why = 'deleted', trashed_by = ?, restore_to = parent_id, parent_id = NULL
 			WHERE id = ? AND place_id = ? AND trashed_at IS NULL`,
-			at.UnixMilli(), entry, id, placeID)
+			at.UnixMilli(), entry, nullable(by), id, placeID)
 		if err != nil {
 			return err
 		}
@@ -66,15 +70,15 @@ func (x *Index) Trash(ctx context.Context, placeID, id int64, at time.Time, entr
 	})
 }
 
-// AddReplaced records a file an upload replaced, now in the place's trash in the folder entry there, as a new item.
-// The item at the file's name keeps its id: it is the same file with new content.
-func (x *Index) AddReplaced(ctx context.Context, placeID, folderID int64, s Seen, at time.Time, entry string) (int64, error) {
+// AddReplaced records a file an upload by the member by replaced, now in the place's trash in the folder entry there,
+// as a new item. The item at the file's name keeps its id: it is the same file with new content.
+func (x *Index) AddReplaced(ctx context.Context, placeID, folderID int64, s Seen, at time.Time, entry, by string) (int64, error) {
 	var id int64
 	err := x.db.QueryRowContext(ctx, `
-		INSERT INTO items (place_id, parent_id, name, is_folder, size, changed_at, trashed_at, trash_folder, trashed_why, restore_to)
-		VALUES (?, NULL, ?, 0, ?, ?, ?, ?, 'replaced', ?)
+		INSERT INTO items (place_id, parent_id, name, is_folder, size, changed_at, trashed_at, trash_folder, trashed_why, trashed_by, restore_to)
+		VALUES (?, NULL, ?, 0, ?, ?, ?, ?, 'replaced', ?, ?)
 		RETURNING id`,
-		placeID, s.Name, s.Size, s.Changed.Unix(), at.UnixMilli(), entry, parent(folderID)).Scan(&id)
+		placeID, s.Name, s.Size, s.Changed.Unix(), at.UnixMilli(), entry, nullable(by), parent(folderID)).Scan(&id)
 	return id, err
 }
 
@@ -91,7 +95,7 @@ func (x *Index) Restore(ctx context.Context, placeID, id, folderID int64, name s
 		}
 		res, err := tx.ExecContext(ctx, `
 			UPDATE items
-			SET parent_id = ?, name = ?, trashed_at = NULL, trash_folder = NULL, trashed_why = NULL, restore_to = NULL
+			SET parent_id = ?, name = ?, trashed_at = NULL, trash_folder = NULL, trashed_why = NULL, trashed_by = NULL, restore_to = NULL
 			WHERE id = ? AND place_id = ? AND trashed_at IS NOT NULL`,
 			parent(folderID), name, id, placeID)
 		if err != nil {

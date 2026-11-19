@@ -14,8 +14,8 @@ guest, My files, shared folder, Drive storage, trash). The Drive also runs witho
 
 - One Go binary. The interface (TypeScript and React, in `web/`) is compiled into it as static files.
 - Files live on the storage as a readable folder tree with real names. The index, one SQLite file in the data
-  folder, holds the places, the folder tree, the roles given on shared folders and (as later tickets add them) other
-  access, links and guests. The storage wins for which files exist; the index alone holds access.
+  folder, holds the places, the folder tree, the access given on places and items and (as later tickets add them)
+  links and guests. The storage wins for which files exist; the index alone holds access.
 - Members do not sign in to the Drive. A reverse proxy in front of it signs them in and adds headers saying who they
   are (see below). Every route passes through one authorisation function, `internal/access`.
 
@@ -119,29 +119,93 @@ count once the Drive has listed their folder.
 
 Uploads in progress and the index copy get hidden folders of their own beside `trash/`, with their tickets.
 
-### Shared folders and who may do what
+### Shared folders, sharing and who may do what
 
 A shared folder is a top-level place owned by the project. Any member can make one; its maker becomes its first
 manager, as a role given to them like any other, and nothing else about it depends on their account: it stays, with
 its files, when they leave. Everyone holding the admin role on the project (in the member list) is a manager of every
-shared folder, for as long as they hold it. A member with no role on a shared folder does not see it at all: it is
-not in their places, and every address that names it answers exactly as for a place that does not exist.
+shared folder, for as long as they hold it. A member with no role on a shared folder does not see it in their places.
 
-`internal/access` decides everything, from the person, the action, the kind of place and the role the index says
-they were given there. Roles go up a ladder, each doing what the one before it does:
+**Sharing.** Access is given on a file or a folder, in "My files" or in a shared folder, to a named member (anyone in
+the member list, including people who have never opened the Drive) or to everyone in the project (every member, as
+long as they are one, new members included), as viewer or editor. A shared folder as a whole can also be given, by
+its managers: viewer, editor or manager to a member, viewer or editor to everyone. "My files" as a whole is never
+shared: only items in it.
 
-| | Viewer | Editor | Manager |
+Access given on a folder applies to everything in it, at any depth. Deeper levels can only add access, never take it
+away: someone's role at an item is the highest of what was given to them (or to everyone) on the item, on every folder
+above it and on the shared folder as a whole, and of what the place gives them by itself (the owner of a "My files";
+a project admin in a shared folder). `access.RoleAt` works it out, in one place, from what the guard hands it: the
+place, the item with the folders above it, and every grant on them. Access on one item reaches neither its parent nor
+its siblings. Taking access away, or giving less, counts from the next request, for everything below too.
+
+`internal/access` decides everything. Roles go up a ladder, each doing what the one before it does:
+
+| At an item (a file or folder), in any place | Viewer | Editor | Manager, owner |
 |---|---|---|---|
-| List, download, see who has access | yes | yes | yes |
-| Upload (and replace, or keep both), make folders, rename, move, delete | | yes | yes |
-| See the trash, restore from it | | yes | yes |
-| Make others managers, take a role away, delete the shared folder | | | yes |
+| Open a folder, download a file, see who can see it | yes | yes | yes |
+| Upload into a folder (and replace, or keep both), make folders in it | | yes | yes |
+| Share it: give access to others, change a role, take access away | | yes | yes |
+| Rename, move or delete it: also needs editor of the folder it is in | | yes | yes |
+| Restore it from the trash: also needs editor of the folder it goes back to, and either the place's whole trash or having put it there | | yes | yes |
 
-Viewer and editor are in the rules already; they are given by sharing, a later ticket. In "My files" its owner may
-list, download, upload, make folders, rename, move, delete and restore, and nobody else anything, project admins
-included. Two rules hold the table together, and a test
-checks them for every person and place: whoever may upload may delete (an upload can replace, which puts a file in
-the trash), and whoever may delete may see the trash and restore ("restore anything you could have deleted").
+| In a shared folder as a whole (its top folder) | Viewer | Editor | Manager |
+|---|---|---|---|
+| List it, see who has access to it | yes | yes | yes |
+| Upload, make folders, see its trash | | yes | yes |
+| Decide who has access to it as a whole, delete it | | | yes |
+
+In their own "My files" the owner may do everything, including sharing any item in it; nobody else may do anything
+there, project admins included, except with what was shared with them. A "My files" whose owner has left the member
+list is held: nothing shared from it opens, until they are back (what happens to it otherwise is a later ticket).
+
+Renaming, moving, deleting and restoring change the folder an item is in (or goes back to), so they are decided there
+too, as an upload into it is: whoever may put things into a folder may rename, take out and delete what is in it.
+Whoever may delete something may restore it ("restore anything you could have deleted"), back into a folder they may
+add to; those who may see the place's whole trash restore anything in it, and others only what they put there
+themselves (by deleting it, or replacing it with an upload). Whoever may upload may delete (an upload can replace,
+which puts a file in the trash). A test checks these rules for every person and place. An editor shares further, but
+never with themselves; a viewer cannot share. Every list says, for each item, who can see it, and the details panel
+lists each grant and where it comes from.
+
+**Someone given part of a place.** A member given a folder deep in someone's "My files" (or in a shared folder they
+have no role on as a whole) works inside it as their role allows, and nothing about the rest reaches them:
+
+- the place is not in their places; the folder's address (`/?place=…&folder=…` in the interface, its id in the API)
+  opens it, and its files download at their own address. Finding such items is "Shared with me", a later ticket;
+- a listing's path starts at the highest folder they can open (`fromTop` is false): the names of the folders above it
+  are never sent, nor in "who can see this", which says "from a folder above" for access given there, nor in the
+  trash entry a delete answers with;
+- they work inside the folder they were given, and share it, but cannot rename, move or delete that folder itself:
+  that changes the folder it is in, which they cannot open (a clashing name would tell them what is there). They move
+  things only into folders where they may upload, so nothing leaves what they were given;
+- a place's trash is shown only to those who may upload into its top folder. Someone given part of it restores what
+  they deleted themselves, by its address (the interface's "Undo"), and only back into a folder they may add to: not
+  what the owner deleted or replaced before or after sharing it, and not into the top folder when the folder it came
+  from is gone. The folder it goes into is decided on again just before it moves;
+- every route answers an item they cannot reach exactly as one that does not exist: one message, "This is not in the
+  Drive, or you have no access to it.", for every place, item or item in the trash that is not there or not theirs to
+  act on, and for every refused action.
+
+**Who has access, over HTTP.** `{member}` is a member's user id; "everyone" is everyone in the project.
+
+```
+GET    /api/places/{place}/access                                who has access to a shared folder as a whole
+PUT    /api/places/{place}/access/members/{member}               {"role": "viewer" | "editor" | "manager"}  managers only
+PUT    /api/places/{place}/access/everyone                       {"role": "viewer" | "editor"}
+DELETE /api/places/{place}/access/members/{member}               (and …/everyone) take it away
+GET    /api/places/{place}/items/{item}/access                   who can see an item, and where it comes from
+PUT    /api/places/{place}/items/{item}/access/members/{member}  {"role": "viewer" | "editor"}  whoever may share it
+PUT    /api/places/{place}/items/{item}/access/everyone          {"role": "viewer" | "editor"}
+DELETE /api/places/{place}/items/{item}/access/members/{member}  (and …/everyone) take it away
+```
+
+Each answers with who has access now: one line per grant (and the owner, or the project admins, first), each with
+whether it was given right there or comes from a folder above (named when the person can open that folder). A
+listing gives each item what the person may do with it (`can`) and who can see it (`seenBy`: everyone, or the members
+by user id), and the folder's own `role` and `can`. Grants live in the index as one row per grantee per item (or per
+place as a whole), keyed on the item's id, so they follow it through rename, move, replace and the trash, and go
+with it when it is removed for good or the storage no longer has it.
 
 People see a shared folder's name. Its top folder on the storage has that name, with ` (2)` and so on added when
 another shared folder, one in the trash included, holds that folder or something is already there: a new shared folder
@@ -152,11 +216,12 @@ person can already see one of that name; refusing a name they cannot see would t
 folder, beside what was deleted from it, and hides it from everyone. Its items, its trash and its roles stay in the
 index, and its folder stays held, so restoring always has its own folder to go back to. Its managers and the project
 admins find it in the Trash view and can restore it; 30 days after it was deleted the Drive removes its trash folder,
-and everything in it, for good. A shared folder always keeps someone in charge: taking a manager away is refused when
-nobody in the member list would be left managing it (there is always someone while the project has an admin).
+and everything in it, for good. A shared folder always keeps someone in charge: taking a manager away, or giving them
+less, is refused when nobody in the member list would be left managing it (there is always someone while the project
+has an admin). Access shared on items in it stays with them while it is in the trash, and comes back with them.
 
-Each place has a lock in memory: every change inside it (and a listing, which makes a missing top folder again) holds
-it shared, and moving the whole shared folder into the trash or out of it holds it alone, waiting up to ten seconds for
+Each place has a lock in memory: every change inside it (giving or taking access included, and a listing, which makes a
+missing top folder again) holds it shared, and moving the whole shared folder into the trash or out of it holds it alone, waiting up to ten seconds for
 the changes under way. A change that starts after the shared folder went to the trash finds it gone.
 
 ## Running it yourself
@@ -165,8 +230,9 @@ The Drive runs without Superit, as one container against any WebDAV server that 
 does today: a member signs in through the reverse proxy and works in their "My files": uploads and downloads files,
 makes folders, renames and moves things, deletes them into a 30-day trash and restores them, and sees about how much
 space is used. Members make shared folders, owned by the project, and work in them the same way; managers make other
-members managers and delete shared folders into the trash, and project admins manage every one. Sharing items with
-members, guests, public links and large or resumable transfers are not built yet.
+members managers and delete shared folders into the trash, and project admins manage every one. Members share files
+and folders with other members, or with everyone in the project, as viewers or editors. "Shared with me", guests,
+public links and large or resumable transfers are not built yet.
 
 It needs:
 
@@ -362,11 +428,11 @@ cmd/superit-drive/     main: runs the Drive, or the storage check (`check-storag
 internal/app/          wires everything together and serves until stopped
 internal/settings/     every environment variable
 internal/members/      the member list file, re-read when it changes
-internal/access/       the one authorisation function (Decide) and its table test
+internal/access/       the one authorisation function (Decide), the role at an item (RoleAt), and their table test
 internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify → own page (for changes) →
-                       place and the role given there → access.Decide → item in that place, or in its trash
+                       place → item in it, or in its trash → the access given there → access.Decide
 internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
-                       shared folders
+                       shared folders, the access given on them
 internal/index/        the SQLite index; schema changes are numbered files in migrations/, run with foreign keys
                        off (SQLite's recipe for rebuilding a table) and checked with foreign_key_check before each
                        commits

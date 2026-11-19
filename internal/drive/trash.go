@@ -91,8 +91,9 @@ func (d *Drive) removeEntry(ctx context.Context, dir string) error {
 	return err
 }
 
-// Delete moves a live item of the place, with everything in it, into the place's trash. It keeps its id.
-func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item) (TrashEntry, error) {
+// Delete moves a live item of the place, with everything in it, into the place's trash; by is the member deleting it.
+// It keeps its id.
+func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item, by string) (TrashEntry, error) {
 	from, ok := itemPath(p, it)
 	if !ok {
 		return TrashEntry{}, ErrGone
@@ -129,7 +130,7 @@ func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item) (Trash
 		return TrashEntry{}, storageError(err)
 	}
 	d.changed(folderKey{p.ID, it.ParentID}, folderKey{p.ID, trashFolder})
-	if err := d.index.Trash(ctx, p.ID, it.ID, d.now(), entry); err != nil {
+	if err := d.index.Trash(ctx, p.ID, it.ID, d.now(), entry, by); err != nil {
 		return TrashEntry{}, err
 	}
 	t, err := d.index.TrashItem(ctx, p.ID, it.ID)
@@ -139,9 +140,9 @@ func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item) (Trash
 	return d.entry(ctx, p, t)
 }
 
-// putAside moves the file at file, which an upload is about to replace, into the place's trash, as a new item. undo
-// puts it back, for when the upload fails. replaced is nil when the file had gone meanwhile.
-func (d *Drive) putAside(ctx context.Context, p index.Place, folder *index.Item, file string, there storage.Entry) (replaced *index.TrashItem, undo func(), err error) {
+// putAside moves the file at file, which an upload by the member by is about to replace, into the place's trash, as a
+// new item. undo puts it back, for when the upload fails. replaced is nil when the file had gone meanwhile.
+func (d *Drive) putAside(ctx context.Context, p index.Place, folder *index.Item, file string, there storage.Entry, by string) (replaced *index.TrashItem, undo func(), err error) {
 	entry, dir, err := d.makeEntry(ctx, p)
 	if err != nil {
 		return nil, nil, err
@@ -155,7 +156,7 @@ func (d *Drive) putAside(ctx context.Context, p index.Place, folder *index.Item,
 		return nil, nil, storageError(err)
 	}
 	d.changed(folderKey{p.ID, trashFolder})
-	id, err := d.index.AddReplaced(ctx, p.ID, folderID(folder), index.Seen{Name: there.Name, Size: there.Size, Changed: there.Changed}, d.now(), entry)
+	id, err := d.index.AddReplaced(ctx, p.ID, folderID(folder), index.Seen{Name: there.Name, Size: there.Size, Changed: there.Changed}, d.now(), entry, by)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -250,7 +251,11 @@ func (d *Drive) restoreTo(ctx context.Context, p index.Place, t index.TrashItem)
 // Restore moves an item of the place's trash back to the folder it was deleted from (or the place's top folder, when
 // that folder is in the trash itself or gone), under its own name, or with " (2)" and so on added when the name is
 // taken there. It keeps its id.
-func (d *Drive) Restore(ctx context.Context, p index.Place, t index.TrashItem) (index.Item, error) {
+//
+// into is asked about the folder it is about to go into (nil: the top folder) before anything moves, and again when
+// that folder turns out to be gone and the top folder is tried instead; an error from it stops the restore and is
+// returned. The folder can differ from the one a decision was made on: it can have gone, or moved, since.
+func (d *Drive) Restore(ctx context.Context, p index.Place, t index.TrashItem, into func(folder *index.Item) error) (index.Item, error) {
 	dir, ok := pathIn(trashTop(p), t.Entry)
 	if !ok {
 		return index.Item{}, ErrGone
@@ -269,6 +274,9 @@ func (d *Drive) Restore(ctx context.Context, p index.Place, t index.TrashItem) (
 		return index.Item{}, err
 	}
 	for {
+		if err := into(dest); err != nil {
+			return index.Item{}, err
+		}
 		it, err := d.restoreInto(ctx, p, t, from, dest)
 		if errors.Is(err, ErrGone) && dest != nil {
 			dest = nil // the folder it was in has gone from the storage: the top folder instead

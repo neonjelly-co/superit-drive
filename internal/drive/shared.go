@@ -256,36 +256,3 @@ func (d *Drive) removeExpiredSharedFolders(ctx context.Context, cutoff time.Time
 	}
 	return removed, failed
 }
-
-// Given is the role given to the member on a place, as the index holds it, or "" for none. Roles are given only on
-// shared folders.
-func (d *Drive) Given(ctx context.Context, p index.Place, member string) (string, error) {
-	if p.Kind != index.SharedFolder {
-		return "", nil
-	}
-	return d.index.Given(ctx, p.ID, member)
-}
-
-// GivenTo returns the role given to the member on each place they were given one on, by place id.
-func (d *Drive) GivenTo(ctx context.Context, member string) (map[int64]string, error) {
-	return d.index.GivenTo(ctx, member)
-}
-
-// Grants returns the roles given on a place, the earliest first.
-func (d *Drive) Grants(ctx context.Context, p index.Place) ([]index.Grant, error) {
-	return d.index.Grants(ctx, p.ID)
-}
-
-// Give gives the member a role on a shared folder, in place of any role they had there.
-func (d *Drive) Give(ctx context.Context, p index.Place, member, role string) error {
-	if p.Kind != index.SharedFolder {
-		return errors.New("roles are given only on shared folders")
-	}
-	return d.index.Give(ctx, p.ID, member, role, d.now())
-}
-
-// TakeAway takes away the role given to the member on a place. check is shown the roles that would be left, while
-// nobody else can change them, and can refuse with an error.
-func (d *Drive) TakeAway(ctx context.Context, p index.Place, member string, check func(left []index.Grant) error) error {
-	return d.index.TakeAway(ctx, p.ID, member, check)
-}

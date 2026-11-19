@@ -1,35 +1,43 @@
 import { Download, FolderInput, FolderOpen, PenLine, Trash2, X } from "lucide-react";
 import { type Action, api, type FolderRef, type Item } from "../api";
 import { formatChangedFull, formatSize } from "../format";
+import { AccessSection } from "./access-section";
 import { Button } from "./button";
 import { FileIcon } from "./file-icon";
 
 type Props = {
 	placeId: number;
-	/** The place's name as people see it: "My files", or a shared folder's name. */
-	placeName: string;
-	/** What the person may do in the place. */
-	can: Action[];
+	/** Where it is, as the person may see it: the place's name and the folders down to the one the item is in. */
+	where: string;
 	item: Item;
-	/** The folders from the top down to the one the item is in; empty for the top folder. */
-	path: FolderRef[];
+	/** What the person may do with the item; the folder's own, for the folder being looked at. */
+	can: Action[];
+	/** The person asking. */
+	me?: string;
+	/**
+	 * True for the folder being looked at itself (from "Who can see this" beside its name): only its details and who
+	 * can see it, as it is open already, and changing it from inside is not offered.
+	 */
+	here?: boolean;
 	onClose: () => void;
 	onOpen: (folder: Item) => void;
 	onRename: () => void;
 	onMove: () => void;
 	onDelete: () => void;
+	/** Called after who has access changed, so the list and the places follow it. */
+	onAccessChanged: () => void;
 	/** True while a change to the item is on its way. */
 	busy?: boolean;
 };
 
 /**
  * The details panel on the right of layout D. It opens when one item is selected (a click on its row) and holds the
- * item's details, and Rename, Move and Delete. "Who can see this", giving access and the public link come with
- * sharing.
+ * item's details, who can see it and giving access (for whoever may share it), and Rename, Move and Delete. The
+ * public link comes with its own ticket.
  */
-export function DetailsPanel({ placeId, placeName, can, item, path, onClose, onOpen, onRename, onMove, onDelete, busy }: Props) {
-	const where = [placeName, ...path.map((f) => f.name)].join(" › ");
-	const changes = can.includes("rename") || can.includes("move") || can.includes("delete");
+export function DetailsPanel(props: Props) {
+	const { placeId, where, item, can, me, here, onClose, onOpen, onRename, onMove, onDelete, onAccessChanged, busy } = props;
+	const changes = !here && (can.includes("rename") || can.includes("move") || can.includes("delete"));
 	return (
 		<aside aria-label="Details" className="relative w-96 shrink-0 overflow-auto border-l border-border bg-card p-6 pb-24">
 			<button
@@ -59,24 +67,44 @@ export function DetailsPanel({ placeId, placeName, can, item, path, onClose, onO
 						<dd>{formatChangedFull(item.changed)}</dd>
 					</>
 				)}
-				<dt className="text-muted-foreground">In</dt>
-				<dd className="min-w-0 break-words">{where}</dd>
-			</dl>
-			<div className="mt-6">
-				{item.kind === "folder" ? (
-					<Button onClick={() => onOpen(item)}>
-						<FolderOpen aria-hidden /> Open
-					</Button>
-				) : (
-					<a
-						href={api.downloadUrl(placeId, item.id)}
-						download
-						className="inline-flex h-9 items-center gap-1.5 rounded-md border border-border bg-card px-3 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50"
-					>
-						<Download aria-hidden className="size-4" /> Download
-					</a>
+				{where && (
+					<>
+						<dt className="text-muted-foreground">In</dt>
+						<dd className="min-w-0 break-words">{where}</dd>
+					</>
 				)}
-			</div>
+			</dl>
+			{!here && (
+				<div className="mt-6">
+					{item.kind === "folder" ? (
+						<Button onClick={() => onOpen(item)}>
+							<FolderOpen aria-hidden /> Open
+						</Button>
+					) : (
+						<a
+							href={api.downloadUrl(placeId, item.id)}
+							download
+							className="inline-flex h-9 items-center gap-1.5 rounded-md border border-border bg-card px-3 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50"
+						>
+							<Download aria-hidden className="size-4" /> Download
+						</a>
+					)}
+				</div>
+			)}
+
+			{can.includes("see-access") && (
+				<AccessSection
+					key={item.id}
+					placeId={placeId}
+					itemId={item.id}
+					what={item.kind}
+					canChange={can.includes("share")}
+					roles={["viewer", "editor"]}
+					me={me}
+					onChanged={onAccessChanged}
+				/>
+			)}
+
 			{changes && (
 				<div className="mt-8 flex flex-wrap gap-2 border-t border-border pt-5">
 					{can.includes("rename") && (
@@ -96,11 +124,16 @@ export function DetailsPanel({ placeId, placeName, can, item, path, onClose, onO
 					)}
 				</div>
 			)}
-			{can.includes("delete") && (
+			{changes && can.includes("delete") && (
 				<p className="mt-3 text-sm text-muted-foreground">
 					Deleted items go to the trash, where they can be restored for 30 days.
 				</p>
 			)}
 		</aside>
 	);
+}
+
+/** Where an item is, as the person may see it: the place's name (when they can open it) and the folders below it. */
+export function whereOf(placeName: string | undefined, path: FolderRef[]): string {
+	return [...(placeName === undefined ? [] : [placeName]), ...path.map((f) => f.name)].join(" › ");
 }
