@@ -89,8 +89,8 @@ My files/
 
 Files and folders keep their real names, up to 255 bytes, exactly as given; the interface sends names in Unicode's
 composed form (NFC), so a name from Safari on macOS matches the same name from another browser. Making a folder,
-renaming and moving are each one request on the storage (`MKCOL`, `MOVE` with `Overwrite: F`), and nothing ever
-replaces what is there.
+renaming and moving are each one change on the storage (`MKCOL`, or `MOVE` with `Overwrite: F`), after a look that
+the name is free, and nothing ever replaces what is there.
 
 An upload is one `PUT` straight to the file's place, with its `Content-Length` and `If-None-Match: *`: the storage
 writes the whole file or nothing (Apache's `mod_dav`, which a Storage Box runs, writes to a hidden temporary file and
