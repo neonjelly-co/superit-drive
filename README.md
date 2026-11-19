@@ -93,6 +93,9 @@ Shared folders/
         Shared folders/Payroll/
             2026-11-19 0c41d2aa/Payroll     a shared folder deleted whole: its top folder, beside what was
                                             deleted from it
+    uploads/
+        3f9c0b…e1                           one file per upload while its bytes arrive, named after a random id;
+                                            moved into its folder when whole
 ```
 
 Files and folders keep their real names, up to 255 bytes, exactly as given; the interface sends names in Unicode's
@@ -100,12 +103,16 @@ composed form (NFC), so a name from Safari on macOS matches the same name from a
 renaming and moving are each one change on the storage (`MKCOL`, or `MOVE` with `Overwrite: F`), after a look that
 the name is free, and nothing ever replaces what is there.
 
-An upload is one `PUT` straight to the file's place, with its `Content-Length` and `If-None-Match: *`: the storage
-writes the whole file or nothing (Apache's `mod_dav`, which a Storage Box runs, writes to a hidden temporary file and
-renames it at the end). When the name is taken, the interface asks first: **replace** moves the file that is there
-into the trash and then uploads (it is moved back if the upload fails), and the file keeps its place, its id and so,
-later, its sharing; **keep both** stores the upload as `Name (2).ext`, `Name (3).ext` and so on. A file never replaces
-a folder.
+**Uploads** stream straight through the Drive to a file of their own in the hidden uploads folder, never onto the
+server's disk, and are moved into their folder (`MOVE` with `Overwrite: F`) only when whole: a half-finished file
+never shows in a folder, whatever the storage does with a cut-off write. A file of up to 32 MiB arrives in one request,
+stored with one `PUT` with its `Content-Length`, which writes the whole file or nothing. A larger one is a resumable
+upload (see [Large transfers](#large-transfers-and-the-memory-figure)): its parts are written into its file one after
+another, each from where the file ends (`PUT` with `Content-Range`), and one cut off goes on from where it stopped.
+When the name is taken, the interface asks first, before the file travels: **replace** stores the upload, then moves
+the file that is there into the trash and the upload into its place (the file comes back if that fails), and the file
+keeps its place, its id and so its sharing; **keep both** stores the upload as `Name (2).ext`, `Name (3).ext` and so
+on. A file never replaces a folder. The name is looked at again when the upload is moved into place.
 
 **The trash.** Deleting moves the item, with everything in it, into the place's trash on the storage; restoring
 moves it back to the folder it came from (or the place's top folder when that folder is gone), adding ` (2)` to its
@@ -115,9 +122,11 @@ know (left by a change the Drive did not finish) are removed once the day in the
 
 **Space used** is the Drive's own sum of the sizes of the files its index knows, in every place, the trash included,
 shown in the sidebar as "about" against `DRIVE_CAPACITY` (or alone, without it). Files put on the storage directly
-count once the Drive has listed their folder.
+count once the Drive has listed their folder; uploads in progress count once they are in their folder.
 
-Uploads in progress and the index copy get hidden folders of their own beside `trash/`, with their tickets.
+An upload nothing has arrived for in a day is removed, with its file, when the Drive starts and every hour; so is a
+file in the uploads folder the index does not know (left by an upload the Drive did not finish) once the storage says
+it has not changed for a day. The index copy gets a hidden folder of its own beside `trash/` with its ticket.
 
 ### Shared folders, sharing and who may do what
 
@@ -143,7 +152,7 @@ its siblings. Taking access away, or giving less, counts from the next request, 
 
 | At an item (a file or folder), in any place | Viewer | Editor | Manager, owner |
 |---|---|---|---|
-| Open a folder, download a file, see who can see it | yes | yes | yes |
+| Open a folder, download a file (or a folder as a zip), see who can see it | yes | yes | yes |
 | Upload into a folder (and replace, or keep both), make folders in it | | yes | yes |
 | Share it: give access to others, change a role, take access away | | yes | yes |
 | Rename, move or delete it: also needs editor of the folder it is in | | yes | yes |
@@ -151,12 +160,16 @@ its siblings. Taking access away, or giving less, counts from the next request, 
 
 | In a shared folder as a whole (its top folder) | Viewer | Editor | Manager |
 |---|---|---|---|
-| List it, see who has access to it | yes | yes | yes |
+| List it, download it as a zip, see who has access to it | yes | yes | yes |
 | Upload, make folders, see its trash | | yes | yes |
 | Decide who has access to it as a whole, delete it | | | yes |
 
-In their own "My files" the owner may do everything, including sharing any item in it; nobody else may do anything
-there, project admins included, except with what was shared with them. A "My files" whose owner has left the member
+In their own "My files" the owner may do everything, including sharing any item in it, and downloading it whole as a
+zip; nobody else may do anything there, project admins included, except with what was shared with them. Every request
+of a resumable upload (starting it, each part, finishing and cancelling it) is decided as an upload into its folder,
+and an upload in progress is its uploader's alone: for anyone else, project admins and the folder's owner included, it
+does not exist. Someone whose right to upload there is taken away mid-upload can do nothing more with it, not even
+cancel it: its file stays, unseen and unused, until it is removed a day later. A "My files" whose owner has left the member
 list is held: nothing shared from it opens, until they are back (what happens to it otherwise is a later ticket).
 
 Renaming, moving, deleting and restoring change the folder an item is in (or goes back to), so they are decided there
@@ -224,6 +237,77 @@ Each place has a lock in memory: every change inside it (giving or taking access
 missing top folder again) holds it shared, and moving the whole shared folder into the trash or out of it holds it alone, waiting up to ten seconds for
 the changes under way. A change that starts after the shared folder went to the trash finds it gone.
 
+### Large transfers and the memory figure
+
+The Drive is counted at 64 MiB of memory (a hard 96 MiB) on a customer's server, and the kernel's network buffers
+for the transfers in flight are charged to its container too. A transfer is a request that moves a file's bytes: a
+download (of a file or a zip), an upload in one request, or one part of a resumable upload. Three rules hold the
+figure (`internal/transfers`):
+
+- **At most 32 transfers are in flight.** A download waits its turn in line (holding only its idle connection),
+  for up to ten minutes, then gets 503. An upload is answered at once with 503, `{"busy": true}` and `Retry-After`,
+  before any of its bytes are read, and keeps its place in line: a resumable upload by its id, an upload in one request
+  by the `turn` it names (any word the interface makes up for it, counted only for that person). When its turn comes, a
+  slot is kept for it for 30 seconds; a place not asked about again for a minute is lost. The interface shows such an
+  upload as "Waiting for its turn". A transfer that moves no bytes for two minutes is ended, so a paused download does
+  not keep a slot (the browser resumes it with `Range`).
+- **Each connection's buffers are capped at 256 KiB**, send and receive, on the browser side (the listener) and on the
+  storage side (the storage client's dialer). Linux counts twice what it is given, so a transfer holds at most about
+  1 MiB of them.
+- **Go's memory limit is 24 MiB** (`debug.SetMemoryLimit`), unless the standard `GOMEMLIMIT` says otherwise; the
+  start-up line in the log says which.
+
+Measured with `make test-memory` (below): the image in a container with `--memory=64m --memory-swap=64m`, against the
+stand-in storage, idles at about 4.5 MiB; with 40 downloads (half of them read at 8 MiB/s) and 10 resumable uploads
+of 256 MiB each at once, it peaked at 47 MiB, of which about 13.5 MiB was the Drive's own memory and 30 MiB network
+buffers, and never reached the limit.
+
+**Downloads** honour `Range` for one part of a file (`bytes=a-b`, `bytes=a-`, `bytes=-n`): 206 with `Content-Range`,
+or 416 with `Content-Range: bytes */<size>` for a part after the end. They carry the storage's `ETag` and
+`Last-Modified` and pass `If-Range` on to the storage, so a browser resumes a download, and a video seeks; several
+parts, or anything else in `Range`, get the whole file, as HTTP allows.
+
+**Zips.** A folder, a place's top folder, or some items of a folder download as one zip, made as it is sent: each
+folder is listed from the storage on the way, and each file streamed from the storage, stored as it is (no
+compression). Folders are in it too, empty ones included. A backslash in a name becomes `_` in the zip. A zip holds
+at most 10,000 files and folders (each costs a little memory until the zip's end); a larger folder is refused with
+400, and is downloaded a folder inside it at a time. It has no length, and a zip cut short ends the connection, so the
+browser shows the download as failed.
+
+```
+GET    /api/places/{place}/zip[?item=12&item=15]                  the top folder, or those items of it, as one zip
+GET    /api/places/{place}/items/{folder}/zip[?item=…]            a folder, or those items of it
+```
+
+**Resumable uploads.** The interface uses them for files over 32 MiB.
+
+```
+POST   /api/places/{place}/uploads?name=…&size=…[&existing=replace|keep-both]          start (into the top folder)
+POST   /api/places/{place}/items/{folder}/uploads?name=…&size=…[&existing=…]           start (into a folder)
+       201 {"id", "name", "size", "offset": 0, "resumable", "partSize", "waiting"}
+       409 {"error", "exists": "file"|"folder", "name"}  the name is taken: ask, then start again with existing
+GET    /api/places/{place}/uploads/{upload}                       where it stands: the same as the start's answer
+PUT    /api/places/{place}/uploads/{upload}?offset=<n>            one part, from n, with its Content-Length
+       200 {"offset", "size"}                                     where what has arrived ends now
+       409 {"error", "offset"}                                    it must start at offset: send from there
+       409 {"error", "offset": 0, "resumable": false}             the storage cannot resume: send it all again
+       503 {"error", "busy": true}, Retry-After                   not its turn: send it again then
+POST   /api/places/{place}/uploads/{upload}/finish[?existing=…]   move it into its folder
+       201 the file, as an upload in one request answers          409 with "exists", or with "offset" when incomplete
+DELETE /api/places/{place}/uploads/{upload}                       cancel: 204, and what arrived is removed
+```
+
+A part holds at most `partSize` (32 MiB) and must start where what has arrived ends; one cut off keeps what arrived
+(Apache keeps what a `PUT` with `Content-Range` wrote into a file that is there), so after a broken connection the
+interface asks where the upload stands and goes on from there. Whether the storage can write into part of a file the
+Drive finds out once, the first time an upload starts, the way the storage check does; and it checks the file's length
+after every part. Where it cannot, `resumable` is false, the one part is the whole file, and an upload cut off starts
+again from the beginning: the interface tells the person so.
+
+A folder is uploaded (with "Upload folder", where the browser offers it, or by dropping it) by making it and the
+folders in it (`POST …/folders`) and uploading each file into its own; when the folder's name is taken, it is made
+under a name of its own, so nothing is mixed into a folder that is there.
+
 ## Running it yourself
 
 The Drive runs without Superit, as one container against any WebDAV server that passes the storage check. What it
@@ -232,7 +316,8 @@ makes folders, renames and moves things, deletes them into a 30-day trash and re
 space is used. Members make shared folders, owned by the project, and work in them the same way; managers make other
 members managers and delete shared folders into the trash, and project admins manage every one. Members share files
 and folders with other members, or with everyone in the project, as viewers or editors. "Shared with me", guests,
-public links and large or resumable transfers are not built yet.
+public links are not built yet. Large files upload in parts that resume after a broken connection, downloads resume
+and seek, and folders upload whole and download as zips.
 
 It needs:
 
@@ -243,7 +328,9 @@ It needs:
 - **A WebDAV server** for the files. Check it first (below).
 - **A reverse proxy that signs people in** and, on every request it passes on, adds `Drive-Secret` and
   `Remote-User-Id` in place of any the browser sent (see [Signing in](#signing-in-headers-and-the-member-list)). The
-  Drive listens on plain HTTP on port 8080: only the reverse proxy should reach it.
+  Drive listens on plain HTTP on port 8080: only the reverse proxy should reach it. For large files, the proxy should
+  stream request and response bodies rather than hold them, pass `Range` and `If-Range` through, and let a download
+  wait up to ten minutes for its answer when the Drive is busy.
 - **The member list file**, in a folder of its own mounted into the container.
 - **The data folder**, `/data` in the container, kept between restarts. It holds the index, which alone knows who
   has access to what; keep a backup of it.
@@ -378,6 +465,7 @@ You need Go 1.27, Bun 1.3 and Docker. `make help` lists the targets.
 make build        # interface (web/dist) and binary (bin/superit-drive)
 make test         # every test; needs Docker running
 make test-short   # only the tests that need no Docker
+make test-memory  # the image in a 64 MiB container under 40 downloads and 10 uploads at once (slow)
 make image        # the container image superit-drive:dev
 ```
 
@@ -389,6 +477,14 @@ refuse or ignore one thing each, such as `MOVE` or `Range`, for the storage chec
 Next to the code are unit tests where a rule needs a table: the access rules in `internal/access`, settings, the
 member list, the names that may become paths, the index's ids, and a check that every route goes through the
 authorisation function. The interface has no tests of its own; check it in a browser.
+
+**The memory test** (`test/memory`, build tag `memory`, `make test-memory`) builds the image from the Dockerfile and
+runs it with `--memory=64m --memory-swap=64m` against the stand-in storage. It uploads a 256 MiB file with a part cut
+off and resumed, then sends 40 downloads (half of them read slowly) and 10 resumable uploads of 256 MiB each through
+it at once, then two zips of a folder holding 256 MiB, checks every byte and that the container was not killed, and
+reports the container's memory from its cgroup (the peak, and the highest during each part, split into the Drive's
+own memory, network buffers, page cache and kernel). It takes about two minutes and leaves only the images
+`superit-drive:memory-test` and `superit-drive-test-webdav`.
 
 The harness builds the Drive with the build tag `testclock`, which is the only difference from a released Drive: in
 it, `SUPERIT_DRIVE_TEST_CLOCK_SHIFT` (a Go duration such as `744h`) moves the Drive's clock forward, so a test can
@@ -430,17 +526,20 @@ internal/settings/     every environment variable
 internal/members/      the member list file, re-read when it changes
 internal/access/       the one authorisation function (Decide), the role at an item (RoleAt), and their table test
 internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify → own page (for changes) →
-                       place → item in it, or in its trash → the access given there → access.Decide
+                       place → item in it, or in its trash, or the person's upload in progress into it → the access
+                       given there → access.Decide; transfers.go has downloads, zips and uploads
 internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
                        shared folders, the access given on them
 internal/index/        the SQLite index; schema changes are numbered files in migrations/, run with foreign keys
                        off (SQLite's recipe for rebuilding a table) and checked with foreign_key_check before each
                        commits
 internal/clock/        the Drive's clock, which test builds can move forward
+internal/transfers/    what holds the memory figure: capped network buffers, and the 32 transfer slots
 internal/storage/      the WebDAV client
 internal/storagecheck/ `superit-drive check-storage`: can a WebDAV server hold the Drive's files?
 web/                   the interface (Vite, React, Tailwind with the Pilot light tokens); built into web/dist
-test/                  tests through HTTP; harness/ runs the Drive; webdav/ is the stand-in storage
+test/                  tests through HTTP; harness/ runs the Drive; webdav/ is the stand-in storage; memory/ is the
+                       64 MiB test
 dev/                   settings and a member list for running locally
 examples/compose/      the worked example: the Drive behind Caddy and Authelia
 .github/workflows/     release.yml publishes a version's image when it is tagged
