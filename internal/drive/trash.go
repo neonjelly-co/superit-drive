@@ -97,6 +97,11 @@ func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item) (Trash
 	if !ok {
 		return TrashEntry{}, ErrGone
 	}
+	leave, err := d.inPlace(ctx, p)
+	if err != nil {
+		return TrashEntry{}, err
+	}
+	defer leave()
 	release, ok := d.claim(from)
 	if !ok || (it.Folder && d.busyInside(from)) {
 		if ok {
@@ -254,6 +259,11 @@ func (d *Drive) Restore(ctx context.Context, p index.Place, t index.TrashItem) (
 	if !ok {
 		return index.Item{}, ErrGone
 	}
+	leave, err := d.inPlace(ctx, p)
+	if err != nil {
+		return index.Item{}, err
+	}
+	defer leave()
 	dest, err := d.restoreTo(ctx, p, t)
 	if err != nil {
 		return index.Item{}, err
@@ -353,10 +363,15 @@ func (d *Drive) EmptyTrash(ctx context.Context, every time.Duration) {
 }
 
 // removeExpired removes for good everything that has been in the trash for 30 days: in the one place given, or in
-// every place when only is nil. On the storage that includes entries the index does not know (left by a change the
-// Drive did not finish), judged by the day in their names.
+// every place when only is nil, shared folders in the trash included. On the storage that includes entries the index
+// does not know (left by a change the Drive did not finish), judged by the day in their names.
 func (d *Drive) removeExpired(ctx context.Context, only *index.Place) error {
 	cutoff := d.now().Add(-KeptFor)
+	var failed error
+	removed := 0
+	if only == nil {
+		removed, failed = d.removeExpiredSharedFolders(ctx, cutoff)
+	}
 	due, err := d.index.TrashedBefore(ctx, cutoff)
 	if err != nil {
 		return err
@@ -372,8 +387,6 @@ func (d *Drive) removeExpired(ctx context.Context, only *index.Place) error {
 		byID[p.ID] = p
 	}
 
-	var failed error
-	removed := 0
 	for _, t := range due {
 		p, ok := byID[t.PlaceID]
 		if !ok {

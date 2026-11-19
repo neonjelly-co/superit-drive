@@ -1,8 +1,9 @@
 # Superit Drive
 
 Superit Drive ("the Drive") is where a project's people keep, open and share their files, in the browser. Each member
-has "My files", private to them; files live on WebDAV storage (a Hetzner Storage Box bought from Superit, or the
-customer's own WebDAV server). It runs as one small container on the customer's own server.
+has "My files", private to them, and the project has shared folders, owned by the project and not by a person; files
+live on WebDAV storage (a Hetzner Storage Box bought from Superit, or the customer's own WebDAV server). It runs as one
+small container on the customer's own server.
 
 Version 1 is being built. The spec is [neonjelly-co/superit#38](https://github.com/neonjelly-co/superit/issues/38);
 the build tickets are this repository's issues. Words follow the `GLOSSARY.md` of neonjelly-co/superit (member,
@@ -13,8 +14,8 @@ guest, My files, shared folder, Drive storage, trash). The Drive also runs witho
 
 - One Go binary. The interface (TypeScript and React, in `web/`) is compiled into it as static files.
 - Files live on the storage as a readable folder tree with real names. The index, one SQLite file in the data
-  folder, holds the folder tree and (as later tickets add them) access, links and guests. The storage wins for which
-  files exist; the index alone holds access.
+  folder, holds the places, the folder tree, the roles given on shared folders and (as later tickets add them) other
+  access, links and guests. The storage wins for which files exist; the index alone holds access.
 - Members do not sign in to the Drive. A reverse proxy in front of it signs them in and adds headers saying who they
   are (see below). Every route passes through one authorisation function, `internal/access`.
 
@@ -80,11 +81,18 @@ My files/
     bence@example.com/         when they first open the Drive; the index ties it to their user id
         Tax notes.pdf          their files and folders, with their real names, at any depth
         Clients/Bakery Ltd/
+Shared folders/
+    Clients/                   one top folder per shared folder, named after it
+        Bakery Ltd/Offer.pdf
+    Clients (2)/               a second shared folder called "Clients" (see below)
 .superit-drive/                the Drive's own folders, hidden from WebDAV programs that hide dot-names
     trash/
         My files/reka@example.com/          each place's trash, beside the place's own path
             2026-11-19 7f3a9c1e/Offer.docx  one folder per deleted item: the day it was deleted and a random
                                             part, holding the item (a whole folder, for a folder) by its real name
+        Shared folders/Payroll/
+            2026-11-19 0c41d2aa/Payroll     a shared folder deleted whole: its top folder, beside what was
+                                            deleted from it
 ```
 
 Files and folders keep their real names, up to 255 bytes, exactly as given; the interface sends names in Unicode's
@@ -109,15 +117,56 @@ know (left by a change the Drive did not finish) are removed once the day in the
 shown in the sidebar as "about" against `DRIVE_CAPACITY` (or alone, without it). Files put on the storage directly
 count once the Drive has listed their folder.
 
-Uploads in progress and the index copy get hidden folders of their own beside `trash/`, and shared folders a top
-folder each, with their tickets.
+Uploads in progress and the index copy get hidden folders of their own beside `trash/`, with their tickets.
+
+### Shared folders and who may do what
+
+A shared folder is a top-level place owned by the project. Any member can make one; its maker becomes its first
+manager, as a role given to them like any other, and nothing else about it depends on their account: it stays, with
+its files, when they leave. Everyone holding the admin role on the project (in the member list) is a manager of every
+shared folder, for as long as they hold it. A member with no role on a shared folder does not see it at all: it is
+not in their places, and every address that names it answers exactly as for a place that does not exist.
+
+`internal/access` decides everything, from the person, the action, the kind of place and the role the index says
+they were given there. Roles go up a ladder, each doing what the one before it does:
+
+| | Viewer | Editor | Manager |
+|---|---|---|---|
+| List, download, see who has access | yes | yes | yes |
+| Upload (and replace, or keep both), make folders, rename, move, delete | | yes | yes |
+| See the trash, restore from it | | yes | yes |
+| Make others managers, take a role away, delete the shared folder | | | yes |
+
+Viewer and editor are in the rules already; they are given by sharing, a later ticket. In "My files" its owner may
+list, download, upload, make folders, rename, move, delete and restore, and nobody else anything, project admins
+included. Two rules hold the table together, and a test
+checks them for every person and place: whoever may upload may delete (an upload can replace, which puts a file in
+the trash), and whoever may delete may see the trash and restore ("restore anything you could have deleted").
+
+People see a shared folder's name. Its top folder on the storage has that name, with ` (2)` and so on added when
+another shared folder, one in the trash included, holds that folder or something is already there: a new shared folder
+never takes over files nobody gave it. So two shared folders can share a name. Making one is refused only when the
+person can already see one of that name; refusing a name they cannot see would tell them it exists.
+
+**A shared folder in the trash.** Deleting a shared folder moves its whole top folder into an entry of its own trash
+folder, beside what was deleted from it, and hides it from everyone. Its items, its trash and its roles stay in the
+index, and its folder stays held, so restoring always has its own folder to go back to. Its managers and the project
+admins find it in the Trash view and can restore it; 30 days after it was deleted the Drive removes its trash folder,
+and everything in it, for good. A shared folder always keeps someone in charge: taking a manager away is refused when
+nobody in the member list would be left managing it (there is always someone while the project has an admin).
+
+Each place has a lock in memory: every change inside it (and a listing, which makes a missing top folder again) holds
+it shared, and moving the whole shared folder into the trash or out of it holds it alone, waiting up to ten seconds for
+the changes under way. A change that starts after the shared folder went to the trash finds it gone.
 
 ## Running it yourself
 
 The Drive runs without Superit, as one container against any WebDAV server that passes the storage check. What it
 does today: a member signs in through the reverse proxy and works in their "My files": uploads and downloads files,
 makes folders, renames and moves things, deletes them into a 30-day trash and restores them, and sees about how much
-space is used. Shared folders, sharing, guests, public links and large or resumable transfers are not built yet.
+space is used. Members make shared folders, owned by the project, and work in them the same way; managers make other
+members managers and delete shared folders into the trash, and project admins manage every one. Sharing items with
+members, guests, public links and large or resumable transfers are not built yet.
 
 It needs:
 
@@ -315,9 +364,12 @@ internal/settings/     every environment variable
 internal/members/      the member list file, re-read when it changes
 internal/access/       the one authorisation function (Decide) and its table test
 internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify → own page (for changes) →
-                       place → access.Decide → item in that place, or in its trash
-internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash
-internal/index/        the SQLite index; schema changes are numbered files in migrations/
+                       place and the role given there → access.Decide → item in that place, or in its trash
+internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
+                       shared folders
+internal/index/        the SQLite index; schema changes are numbered files in migrations/, run with foreign keys
+                       off (SQLite's recipe for rebuilding a table) and checked with foreign_key_check before each
+                       commits
 internal/clock/        the Drive's clock, which test builds can move forward
 internal/storage/      the WebDAV client
 internal/storagecheck/ `superit-drive check-storage`: can a WebDAV server hold the Drive's files?

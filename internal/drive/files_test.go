@@ -2,6 +2,7 @@ package drive
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -150,5 +151,69 @@ func TestAListingThatStartedBeforeAChangeLeavesTheIndexAlone(t *testing.T) {
 	items, _ = x.Children(ctx, p.ID, 0)
 	if len(items) != 1 || items[0].Name != "b.txt" || items[0].ID != uploaded.ID {
 		t.Fatalf("after a listing that started before a rename: %+v", items)
+	}
+}
+
+// A change inside a shared folder that passed its checks just before the shared folder went to the trash must not
+// write into it afterwards: it would make the top folder again, under a place nobody can open. Moving the whole
+// shared folder waits for the changes inside it, and a change that starts after finds the place gone.
+func TestNothingIsWrittenIntoASharedFolderOnItsWayToTheTrash(t *testing.T) {
+	ctx := context.Background()
+	x, err := index.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	d := New(x, nil, Options{})
+	p, err := x.AddSharedFolder(ctx, "Clients", "Shared folders/Clients", "u-bence", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leave, err := d.inPlace(ctx, p) // an upload under way
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan func(), 1)
+	go func() {
+		release, err := d.wholePlace(ctx, p.ID)
+		if err != nil {
+			t.Error(err)
+			close(got)
+			return
+		}
+		got <- release
+	}()
+	select {
+	case <-got:
+		t.Fatal("the shared folder was moved while a change inside it was under way")
+	case <-time.After(200 * time.Millisecond):
+	}
+	leave()
+	release, ok := <-got
+	if !ok {
+		t.FailNow()
+	}
+	// While it is held, the shared folder goes to the trash, as DeleteSharedFolder does it.
+	if err := x.DeleteSharedFolder(ctx, p.ID, time.Now(), "entry"); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if _, err := d.inPlace(ctx, p); !errors.Is(err, ErrPlaceGone) {
+		t.Fatalf("a change after the shared folder went to the trash: got %v, want ErrPlaceGone", err)
+	}
+
+	// Moving it gives up, rather than wait for ever, when a change inside does not end.
+	other, err := x.AddSharedFolder(ctx, "Payroll", "Shared folders/Payroll", "u-bence", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.inPlace(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if _, err := d.wholePlace(short, other.ID); err == nil {
+		t.Fatal("the shared folder was held alone while a change inside it was under way")
 	}
 }

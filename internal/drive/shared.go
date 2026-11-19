@@ -1,0 +1,291 @@
+package drive
+
+import (
+	"context"
+	"errors"
+	"path"
+	"time"
+
+	"github.com/neonjelly-co/superit-drive/internal/index"
+	"github.com/neonjelly-co/superit-drive/internal/storage"
+)
+
+// SharedFoldersFolder is the folder on the storage that holds every shared folder's top folder.
+const SharedFoldersFolder = "Shared folders"
+
+// SharedFolders returns every shared folder that is not in the trash, by name.
+func (d *Drive) SharedFolders(ctx context.Context) ([]index.Place, error) {
+	return d.index.SharedFolders(ctx)
+}
+
+// NewSharedFolder makes a shared folder called name, owned by the project, with its own top folder on the storage,
+// and makes creator (a member's user id) its first manager.
+//
+// The top folder is "Shared folders/<name>", or "<name> (2)" and so on when another shared folder holds that folder
+// (one in the trash included) or something is already there on the storage: a new shared folder never takes over
+// files nobody gave it. People see the name either way, so two shared folders can share a name; a person who could
+// see the other one is refused before it gets here.
+func (d *Drive) NewSharedFolder(ctx context.Context, name, creator string) (index.Place, error) {
+	if err := CheckName(name); err != nil {
+		return index.Place{}, err
+	}
+	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
+	err := d.storage.MakeFolder(sctx, SharedFoldersFolder)
+	cancel()
+	if err != nil {
+		return index.Place{}, storageError(err)
+	}
+	for n := 1; n < 1000; n++ {
+		base := name
+		if n > 1 {
+			base = numbered(name, n, true)
+		}
+		folder, ok := pathIn(SharedFoldersFolder, base)
+		if !ok {
+			return index.Place{}, &BadName{"This name cannot be used. Choose another name."} // CheckName refuses these first
+		}
+		if taken, err := d.index.FolderTaken(ctx, folder); err != nil {
+			return index.Place{}, err
+		} else if taken {
+			continue
+		}
+		release, ok := d.claim(folder)
+		if !ok {
+			continue // another shared folder is being made there right now
+		}
+		p, made, err := d.makeSharedFolder(ctx, name, folder, creator)
+		release()
+		if made || err != nil {
+			return p, err
+		}
+	}
+	return index.Place{}, &Taken{Name: name, Folder: true}
+}
+
+// makeSharedFolder makes the top folder at folder and records the shared folder. made is false, with no error, when
+// something is already there on the storage.
+func (d *Drive) makeSharedFolder(ctx context.Context, name, folder, creator string) (p index.Place, made bool, err error) {
+	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
+	defer cancel()
+	_, err = d.storage.Stat(sctx, folder)
+	switch {
+	case err == nil:
+		return index.Place{}, false, nil
+	case !errors.Is(err, storage.ErrNotFound):
+		return index.Place{}, false, storageError(err)
+	}
+	err = d.storage.CreateFolder(sctx, folder)
+	switch {
+	case errors.Is(err, storage.ErrExists):
+		return index.Place{}, false, nil
+	case errors.Is(err, storage.ErrFull):
+		return index.Place{}, false, ErrFull
+	case err != nil:
+		return index.Place{}, false, storageError(err)
+	}
+	p, err = d.index.AddSharedFolder(ctx, name, folder, creator, d.now())
+	if err != nil {
+		d.log.Error("a shared folder's top folder was made, but the shared folder could not be recorded", "folder", folder, "error", err)
+	}
+	return p, err == nil, err
+}
+
+// A DeletedSharedFolder is a shared folder in the trash, as a person sees it.
+type DeletedSharedFolder struct {
+	index.Place
+	// Removed is when the Drive removes it for good.
+	Removed time.Time
+	// Size is the sum of the files in it as far as the Drive knows them, its own trash included.
+	Size int64
+}
+
+// DeleteSharedFolder moves a shared folder, with everything in it, into the trash: its top folder goes into an entry
+// of its own trash folder, beside what was deleted from it, and the shared folder is hidden from everyone until a
+// manager restores it, or the Drive removes it for good with its trash 30 days later. Its items, its trash and the
+// roles given on it are kept as they are meanwhile. It waits for changes inside it to end (ErrBusy when they do not).
+func (d *Drive) DeleteSharedFolder(ctx context.Context, p index.Place) (DeletedSharedFolder, error) {
+	if p.Kind != index.SharedFolder {
+		return DeletedSharedFolder{}, errors.New("only a shared folder can be deleted as a whole")
+	}
+	release, err := d.wholePlace(ctx, p.ID)
+	if err != nil {
+		return DeletedSharedFolder{}, err
+	}
+	defer release()
+	if p, err = d.index.PlaceByID(ctx, p.ID); errors.Is(err, index.ErrNoPlace) {
+		return DeletedSharedFolder{}, ErrPlaceGone
+	} else if err != nil {
+		return DeletedSharedFolder{}, err
+	}
+
+	entry, dir, err := d.makeEntry(ctx, p)
+	if err != nil {
+		return DeletedSharedFolder{}, err
+	}
+	to, ok := pathIn(dir, path.Base(p.Folder))
+	if !ok {
+		return DeletedSharedFolder{}, errors.New("a shared folder's top folder has no name") // the Drive made it
+	}
+	// Not found: its top folder had already gone from the storage. The empty entry stands for it, and restoring makes
+	// the top folder again.
+	if err := d.moveOnStorage(ctx, true, p.Folder, to); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		_ = d.removeEntry(ctx, dir)
+		return DeletedSharedFolder{}, storageError(err)
+	}
+	d.changed(folderKey{p.ID, 0}, folderKey{p.ID, trashFolder})
+	if err := d.index.DeleteSharedFolder(ctx, p.ID, d.now(), entry); err != nil {
+		return DeletedSharedFolder{}, err
+	}
+	gone, err := d.index.DeletedPlace(ctx, p.ID)
+	if err != nil {
+		return DeletedSharedFolder{}, err
+	}
+	return d.deleted(ctx, gone)
+}
+
+// RestoreSharedFolder brings a shared folder out of the trash, back to its own top folder, with everything in it, its
+// own trash and the roles given on it as they were. Its folder is held for it while it is in the trash, so only
+// something put there directly on the storage can be in the way; that is never replaced (a *Taken error).
+func (d *Drive) RestoreSharedFolder(ctx context.Context, p index.Place) (index.Place, error) {
+	release, err := d.wholePlace(ctx, p.ID)
+	if err != nil {
+		return index.Place{}, err
+	}
+	defer release()
+	if p, err = d.index.DeletedPlace(ctx, p.ID); errors.Is(err, index.ErrNoPlace) {
+		return index.Place{}, ErrPlaceGone
+	} else if err != nil {
+		return index.Place{}, err
+	}
+	dir, ok := pathIn(trashTop(p), p.Entry)
+	if !ok {
+		return index.Place{}, ErrGone
+	}
+	base := path.Base(p.Folder)
+	from, _ := pathIn(dir, base)
+
+	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
+	defer cancel()
+	if err := d.storage.MakeFolder(sctx, path.Dir(p.Folder)); err != nil {
+		return index.Place{}, storageError(err)
+	}
+	switch _, err := d.storage.Stat(sctx, p.Folder); {
+	case err == nil:
+		return index.Place{}, &Taken{Name: base, Folder: true}
+	case !errors.Is(err, storage.ErrNotFound):
+		return index.Place{}, storageError(err)
+	}
+	err = d.moveOnStorage(ctx, true, from, p.Folder)
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		// Its top folder is not in its entry (it had gone before it was deleted): an empty one, as a listing would make.
+		if err := d.storage.CreateFolder(sctx, p.Folder); err != nil && !errors.Is(err, storage.ErrExists) {
+			return index.Place{}, storageError(err)
+		}
+	case errors.Is(err, storage.ErrExists):
+		return index.Place{}, &Taken{Name: base, Folder: true}
+	case err != nil:
+		return index.Place{}, storageError(err)
+	}
+	d.changed(folderKey{p.ID, 0}, folderKey{p.ID, trashFolder})
+	if err := d.removeEntry(ctx, dir); err != nil {
+		d.log.Warn("an emptied folder in the trash could not be removed", "folder", dir, "error", err)
+	}
+	if err := d.index.RestoreSharedFolder(ctx, p.ID); err != nil {
+		return index.Place{}, err
+	}
+	return d.index.PlaceByID(ctx, p.ID)
+}
+
+// DeletedSharedFolders returns every shared folder in the trash, the most recently deleted first. Those that have been
+// there for 30 days are removed for good first.
+func (d *Drive) DeletedSharedFolders(ctx context.Context) ([]DeletedSharedFolder, error) {
+	if _, err := d.removeExpiredSharedFolders(ctx, d.now().Add(-KeptFor)); err != nil {
+		return nil, err
+	}
+	places, err := d.index.DeletedSharedFolders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DeletedSharedFolder, 0, len(places))
+	for _, p := range places {
+		e, err := d.deleted(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+func (d *Drive) deleted(ctx context.Context, p index.Place) (DeletedSharedFolder, error) {
+	size, err := d.index.SizeOfPlace(ctx, p.ID)
+	return DeletedSharedFolder{Place: p, Removed: p.Deleted.Add(KeptFor), Size: size}, err
+}
+
+// removeExpiredSharedFolders removes for good the shared folders that went to the trash before cutoff: their trash
+// folder on the storage, which holds their top folder and everything deleted from them, then their place in the index
+// with its items and roles. One that is being restored right now is left for the next run.
+func (d *Drive) removeExpiredSharedFolders(ctx context.Context, cutoff time.Time) (removed int, failed error) {
+	due, err := d.index.SharedFoldersDeletedBefore(ctx, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	for _, p := range due {
+		release, err := d.wholePlace(ctx, p.ID)
+		if err != nil {
+			failed = err
+			continue
+		}
+		if p, err = d.index.DeletedPlace(ctx, p.ID); err != nil || !p.Deleted.Before(cutoff) {
+			release() // restored meanwhile
+			continue
+		}
+		if err := d.removeEntry(ctx, trashTop(p)); err != nil {
+			release()
+			failed = storageError(err) // kept, and tried again on the next run
+			continue
+		}
+		err = d.index.RemoveSharedFolder(ctx, p.ID)
+		release()
+		if err != nil {
+			return removed, err
+		}
+		d.log.Info("removed a shared folder from the trash for good after 30 days", "folder", p.Folder)
+		removed++
+	}
+	return removed, failed
+}
+
+// Given is the role given to the member on a place, as the index holds it, or "" for none. Roles are given only on
+// shared folders.
+func (d *Drive) Given(ctx context.Context, p index.Place, member string) (string, error) {
+	if p.Kind != index.SharedFolder {
+		return "", nil
+	}
+	return d.index.Given(ctx, p.ID, member)
+}
+
+// GivenTo returns the role given to the member on each place they were given one on, by place id.
+func (d *Drive) GivenTo(ctx context.Context, member string) (map[int64]string, error) {
+	return d.index.GivenTo(ctx, member)
+}
+
+// Grants returns the roles given on a place, the earliest first.
+func (d *Drive) Grants(ctx context.Context, p index.Place) ([]index.Grant, error) {
+	return d.index.Grants(ctx, p.ID)
+}
+
+// Give gives the member a role on a shared folder, in place of any role they had there.
+func (d *Drive) Give(ctx context.Context, p index.Place, member, role string) error {
+	if p.Kind != index.SharedFolder {
+		return errors.New("roles are given only on shared folders")
+	}
+	return d.index.Give(ctx, p.ID, member, role, d.now())
+}
+
+// TakeAway takes away the role given to the member on a place. check is shown the roles that would be left, while
+// nobody else can change them, and can refuse with an error.
+func (d *Drive) TakeAway(ctx context.Context, p index.Place, member string, check func(left []index.Grant) error) error {
+	return d.index.TakeAway(ctx, p.ID, member, check)
+}

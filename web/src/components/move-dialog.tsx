@@ -7,6 +7,8 @@ import { Dialog } from "./dialog";
 
 type Props = {
 	placeId: number;
+	/** The place's name as people see it: "My files", or a shared folder's name. */
+	placeName: string;
 	item: Item;
 	/** The folders from the top down to the one the item is in now; empty for the top folder. */
 	path: FolderRef[];
@@ -18,9 +20,10 @@ type Props = {
 /**
  * The Move dialog: the place's folder tree, opened one level at a time as the person goes down it (each level is
  * listed from the Drive storage as it is opened). A folder cannot be moved into itself or a folder inside it, so the
- * folder being moved is shown but cannot be chosen or opened.
+ * folder being moved is shown but cannot be chosen or opened. Moves stay inside the place, so its tree is all there is
+ * (moving from "My files" into a shared folder comes with its warning, later).
  */
-export function MoveDialog({ placeId, item, path, onMove, onClose }: Props) {
+export function MoveDialog({ placeId, placeName, item, path, onMove, onClose }: Props) {
 	const here = path.at(-1)?.id ?? null;
 	// The way down to where the item is now starts open, so the person sees it.
 	const [open, setOpen] = useState<Set<number | null>>(() => new Set([null, ...path.map((f) => f.id)]));
@@ -50,7 +53,7 @@ export function MoveDialog({ placeId, item, path, onMove, onClose }: Props) {
 	};
 
 	const chosenId = dest === undefined ? undefined : (dest?.id ?? null);
-	const node = { placeId, moving: item, here, open, toggle, chosen: chosenId, choose: setDest };
+	const node = { placeId, placeName, moving: item, here, open, toggle, chosen: chosenId, choose: setDest };
 
 	return (
 		<Dialog
@@ -84,6 +87,7 @@ export function MoveDialog({ placeId, item, path, onMove, onClose }: Props) {
 
 type NodeProps = {
 	placeId: number;
+	placeName: string;
 	moving: Item;
 	here: number | null;
 	open: Set<number | null>;
@@ -96,7 +100,7 @@ type NodeProps = {
 };
 
 function FolderNode(props: NodeProps) {
-	const { placeId, moving, here, open, toggle, chosen, choose, folder, depth } = props;
+	const { placeId, placeName, moving, here, open, toggle, chosen, choose, folder, depth } = props;
 	const id = folder?.id ?? null;
 	const isMoving = moving.kind === "folder" && id === moving.id;
 	const isOpen = open.has(id) && !isMoving;
@@ -106,7 +110,7 @@ function FolderNode(props: NodeProps) {
 		enabled: isOpen,
 	});
 	const children = listing.data?.items.filter((i) => i.kind === "folder") ?? [];
-	const name = folder?.name ?? "My files";
+	const name = folder?.name ?? placeName;
 	const note = isMoving ? "the folder being moved" : id === here ? "where it is now" : undefined;
 	const Icon = isOpen ? FolderOpen : Folder;
 

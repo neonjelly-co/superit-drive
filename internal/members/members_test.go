@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -95,5 +96,22 @@ func waitFor(t *testing.T, ok func() bool) {
 			t.Fatal("timed out")
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestAllListsEveryMemberByName(t *testing.T) {
+	l, err := Parse([]byte(`{"members":[
+		{"userId":"u3","email":"zoe@example.com","role":"member"},
+		{"userId":"u1","email":"reka@example.com","displayName":"Réka Kovács","role":"admin"},
+		{"userId":"u2","email":"bence@example.com","displayName":"bence Tóth","role":"member"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, m := range l.All() {
+		got = append(got, m.UserID)
+	}
+	if want := []string{"u2", "u1", "u3"}; !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

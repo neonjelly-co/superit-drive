@@ -68,13 +68,144 @@ func TestTheMigrationKeepsItemsAndTheirIds(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer x.Close()
+	// The items outlive the rebuild of places (0003), which drops the old table: with foreign keys on, that would have
+	// deleted every item with it.
 	offer, err := x.Item(ctx, 1, 9)
 	if err != nil || offer.Name != "Offer.docx" || offer.Size != 84 || len(offer.Above) != 1 || offer.Above[0].ID != 7 {
 		t.Fatalf("got %+v, %v", offer, err)
 	}
-	p, _ := x.PlaceByID(ctx, 1)
+	p, err := x.PlaceByID(ctx, 1)
+	if err != nil || p.Kind != MyFiles || p.Owner != "u-reka" || p.Folder != "My files/reka@example.com" || p.Name != "" || !p.Deleted.IsZero() {
+		t.Fatalf("Réka's My files after the migrations: %+v, %v", p, err)
+	}
 	if n := put(t, x, p, 0, "New.txt", false, 1); n.ID <= 9 {
 		t.Fatalf("a new item got id %d, which is not after the old ones", n.ID)
+	}
+	// And foreign keys are enforced again once the migrations are done.
+	if _, err := x.db.ExecContext(ctx, "INSERT INTO items (place_id, name, is_folder, changed_at) VALUES (999, 'x', 0, 0)"); err == nil {
+		t.Fatal("an item of a place that does not exist was accepted: foreign keys are off")
+	}
+	if _, err := x.db.ExecContext(ctx, "INSERT INTO grants (place_id, member, role, given_at) VALUES (999, 'u', 'manager', 0)"); err == nil {
+		t.Fatal("a role on a place that does not exist was accepted: foreign keys are off")
+	}
+}
+
+// A shared folder is a place owned by the project: a name and a folder, no owner, and its maker as its first manager.
+// In the trash it is found only as a deleted place, keeps its items and roles, and its folder stays held.
+func TestASharedFolderAndItsManagers(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	now := time.Now()
+	clients, err := x.AddSharedFolder(ctx, "Clients", "Shared folders/Clients", "u-bence", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clients.Kind != SharedFolder || clients.Name != "Clients" || clients.Owner != "" || clients.Folder != "Shared folders/Clients" {
+		t.Fatalf("got %+v", clients)
+	}
+	if role, _ := x.Given(ctx, clients.ID, "u-bence"); role != "manager" {
+		t.Fatalf("the maker's role: %q, want manager", role)
+	}
+	if role, _ := x.Given(ctx, clients.ID, "u-dora"); role != "" {
+		t.Fatalf("someone else's role: %q, want none", role)
+	}
+	// Two places never hold the same folder.
+	if _, err := x.AddSharedFolder(ctx, "Clients", "Shared folders/Clients", "u-dora", now); err == nil {
+		t.Fatal("a second place with the same folder was recorded")
+	}
+	if taken, _ := x.FolderTaken(ctx, "Shared folders/Clients"); !taken {
+		t.Fatal("the folder is not taken")
+	}
+	ledger := put(t, x, clients, 0, "Ledger.xlsx", false, 40)
+
+	if err := x.Give(ctx, clients.ID, "u-dora", "manager", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.Give(ctx, clients.ID, "u-dora", "viewer", now); err == nil {
+		t.Fatal("a role the index does not hold yet was given")
+	}
+	if given, _ := x.GivenTo(ctx, "u-dora"); given[clients.ID] != "manager" || len(given) != 1 {
+		t.Fatalf("Dóra's roles: %v", given)
+	}
+	// Taking a role away shows what would be left, and the check can refuse.
+	refused := errors.New("refused")
+	err = x.TakeAway(ctx, clients.ID, "u-bence", func(left []Grant) error {
+		if len(left) != 1 || left[0].Member != "u-dora" {
+			t.Errorf("left: %+v", left)
+		}
+		return refused
+	})
+	if !errors.Is(err, refused) {
+		t.Fatalf("got %v, want the check's refusal", err)
+	}
+	if role, _ := x.Given(ctx, clients.ID, "u-bence"); role != "manager" {
+		t.Fatal("a refused take-away took the role away")
+	}
+	if err := x.TakeAway(ctx, clients.ID, "u-bence", func([]Grant) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if grants, _ := x.Grants(ctx, clients.ID); len(grants) != 1 || grants[0].Member != "u-dora" {
+		t.Fatalf("roles left: %+v", grants)
+	}
+
+	// In the trash.
+	if err := x.DeleteSharedFolder(ctx, clients.ID, now, "2026-11-19 0badc0de"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.PlaceByID(ctx, clients.ID); !errors.Is(err, ErrNoPlace) {
+		t.Fatalf("a shared folder in the trash was found as a place: %v", err)
+	}
+	if shared, _ := x.SharedFolders(ctx); len(shared) != 0 {
+		t.Fatalf("shared folders: %+v", shared)
+	}
+	d, err := x.DeletedPlace(ctx, clients.ID)
+	if err != nil || d.Entry != "2026-11-19 0badc0de" || d.Deleted.IsZero() {
+		t.Fatalf("the deleted shared folder: %+v, %v", d, err)
+	}
+	if entries, _ := x.TrashEntries(ctx, clients.ID); !entries["2026-11-19 0badc0de"] {
+		t.Fatalf("its entry is not known to the trash: %v", entries)
+	}
+	if taken, _ := x.FolderTaken(ctx, "Shared folders/Clients"); !taken {
+		t.Fatal("a shared folder in the trash no longer holds its folder")
+	}
+	if _, err := x.DeletedPlace(ctx, ledger.PlaceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.RestoreSharedFolder(ctx, clients.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := x.Item(ctx, clients.ID, ledger.ID); err != nil || got.ID != ledger.ID {
+		t.Fatalf("Ledger.xlsx after the restore: %+v, %v", got, err)
+	}
+
+	// Removed for good: its items and roles go with it, and its id is never given to another place.
+	if err := x.RemoveSharedFolder(ctx, clients.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.PlaceByID(ctx, clients.ID); err != nil {
+		t.Fatal("a shared folder that is not in the trash was removed for good")
+	}
+	if err := x.DeleteSharedFolder(ctx, clients.ID, now.Add(-time.Hour), "e"); err != nil {
+		t.Fatal(err)
+	}
+	if due, _ := x.SharedFoldersDeletedBefore(ctx, now); len(due) != 1 || due[0].ID != clients.ID {
+		t.Fatalf("deleted before now: %+v", due)
+	}
+	if err := x.RemoveSharedFolder(ctx, clients.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.DeletedPlace(ctx, clients.ID); !errors.Is(err, ErrNoPlace) {
+		t.Fatalf("still there: %v", err)
+	}
+	if grants, _ := x.Grants(ctx, clients.ID); len(grants) != 0 {
+		t.Fatalf("its roles outlived it: %+v", grants)
+	}
+	if used, _ := x.Used(ctx); used != 0 {
+		t.Fatalf("its files outlived it: %d bytes", used)
+	}
+	again, err := x.AddSharedFolder(ctx, "Clients", "Shared folders/Clients", "u-dora", now)
+	if err != nil || again.ID <= clients.ID {
+		t.Fatalf("a new shared folder got id %d after %d (%v)", again.ID, clients.ID, err)
 	}
 }
 

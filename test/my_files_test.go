@@ -23,8 +23,8 @@ func myFiles(t *testing.T, d *harness.Drive, m harness.Member) (placeID int64, i
 	}
 	var places placesJSON
 	res.JSON(t, &places)
-	if len(places.Places) != 1 || places.Places[0].Kind != "my-files" {
-		t.Fatalf("places for %s: want only their own My files, got %s", m.Email, res.Body)
+	if len(places.Places) == 0 || places.Places[0].Kind != "my-files" {
+		t.Fatalf("places for %s: want their own My files first, got %s", m.Email, res.Body)
 	}
 	placeID = places.Places[0].ID
 

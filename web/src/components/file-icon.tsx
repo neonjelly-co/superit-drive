@@ -1,5 +1,4 @@
-import { File, FileArchive, FileAudio, FileImage, FileSpreadsheet, FileText, FileVideo, Folder } from "lucide-react";
-import type { Item } from "../api";
+import { File, FileArchive, FileAudio, FileImage, FileSpreadsheet, FileText, FileVideo, Folder, FolderOpen } from "lucide-react";
 
 const BY_EXTENSION: Record<string, typeof File> = {};
 for (const [icon, extensions] of [
@@ -13,9 +12,9 @@ for (const [icon, extensions] of [
 	for (const ext of extensions.split(" ")) BY_EXTENSION[ext] = icon;
 }
 
-/** The icon for a file or folder: by kind, and for files by the extension of the name. */
-export function FileIcon({ item, className = "size-5" }: { item: Pick<Item, "name" | "kind">; className?: string }) {
+/** The icon for a file, a folder or a whole shared folder: by kind, and for files by the extension of the name. */
+export function FileIcon({ item, className = "size-5" }: { item: { name: string; kind: "file" | "folder" | "shared-folder" }; className?: string }) {
 	const extension = item.name.includes(".") ? (item.name.split(".").pop() ?? "").toLowerCase() : "";
-	const Icon = item.kind === "folder" ? Folder : (BY_EXTENSION[extension] ?? File);
+	const Icon = item.kind === "shared-folder" ? FolderOpen : item.kind === "folder" ? Folder : (BY_EXTENSION[extension] ?? File);
 	return <Icon aria-hidden className={`${className} shrink-0 text-muted-foreground`} />;
 }

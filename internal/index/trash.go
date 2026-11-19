@@ -203,9 +203,13 @@ func (x *Index) ForgetTrash(ctx context.Context, placeID int64, gone func(entry 
 	})
 }
 
-// TrashEntries says which folders of the place's trash on the storage the index knows.
+// TrashEntries says which folders of the place's trash on the storage the index knows: those of its items, and the one
+// holding the place's own top folder while a shared folder is in the trash.
 func (x *Index) TrashEntries(ctx context.Context, placeID int64) (map[string]bool, error) {
-	rows, err := x.db.QueryContext(ctx, "SELECT trash_folder FROM items WHERE place_id = ? AND trashed_at IS NOT NULL", placeID)
+	rows, err := x.db.QueryContext(ctx, `
+		SELECT trash_folder FROM items WHERE place_id = ? AND trashed_at IS NOT NULL
+		UNION ALL
+		SELECT deleted_entry FROM places WHERE id = ? AND deleted_entry IS NOT NULL`, placeID, placeID)
 	if err != nil {
 		return nil, err
 	}

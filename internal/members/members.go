@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -57,6 +58,27 @@ func (l *List) Lookup(userID string) (Member, bool) {
 
 // Len is the number of members.
 func (l *List) Len() int { return len(l.byID) }
+
+// All returns every member, by display name (or email address, for one without a name), then user id.
+func (l *List) All() []Member {
+	out := make([]Member, 0, len(l.byID))
+	for _, m := range l.byID {
+		out = append(out, m)
+	}
+	key := func(m Member) string {
+		if m.DisplayName != "" {
+			return strings.ToLower(m.DisplayName)
+		}
+		return strings.ToLower(m.Email)
+	}
+	slices.SortFunc(out, func(a, b Member) int {
+		if c := strings.Compare(key(a), key(b)); c != 0 {
+			return c
+		}
+		return strings.Compare(a.UserID, b.UserID)
+	})
+	return out
+}
 
 // Parse reads one version of the member list. A list with a problem is refused whole: a half-understood list could
 // lock members out or let removed people in.

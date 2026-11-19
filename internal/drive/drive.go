@@ -9,17 +9,23 @@
 //	        Tax notes 2026.pdf     files and folders with their real names, at any depth
 //	        Drafts/
 //	    bence@example.com/
+//	Shared folders/
+//	    Clients/                   one top folder per shared folder, named after it ("Clients (2)" when another
+//	        Bakery Ltd/            shared folder, one in the trash included, holds that name)
 //	.superit-drive/                the Drive's own hidden folders
 //	    trash/
 //	        My files/reka@example.com/          one trash per place, beside the place's own path
 //	            2026-11-19 7f3a9c1e/Offer.docx  one folder per deleted item: the day it was deleted, a random part,
 //	                                            and in it the item under its real name
+//	        Shared folders/Payroll/
+//	            2026-11-19 0c41d2aa/Payroll     a deleted shared folder: its whole top folder, beside what was deleted
+//	                                            from it, until it is restored or removed for good with its trash
 //
-// Shared folders, and the hidden folders for uploads in progress and the index copy, are added by the tickets that
-// bring them.
+// The hidden folders for uploads in progress and the index copy are added by the tickets that bring them.
 //
 // Every change is two steps, the storage and then the index. files.go has uploads, downloads and the name rules,
-// folders.go new folders, renames and moves, trash.go the trash, and this file the places, paths and listings.
+// folders.go new folders, renames and moves, trash.go the trash, shared.go shared folders and the roles given on
+// them, and this file the places, paths and listings.
 package drive
 
 import (
@@ -81,6 +87,9 @@ type Drive struct {
 
 	// generations counts the Drive's own changes to each folder; a listing that began before one is not applied.
 	generations generations
+
+	// locks holds one lock per place: see inPlace and wholePlace.
+	locks placeLocks
 }
 
 // New makes a Drive.
@@ -95,9 +104,74 @@ func New(x *index.Index, s *storage.Client, o Options) *Drive {
 	return d
 }
 
-// Place finds a place by its id.
+// Place finds a place by its id. A shared folder in the trash is not found: see DeletedPlace.
 func (d *Drive) Place(ctx context.Context, id int64) (index.Place, error) {
 	return d.index.PlaceByID(ctx, id)
+}
+
+// DeletedPlace finds a shared folder in the trash by its id.
+func (d *Drive) DeletedPlace(ctx context.Context, id int64) (index.Place, error) {
+	return d.index.DeletedPlace(ctx, id)
+}
+
+// ErrPlaceGone: the place went to the trash (or was removed for good) after the request found it.
+var ErrPlaceGone = errors.New("the place is no longer there")
+
+// placeLocks holds one lock per place. A change inside a place holds it shared (inPlace); moving a whole shared
+// folder into the trash, out of it, or away for good holds it alone (wholePlace).
+type placeLocks struct {
+	mu sync.Mutex
+	m  map[int64]*sync.RWMutex
+}
+
+func (l *placeLocks) of(id int64) *sync.RWMutex {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.m == nil {
+		l.m = map[int64]*sync.RWMutex{}
+	}
+	if l.m[id] == nil {
+		l.m[id] = &sync.RWMutex{}
+	}
+	return l.m[id]
+}
+
+// inPlace holds the place's lock for a change inside it (an upload, a new folder, a rename or move, deleting or
+// restoring an item, and a listing, which makes a missing top folder again), and checks that the place is still there
+// and not in the trash. Without it, a request that found a shared folder just before it went to the trash could make
+// its top folder again afterwards, and write into it.
+func (d *Drive) inPlace(ctx context.Context, p index.Place) (release func(), err error) {
+	l := d.locks.of(p.ID)
+	l.RLock()
+	if _, err := d.index.PlaceByID(ctx, p.ID); err != nil {
+		l.RUnlock()
+		if errors.Is(err, index.ErrNoPlace) {
+			return nil, ErrPlaceGone
+		}
+		return nil, err
+	}
+	return l.RUnlock, nil
+}
+
+// wholePlaceWait is how long moving a whole shared folder waits for the changes inside it to end.
+const wholePlaceWait = 10 * time.Second
+
+// wholePlace holds the place's lock alone, once the changes inside it have ended; ErrBusy when they have not within
+// wholePlaceWait. Changes inside the place that start meanwhile go first: a long upload is never held up by this.
+func (d *Drive) wholePlace(ctx context.Context, id int64) (release func(), err error) {
+	l := d.locks.of(id)
+	deadline := time.Now().Add(wholePlaceWait)
+	for !l.TryLock() {
+		if time.Now().After(deadline) {
+			return nil, ErrBusy
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	return l.Unlock, nil
 }
 
 // MyFiles returns the member's "My files", making its top folder on the storage the first time.
@@ -207,6 +281,11 @@ func (d *Drive) List(ctx context.Context, p index.Place, folder *index.Item) ([]
 	if !ok {
 		return nil, ErrGone
 	}
+	release, err := d.inPlace(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	// Taken before the storage is asked: a change the Drive makes from here on means this listing may be out of date.
 	stale := d.since(folderKey{p.ID, folderID(folder)})
 	var parentStale func() bool

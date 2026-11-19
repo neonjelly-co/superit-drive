@@ -14,10 +14,11 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(harness.Run(m)) }
 
-// The people in these tests. Réka holds the admin role on the project.
+// The people in these tests. Réka holds the admin role on the project; Bence and Dóra do not.
 var (
 	reka  = harness.Member{UserID: "6f1c0e2a-reka", Email: "reka@example.com", DisplayName: "Réka Kovács", Role: "admin"}
 	bence = harness.Member{UserID: "a93b77d1-bence", Email: "bence@example.com", DisplayName: "Bence Tóth", Role: "member"}
+	dora  = harness.Member{UserID: "c4d2e9f0-dora", Email: "dora@example.com", DisplayName: "Dóra Nagy", Role: "member"}
 )
 
 // What the API answers.
@@ -30,10 +31,32 @@ type (
 		Project     string `json:"project"`
 	}
 	placesJSON struct {
-		Places []struct {
-			ID   int64  `json:"id"`
-			Kind string `json:"kind"`
-		} `json:"places"`
+		Places []placeJSON `json:"places"`
+	}
+	placeJSON struct {
+		ID   int64    `json:"id"`
+		Kind string   `json:"kind"` // "my-files" or "shared-folder"
+		Name string   `json:"name"`
+		Role string   `json:"role"`
+		Can  []string `json:"can"`
+	}
+	// personJSON is someone with a role on a shared folder.
+	personJSON struct {
+		UserID      string `json:"userId"`
+		Email       string `json:"email"`
+		DisplayName string `json:"displayName"`
+		Role        string `json:"role"`
+		Given       bool   `json:"given"`
+		Admin       bool   `json:"admin"`
+		Former      bool   `json:"former"`
+	}
+	deletedPlaceJSON struct {
+		ID      int64     `json:"id"`
+		Kind    string    `json:"kind"`
+		Name    string    `json:"name"`
+		Size    int64     `json:"size"`
+		Deleted time.Time `json:"deleted"`
+		Removed time.Time `json:"removed"`
 	}
 	itemsJSON struct {
 		Items []itemJSON `json:"items"`
