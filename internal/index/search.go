@@ -209,16 +209,20 @@ const searchSQL = `
 		whole (place_id) AS (SELECT value FROM json_each(?)),
 		given (id, place_id) AS (SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(?)),
 		tree (id, depth) AS (
-			SELECT id, 0 FROM items
-			WHERE trashed_at IS NULL AND (
-				(parent_id IS NULL AND place_id IN (SELECT place_id FROM whole))
-				OR (id, place_id) IN (SELECT id, place_id FROM given))
+			-- Each start is found through an index (the top folder's items by place, a given item by its id), so that
+			-- not even finding where to start reads anything outside the scope.
+			SELECT items.id, 0 FROM whole JOIN items
+				ON items.place_id = whole.place_id AND IFNULL(items.parent_id, 0) = 0 AND items.trashed_at IS NULL
+			UNION ALL
+			SELECT items.id, 0 FROM given JOIN items
+				ON items.id = given.id AND items.place_id = given.place_id AND items.trashed_at IS NULL
 			UNION ALL
 			SELECT items.id, tree.depth + 1 FROM items JOIN tree ON items.parent_id = tree.id
 			WHERE items.trashed_at IS NULL AND tree.depth < ?
 		),
 		found AS (
-			SELECT items.*, drive_search_match(items.name, ?) AS rank FROM tree JOIN items ON items.id = tree.id
+			-- CROSS JOIN keeps the walk the outer loop: SQLite would otherwise read every item and look each up in it.
+			SELECT items.*, drive_search_match(items.name, ?) AS rank FROM tree CROSS JOIN items ON items.id = tree.id
 		)
 	SELECT ` + itemColumns + ` FROM found AS items
 	WHERE rank >= 0

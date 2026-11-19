@@ -70,6 +70,35 @@ func TestMatch(t *testing.T) {
 	}
 }
 
+// The time a search takes must not depend on what is outside its scope, or it would tell how much there is that the
+// person cannot see: no step of the database's plan for it reads the whole items table. Each start is found through an
+// index, and each step down through the folder index.
+func TestASearchNeverReadsTheWholeIndex(t *testing.T) {
+	x := open(t)
+	rows, err := x.db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+searchSQL, "[1]", "[[5,2]]", MaxDepth, "x", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var step string
+		if err := rows.Scan(&id, &parent, &unused, &step); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, step)
+	}
+	for _, step := range plan {
+		if strings.HasPrefix(step, "SCAN items") {
+			t.Errorf("the search reads every item: %q, in the plan\n%s", step, strings.Join(plan, "\n"))
+		}
+	}
+	if !slices.ContainsFunc(plan, func(s string) bool { return strings.Contains(s, "items_by_parent") }) {
+		t.Errorf("the search does not walk down through the folder index:\n%s", strings.Join(plan, "\n"))
+	}
+}
+
 // A search looks only where it is told: whole places from their top folders down, given items with everything in
 // them; never in the trash, inside a folder in the trash, beside or above a given item, or in another place.
 func TestSearchLooksOnlyInItsScope(t *testing.T) {
