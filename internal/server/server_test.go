@@ -36,7 +36,8 @@ func bareServer(t *testing.T) *Server {
 // examplePath turns a route pattern into an address that matches it.
 func examplePath(pattern string) string {
 	_, p, _ := strings.Cut(pattern, " ")
-	return strings.NewReplacer("{$}", "", "{place}", "1", "{item}", "1", "{member}", "u-reka", "{file...}", "x.js").Replace(p)
+	return strings.NewReplacer("{$}", "", "{place}", "1", "{item}", "1", "{member}", "u-reka", "{file...}", "x.js",
+		"{upload}", "0123456789abcdef0123456789abcdef").Replace(p)
 }
 
 // Every route that takes a place is tried as an outsider in test/shared_folders_test.go
@@ -68,6 +69,14 @@ var placeRoutesTriedByAnOutsider = []string{
 	"DELETE /api/places/{place}/items/{item}",
 	"GET /api/places/{place}/trash",
 	"POST /api/places/{place}/trash/{item}/restore",
+	"GET /api/places/{place}/zip",
+	"GET /api/places/{place}/items/{item}/zip",
+	"POST /api/places/{place}/uploads",
+	"POST /api/places/{place}/items/{item}/uploads",
+	"GET /api/places/{place}/uploads/{upload}",
+	"PUT /api/places/{place}/uploads/{upload}",
+	"POST /api/places/{place}/uploads/{upload}/finish",
+	"DELETE /api/places/{place}/uploads/{upload}",
 }
 
 func TestEveryRouteWithAPlaceIsTriedByAnOutsider(t *testing.T) {
@@ -85,12 +94,12 @@ func TestEveryRouteWithAPlaceIsTriedByAnOutsider(t *testing.T) {
 	}
 }
 
-// Every route that takes an item, or an item in the trash, is tried in test/sharing_test.go
-// (TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing) by a member who was given one folder deep
-// inside someone's place: for every item they were not given (its parent, its sibling, the item of another place) they
-// must get the same answer as for an item that does not exist, and the routes of the place as a whole must answer as a
-// place that does not exist. This list is that test's; a new route that takes an item fails here until it is added
-// there, and here.
+// Every route that takes an item, an item in the trash, or an upload in progress (which is about the folder it goes
+// into) is tried in test/sharing_test.go (TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing) by a
+// member who was given one folder deep inside someone's place: for every item they were not given (its parent, its
+// sibling, the item of another place) and every upload that is not theirs, they must get the same answer as for one
+// that does not exist, and the routes of the place as a whole must answer as a place that does not exist. This list is
+// that test's; a new route that takes an item fails here until it is added there, and here.
 var itemRoutesTriedWithPartOfAPlace = []string{
 	"GET /api/places/{place}/items/{item}/access",
 	"PUT /api/places/{place}/items/{item}/access/members/{member}",
@@ -105,12 +114,18 @@ var itemRoutesTriedWithPartOfAPlace = []string{
 	"POST /api/places/{place}/items/{item}/move",
 	"DELETE /api/places/{place}/items/{item}",
 	"POST /api/places/{place}/trash/{item}/restore",
+	"GET /api/places/{place}/items/{item}/zip",
+	"POST /api/places/{place}/items/{item}/uploads",
+	"GET /api/places/{place}/uploads/{upload}",
+	"PUT /api/places/{place}/uploads/{upload}",
+	"POST /api/places/{place}/uploads/{upload}/finish",
+	"DELETE /api/places/{place}/uploads/{upload}",
 }
 
 func TestEveryRouteWithAnItemIsTriedWithPartOfAPlace(t *testing.T) {
 	var got []string
 	for _, rt := range bareServer(t).routes() {
-		if rt.item != "" || rt.trashed != "" {
+		if rt.item != "" || rt.trashed != "" || rt.upload != "" {
 			got = append(got, rt.pattern)
 		}
 	}

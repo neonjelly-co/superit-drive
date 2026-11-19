@@ -63,7 +63,12 @@ func (d *Drive) makeEntry(ctx context.Context, p index.Place) (entry, dir string
 // moveOnStorage moves a file or folder on the storage, the way its kind needs. When the folder it was going into is
 // missing, the error is storage.ErrNotFound, whatever the server answered (Apache answers 500).
 func (d *Drive) moveOnStorage(ctx context.Context, folder bool, from, to string) error {
-	ctx, cancel := context.WithTimeout(ctx, storageTimeout)
+	return d.moveWithin(ctx, storageTimeout, folder, from, to)
+}
+
+// moveWithin is moveOnStorage, given timeout to finish.
+func (d *Drive) moveWithin(ctx context.Context, timeout time.Duration, folder bool, from, to string) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var err error
 	if folder {
@@ -355,12 +360,15 @@ func (d *Drive) restoreInto(ctx context.Context, p index.Place, t index.TrashIte
 	return d.index.Restore(ctx, p.ID, t.ID, folderID(dest), name)
 }
 
-// EmptyTrash removes for good everything that has been in a trash for 30 days, in every place, then waits for the
-// next run, every interval, until ctx ends.
-func (d *Drive) EmptyTrash(ctx context.Context, every time.Duration) {
+// Tidy removes for good everything that has been in a trash for 30 days, in every place, and the uploads abandoned
+// for a day (AbandonedAfter), then waits for the next run, every interval, until ctx ends.
+func (d *Drive) Tidy(ctx context.Context, every time.Duration) {
 	for {
 		if err := d.removeExpired(ctx, nil); err != nil && ctx.Err() == nil {
 			d.log.Error("emptying the trash failed; it is tried again later", "error", err)
+		}
+		if err := d.removeAbandoned(ctx); err != nil && ctx.Err() == nil {
+			d.log.Error("removing abandoned uploads failed; it is tried again later", "error", err)
 		}
 		select {
 		case <-ctx.Done():

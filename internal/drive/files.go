@@ -92,8 +92,9 @@ type Upload struct {
 }
 
 // Upload stores a new file called name in a folder of the place (nil: its top folder) and returns it as the index now
-// holds it. body must hold exactly size bytes; they stream straight through to the storage in one PUT, which writes
-// the whole file or nothing, so a cut-off upload leaves nothing behind.
+// holds it. body must hold exactly size bytes. They stream straight through to a file of their own in the uploads
+// folder on the storage, in one PUT, which writes the whole file or nothing; only then is it moved into its folder. A
+// cut-off upload leaves nothing in the folder.
 //
 // When the name is taken, existing decides: ask (a *Taken error before any byte is sent), replace a file, or keep both
 // under a new name. A folder is never replaced. Another upload of the same name still in flight is ErrBusy. by is the
@@ -120,82 +121,41 @@ func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, n
 		return Upload{}, ErrBusy
 	}
 	defer release()
-
-	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
-	there, err := d.storage.Stat(sctx, file)
-	cancel()
-	var replacing bool
-	switch {
-	case errors.Is(err, storage.ErrNotFound):
-	case err != nil:
-		return Upload{}, storageError(err)
-	case existing == Replace && !there.Folder:
-		replacing = true
-	case existing == KeepBoth:
-		var releaseOther func()
-		name, releaseOther, err = d.freeName(ctx, dir, name, false)
-		if err != nil {
-			return Upload{}, err
-		}
-		defer releaseOther()
-		file, _ = pathIn(dir, name)
-	default:
-		return Upload{}, &Taken{Name: name, Folder: there.Folder}
+	if err := d.askFirst(ctx, file, name, existing); err != nil {
+		return Upload{}, err
 	}
-
-	var out Upload
-	if replacing {
-		// The file there goes to the trash first, and comes back if the upload fails. (With the hidden uploads folder,
-		// a later ticket, the upload is stored first and the two swap places at the end.)
-		replaced, undo, err := d.putAside(ctx, p, folder, file, there, by)
-		if err != nil {
-			return Upload{}, err
-		}
-		if replaced != nil {
-			out.Replaced = replaced
-			defer func() {
-				if out.Item.ID == 0 {
-					undo()
-				}
-			}()
-		}
+	if err := d.makeUploadsFolder(ctx); err != nil {
+		return Upload{}, err
 	}
 
 	// The upload's own length bounds it, and the person's leaving ends it; no other deadline applies.
+	partial := partialOf(newUploadID())
 	from := &bodyReader{r: body}
-	err = d.storage.Put(ctx, file, from, size)
+	err = d.storage.Put(ctx, partial, from, size)
 	switch {
 	case from.err != nil:
+		d.removePartial(ctx, partial) // a storage other than Apache may keep what arrived
 		return Upload{}, fmt.Errorf("%w: %w", ErrCutOff, from.err)
-	case errors.Is(err, storage.ErrExists):
-		return Upload{}, &Taken{Name: name}
-	case errors.Is(err, storage.ErrNotFound):
-		// The folder is gone from the storage. A place's top folder is made again, so the next try works.
-		if err := d.ensureTop(context.WithoutCancel(ctx), p, folder); err != nil {
-			d.log.Error("a place's top folder could not be made again", "folder", p.Folder, "error", err)
-		}
-		return Upload{}, ErrGone
 	case errors.Is(err, storage.ErrFull):
 		return Upload{}, ErrFull
 	case err != nil:
 		return Upload{}, storageError(err)
 	}
-
-	// Size and time as the storage records them. If it cannot say right now, the file is there all the same: use what
-	// the Drive knows, and the next listing corrects it.
-	seen := index.Seen{Name: name, Size: size, Changed: d.now().UTC()}
-	sctx, cancel = context.WithTimeout(ctx, storageTimeout)
-	if e, err := d.storage.Stat(sctx, file); err == nil && !e.Folder {
-		seen.Size, seen.Changed = e.Size, e.Changed
-	}
-	cancel()
-	d.changed(folderKey{p.ID, folderID(folder)})
-	it, err := d.index.PutItem(ctx, p.ID, folderID(folder), seen)
+	up, err := d.settle(ctx, p, folder, dir, name, existing, partial, by)
 	if err != nil {
+		d.removePartial(ctx, partial)
 		return Upload{}, err
 	}
-	out.Item = it
-	return out, nil
+	return up, nil
+}
+
+// removePartial removes an upload's file from the uploads folder, after an upload that did not end in its folder.
+func (d *Drive) removePartial(ctx context.Context, partial string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storageTimeout)
+	defer cancel()
+	if err := d.storage.Delete(ctx, partial); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		d.log.Warn("an upload's file could not be removed from the uploads folder; it is removed within a day", "file", partial, "error", err)
+	}
 }
 
 // freeName finds a name in the folder at dir that nothing on the storage or in flight uses: name with " (2)", " (3)"
@@ -266,8 +226,16 @@ func (b *bodyReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Download starts reading the file item in the place, whole. Close the file when done.
-func (d *Drive) Download(ctx context.Context, p index.Place, it index.Item) (*storage.File, error) {
+// A NoSuchRange error says that the part of a file a download asked for starts after its end. Size is the file's
+// size, or -1 when the storage could not say.
+type NoSuchRange struct{ Size int64 }
+
+func (n *NoSuchRange) Error() string { return "the part asked for starts after the end of the file" }
+
+// Download starts reading the file item in the place: whole when r is nil, or the part r asks for, unless ifRange (the
+// If-Range a browser sent, or "") says the browser's copy is of an older version of the file; then it is read whole.
+// Close its Body when done. A part that starts after the file's end is a *NoSuchRange error.
+func (d *Drive) Download(ctx context.Context, p index.Place, it index.Item, r *storage.Range, ifRange string) (*storage.Reading, error) {
 	if it.Folder {
 		return nil, ErrNotAFile
 	}
@@ -275,9 +243,18 @@ func (d *Drive) Download(ctx context.Context, p index.Place, it index.Item) (*st
 	if !ok {
 		return nil, ErrGone
 	}
-	f, err := d.storage.Open(ctx, file)
-	if errors.Is(err, storage.ErrNotFound) {
+	f, err := d.storage.Read(ctx, file, r, ifRange)
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
 		return nil, ErrGone
+	case errors.Is(err, storage.ErrNoSuchRange):
+		size := int64(-1)
+		sctx, cancel := context.WithTimeout(ctx, storageTimeout)
+		defer cancel()
+		if e, err := d.storage.Stat(sctx, file); err == nil && !e.Folder {
+			size = e.Size
+		}
+		return nil, &NoSuchRange{Size: size}
 	}
 	return f, storageError(err)
 }

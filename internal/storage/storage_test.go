@@ -263,6 +263,75 @@ func TestOpenPartAsksForTheRangeAndChecksTheAnswer(t *testing.T) {
 	}
 }
 
+// Reading a file whole or in part, as a download asks for it, is tested against real Apache in the test/ package. This
+// covers what is asked for and how each answer is read: the part must be the one asked for, or the whole file.
+func TestReadAsksForTheRangeAndChecksTheAnswer(t *testing.T) {
+	part := func(first, last int64) *Range { return &Range{First: first, Last: last} }
+	cases := []struct {
+		name         string
+		r            *Range
+		ifRange      string
+		status       int
+		contentRange string
+		length       int
+		wantErr      error // nil for success; errOther for an error of its own
+		wantRange    string
+		wantPart     bool
+	}{
+		{"the whole file", nil, "", http.StatusOK, "", 3000, nil, "", false},
+		{"a part", part(1000, 1999), "", http.StatusPartialContent, "bytes 1000-1999/3000", 1000, nil, "bytes=1000-1999", true},
+		{"a part past the end, cut at the end", part(2500, 4000), "", http.StatusPartialContent, "bytes 2500-2999/3000", 500, nil, "bytes=2500-4000", true},
+		{"to the end", &Range{First: 2000, Last: -1}, "", http.StatusPartialContent, "bytes 2000-2999/3000", 1000, nil, "bytes=2000-", true},
+		{"the last bytes", &Range{Suffix: 100}, "", http.StatusPartialContent, "bytes 2900-2999/3000", 100, nil, "bytes=-100", true},
+		{"more last bytes than the file has", &Range{Suffix: 5000}, "", http.StatusPartialContent, "bytes 0-2999/3000", 3000, nil, "bytes=-5000", true},
+		{"the whole file instead, If-Range no longer matching", part(0, 9), `"old"`, http.StatusOK, "", 3000, nil, "bytes=0-9", false},
+		{"another part", part(1000, 1999), "", http.StatusPartialContent, "bytes 0-999/3000", 1000, errOther, "bytes=1000-1999", false},
+		{"a longer part", part(1000, 1999), "", http.StatusPartialContent, "bytes 1000-2999/3000", 2000, errOther, "bytes=1000-1999", false},
+		{"no whole length", part(1000, 1999), "", http.StatusPartialContent, "bytes 1000-1999/*", 1000, errOther, "bytes=1000-1999", false},
+		{"no Content-Range", part(1000, 1999), "", http.StatusPartialContent, "", 1000, errOther, "bytes=1000-1999", false},
+		{"a part nobody asked for", nil, "", http.StatusPartialContent, "bytes 0-9/3000", 10, errOther, "", false},
+		{"after the end", part(5000, 5999), "", http.StatusRequestedRangeNotSatisfiable, "", 0, ErrNoSuchRange, "bytes=5000-5999", false},
+		{"a folder", nil, "", http.StatusMovedPermanently, "", 0, ErrNotFound, "", false},
+		{"no file", nil, "", http.StatusNotFound, "", 0, ErrNotFound, "", false},
+		{"a refusal", nil, "", http.StatusForbidden, "", 0, errOther, "", false},
+	}
+	for _, c := range cases {
+		var path, rangeHeader, ifRange, encoding string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path, rangeHeader, ifRange, encoding = r.URL.EscapedPath(), r.Header.Get("Range"), r.Header.Get("If-Range"), r.Header.Get("Accept-Encoding")
+			if c.contentRange != "" {
+				w.Header().Set("Content-Range", c.contentRange)
+			}
+			w.Header().Set("ETag", `"abc"`)
+			w.Header().Set("Last-Modified", "Thu, 19 Nov 2026 18:58:14 GMT")
+			w.Header().Set("Content-Length", strconv.Itoa(c.length))
+			w.WriteHeader(c.status)
+			_, _ = w.Write([]byte(strings.Repeat("x", c.length)))
+		}))
+		base, _ := url.Parse(srv.URL)
+		f, err := New(base, "u", "p", "/drive").Read(context.Background(), "My files/r/a b.bin", c.r, c.ifRange)
+		if err == nil {
+			data, _ := io.ReadAll(f.Body)
+			f.Body.Close()
+			if f.Length != int64(c.length) || len(data) != c.length || f.Partial != c.wantPart {
+				t.Errorf("%s: got %d bytes announced as %d, partial %v; want %d, partial %v", c.name, len(data), f.Length, f.Partial, c.length, c.wantPart)
+			}
+			if f.ETag != `"abc"` || f.Modified != "Thu, 19 Nov 2026 18:58:14 GMT" {
+				t.Errorf("%s: validators %q %q", c.name, f.ETag, f.Modified)
+			}
+			if f.Partial && (f.Total != 3000 || f.Last-f.First+1 != int64(c.length)) {
+				t.Errorf("%s: bytes %d to %d of %d", c.name, f.First, f.Last, f.Total)
+			}
+		}
+		srv.Close()
+		checkErr(t, c.name, err, c.wantErr)
+		wantIfRange := c.ifRange
+		if path != "/drive/My%20files/r/a%20b.bin" || rangeHeader != c.wantRange || ifRange != wantIfRange || encoding != "identity" {
+			t.Errorf("%s: asked for %s with Range %q, If-Range %q and Accept-Encoding %q", c.name, path, rangeHeader, ifRange, encoding)
+		}
+	}
+}
+
 func TestPutPartSaysWhereThePartGoes(t *testing.T) {
 	var method, contentRange, ifNoneMatch, body string
 	var length int64

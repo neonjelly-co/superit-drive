@@ -508,3 +508,101 @@ func TestAGrantOnAnItemLivesAndGoesWithIt(t *testing.T) {
 		t.Fatalf("%d grants left in the index (%v)", left, err)
 	}
 }
+
+// An upload in progress is found only in its place and only for the member who started it, and it goes when the
+// folder it goes into is removed for good.
+func TestAnUploadIsOnlyItsMembersAndGoesWithItsFolder(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	now := time.Now()
+	bence, reka := place(t, x, "u-bence"), place(t, x, "u-reka")
+	clients := put(t, x, bence, 0, "Clients", true, 0)
+	into := Upload{ID: "0123456789abcdef0123456789abcdef", PlaceID: bence.ID, FolderID: clients.ID, Member: "u-bence",
+		Name: "Big.bin", Size: 1 << 30, Started: now, Touched: now}
+	top := Upload{ID: "fedcba9876543210fedcba9876543210", PlaceID: bence.ID, Member: "u-bence", Name: "Top.bin", Size: 5,
+		Started: now, Touched: now.Add(-2 * time.Hour)}
+	for _, u := range []Upload{into, top} {
+		if err := x.AddUpload(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := x.UploadOf(ctx, bence.ID, into.ID, "u-bence")
+	if err != nil || got.FolderID != clients.ID || got.Name != "Big.bin" || got.Size != 1<<30 || got.Touched.UnixMilli() != now.UnixMilli() {
+		t.Fatalf("Bence's upload: %+v, %v", got, err)
+	}
+	if got, err := x.UploadOf(ctx, bence.ID, top.ID, "u-bence"); err != nil || got.FolderID != 0 {
+		t.Fatalf("the upload into the top folder: %+v, %v", got, err)
+	}
+	for what, find := range map[string]func() error{
+		"by another member":       func() error { _, err := x.UploadOf(ctx, bence.ID, into.ID, "u-reka"); return err },
+		"through another place":   func() error { _, err := x.UploadOf(ctx, reka.ID, into.ID, "u-bence"); return err },
+		"an id that is not there": func() error { _, err := x.UploadOf(ctx, bence.ID, "00000000000000000000000000000000", "u-bence"); return err },
+	} {
+		if err := find(); !errors.Is(err, ErrNoUpload) {
+			t.Errorf("finding it %s: %v, want ErrNoUpload", what, err)
+		}
+	}
+
+	if old, err := x.UploadsTouchedBefore(ctx, now.Add(-time.Hour)); err != nil || len(old) != 1 || old[0].ID != top.ID {
+		t.Fatalf("uploads untouched for an hour: %+v, %v", old, err)
+	}
+	if err := x.TouchUpload(ctx, top.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if old, _ := x.UploadsTouchedBefore(ctx, now.Add(-time.Hour)); len(old) != 0 {
+		t.Fatalf("uploads untouched for an hour, after a part arrived: %+v", old)
+	}
+
+	// Clients removed for good: the upload into it goes too.
+	if _, err := x.db.ExecContext(ctx, "DELETE FROM items WHERE id = ?", clients.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.UploadOf(ctx, bence.ID, into.ID, "u-bence"); !errors.Is(err, ErrNoUpload) {
+		t.Fatalf("the upload into a folder removed for good: %v", err)
+	}
+	if err := x.RemoveUpload(ctx, top.ID); err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := x.UploadIDs(ctx); err != nil || len(ids) != 0 {
+		t.Fatalf("uploads left: %v, %v", ids, err)
+	}
+	// Not into a folder of another place.
+	if err := x.AddUpload(ctx, Upload{ID: into.ID, PlaceID: reka.ID, FolderID: put(t, x, bence, 0, "Other", true, 0).ID,
+		Member: "u-reka", Name: "x", Size: 1, Started: now, Touched: now}); err == nil {
+		t.Fatal("the index holds an upload in one place into a folder of another")
+	}
+}
+
+// What a zip of some items would hold, as the index knows it: the items and everything inside them, and nothing in
+// the trash or in another place.
+func TestCountInside(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	bence, reka := place(t, x, "u-bence"), place(t, x, "u-reka")
+	clients := put(t, x, bence, 0, "Clients", true, 0)
+	bakery := put(t, x, bence, clients.ID, "Bakery", true, 0)
+	put(t, x, bence, bakery.ID, "Offer.pdf", false, 1)
+	put(t, x, bence, bakery.ID, "Ledger.xlsx", false, 1)
+	old := put(t, x, bence, clients.ID, "Old.pdf", false, 1)
+	notes := put(t, x, bence, 0, "Notes.txt", false, 1)
+	hers := put(t, x, reka, 0, "Hers.txt", false, 1)
+	if err := x.Trash(ctx, bence.ID, old.ID, time.Now(), "entry", "u-bence"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		ids   []int64
+		limit int
+		want  int
+	}{
+		{[]int64{clients.ID}, 100, 4},
+		{[]int64{clients.ID, notes.ID}, 100, 5},
+		{[]int64{clients.ID, notes.ID}, 3, 3},
+		{[]int64{bakery.ID}, 100, 3},
+		{[]int64{old.ID, hers.ID}, 100, 0},
+		{nil, 100, 0},
+	} {
+		if n, err := x.CountInside(ctx, bence.ID, c.ids, c.limit); err != nil || n != c.want {
+			t.Errorf("%v up to %d: got %d, %v; want %d", c.ids, c.limit, n, err, c.want)
+		}
+	}
+}

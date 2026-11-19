@@ -20,10 +20,14 @@
 //	        Shared folders/Payroll/
 //	            2026-11-19 0c41d2aa/Payroll     a deleted shared folder: its whole top folder, beside what was deleted
 //	                                            from it, until it is restored or removed for good with its trash
+//	    uploads/
+//	        3f9c0b…e1                           one file per upload while its bytes arrive, named after a random id;
+//	                                            moved into its folder when whole
 //
-// The hidden folders for uploads in progress and the index copy are added by the tickets that bring them.
+// The hidden folder for the index copy is added by the ticket that brings it.
 //
-// Every change is two steps, the storage and then the index. files.go has uploads, downloads and the name rules,
+// Every change is two steps, the storage and then the index. files.go has uploads in one request, downloads and the
+// name rules, uploads.go resumable uploads and moving any upload into place, zip.go folders downloaded as one zip,
 // folders.go new folders, renames and moves, trash.go the trash, shared.go shared folders, sharing.go the access given
 // on places and items, and this file the places, paths and listings.
 package drive
@@ -90,6 +94,10 @@ type Drive struct {
 
 	// locks holds one lock per place: see inPlace and wholePlace.
 	locks placeLocks
+
+	// resume is whether the storage can resume an upload (CanResume), once it is known.
+	resumeMu sync.Mutex
+	resume   resumeState
 }
 
 // New makes a Drive.

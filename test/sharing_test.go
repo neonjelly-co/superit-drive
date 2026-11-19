@@ -500,7 +500,7 @@ func TestSharingInASharedFolder(t *testing.T) {
 	// Viewer on it as a whole: it is in her places, she opens everything, and changes nothing.
 	ok(t, "Dóra a viewer of Clients", share(t, b, clients.ID, 0, dora, "viewer"))
 	p, sees := seesSharedFolder(t, d, dora, clients.ID)
-	if !sees || p.Role != "viewer" || !slices.Equal(p.Can, []string{"list", "see-access"}) {
+	if !sees || p.Role != "viewer" || !slices.Equal(p.Can, []string{"list", "download", "see-access"}) {
 		t.Fatalf("Dóra's view of Clients: %+v, %v", p, sees)
 	}
 	if res := o.Get(t, downloadPath(clients.ID, offer.ID)); res.Status != http.StatusOK {

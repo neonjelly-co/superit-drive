@@ -2,9 +2,13 @@
 //
 // Every route is listed in routes.go and registered in Handler, and nowhere else. Each request passes the same steps
 // in guard before its handler runs: who is asking (identify), whether a change came from the Drive's own pages
-// (fromOwnPage), which place it concerns (if any), which item in that place or in its trash (if any), the access given
-// on the place and on the way down to the item (accessAt), and whether they may (access.Decide). A handler only ever
-// sees a request that passed them all. A test fails if anything outside this file registers a handler.
+// (fromOwnPage), which place it concerns (if any), which item in that place or in its trash, or which of the person's
+// own uploads in progress into it (if any), the access given on the place and on the way down to the item
+// (accessAt), and whether they may (access.Decide). A handler only ever sees a request that passed them all. A test
+// fails if anything outside this file registers a handler.
+//
+// transfers.go has the routes that move a file's bytes (downloads, zips, uploads), which take turns for the transfer
+// slots (package transfers).
 package server
 
 import (
@@ -23,6 +27,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/members"
+	"github.com/neonjelly-co/superit-drive/internal/transfers"
 )
 
 // Config is what the server needs.
@@ -51,12 +56,14 @@ type Server struct {
 	capacity int64
 	ui       fs.FS
 	log      *slog.Logger
+	// slots lets at most transfers.Slots transfers be in flight.
+	slots *transfers.Gate
 }
 
 // New makes a server.
 func New(c Config) *Server {
 	s := &Server{project: c.ProjectName, secret: c.HeaderSecret, members: c.Members, drive: c.Drive, capacity: c.Capacity,
-		ui: c.Interface, log: c.Log}
+		ui: c.Interface, log: c.Log, slots: transfers.NewGate(transfers.Slots)}
 	if c.Address != nil {
 		s.origin = originOf(c.Address)
 	}
@@ -78,7 +85,11 @@ type route struct {
 	item string
 	// trashed is, instead, the name of the path value holding the id of an item in that place's trash.
 	trashed string
-	serve   func(http.ResponseWriter, *http.Request, call)
+	// upload is, instead, the name of the path value holding the id of an upload in progress into a folder of that
+	// place, by the person asking: the request is about the folder it goes into, as an upload into it is. Another
+	// person's upload is not found.
+	upload string
+	serve  func(http.ResponseWriter, *http.Request, call)
 }
 
 // call is what a handler gets: who is asking, the place the request concerns (nil for no place), the item in it or in
@@ -91,20 +102,23 @@ type call struct {
 	trashed *index.TrashItem
 	// backTo is, for an item in the trash, the folder it goes back to when restored (nil: the place's top folder).
 	backTo *index.Item
+	// upload is the person's upload in progress the request is about; item is then the folder it goes into (nil: the
+	// place's top folder).
+	upload *index.Upload
 }
 
 // Handler is the Drive's whole HTTP handler. This is the only place routes are registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	for _, rt := range s.routes() {
-		if (rt.item != "" || rt.trashed != "" || rt.inTrash) && rt.place == "" {
-			panic("server: route " + rt.pattern + " names an item, or a place in the trash, but no place")
+		if (rt.item != "" || rt.trashed != "" || rt.upload != "" || rt.inTrash) && rt.place == "" {
+			panic("server: route " + rt.pattern + " names an item, an upload or a place in the trash, but no place")
 		}
-		if rt.item != "" && rt.trashed != "" {
-			panic("server: route " + rt.pattern + " names an item both in a place and in its trash")
+		if (rt.item != "" && rt.trashed != "") || (rt.upload != "" && (rt.item != "" || rt.trashed != "")) {
+			panic("server: route " + rt.pattern + " names more than one of an item, an item in the trash and an upload")
 		}
-		if rt.inTrash && (rt.item != "" || rt.trashed != "") {
-			panic("server: route " + rt.pattern + " names an item in a place in the trash")
+		if rt.inTrash && (rt.item != "" || rt.trashed != "" || rt.upload != "") {
+			panic("server: route " + rt.pattern + " names an item or an upload in a place in the trash")
 		}
 		mux.Handle(rt.pattern, s.guard(rt))
 	}
@@ -142,8 +156,9 @@ func (s *Server) guard(rt route) http.Handler {
 	})
 }
 
-// findWhere finds the place a route concerns and the item in it, or in its trash, and gathers the access given on
-// the place's top folder and on the way down to the item. ok is false when the person was already answered.
+// findWhere finds the place a route concerns and the item in it, or in its trash, or the person's upload in progress
+// into it, and gathers the access given on the place's top folder and on the way down to the item (for an upload, the
+// folder it goes into). ok is false when the person was already answered.
 //
 // The item is looked up before access decides, because what someone may do at an item depends on where it is. It is
 // looked up only inside the place, so an item of another place is never found. Every refusal, and every place or item
@@ -195,6 +210,33 @@ func (s *Server) findWhere(w http.ResponseWriter, r *http.Request, rt route, c *
 			path = pathTo(*c.backTo)
 		}
 		path = append(path, t.Item)
+	}
+	if rt.upload != "" {
+		// Found only among the person's own uploads in this place: another person's is not there for them.
+		u, err := s.drive.UploadOf(r.Context(), p, r.PathValue(rt.upload), c.member.UserID)
+		if errors.Is(err, index.ErrNoUpload) {
+			s.refuse(w, r, http.StatusNotFound, notHere)
+			return false
+		}
+		if err != nil {
+			s.fail(w, r, err)
+			return false
+		}
+		c.upload = &u
+		if u.FolderID != 0 {
+			// Decided where it goes, as an upload into that folder is: the folder must still be in the place.
+			folder, err := s.drive.Item(r.Context(), p, u.FolderID)
+			if errors.Is(err, index.ErrNoItem) || (err == nil && !folder.Folder) {
+				s.refuse(w, r, http.StatusNotFound, notHere)
+				return false
+			}
+			if err != nil {
+				s.fail(w, r, err)
+				return false
+			}
+			c.item = &folder
+			path = pathTo(folder)
+		}
 	}
 	if c.access, err = s.accessAt(r.Context(), p, idsOf(path)); err != nil {
 		s.fail(w, r, err)

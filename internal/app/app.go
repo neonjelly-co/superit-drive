@@ -64,14 +64,15 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 		Log:          log,
 	})
 
-	// Removes what has been in the trash for 30 days: now, and every hour while the Drive runs.
-	trashCtx, stopTrash := context.WithCancel(ctx)
-	trashDone := make(chan struct{})
+	// Removes what has been in the trash for 30 days, and uploads abandoned for a day: now, and every hour while the
+	// Drive runs.
+	tidyCtx, stopTidy := context.WithCancel(ctx)
+	tidyDone := make(chan struct{})
 	go func() {
-		defer close(trashDone)
-		d.EmptyTrash(trashCtx, time.Hour)
+		defer close(tidyDone)
+		d.Tidy(tidyCtx, time.Hour)
 	}()
-	defer func() { stopTrash(); <-trashDone }() // before the index closes
+	defer func() { stopTidy(); <-tidyDone }() // before the index closes
 
 	// Every connection's network buffers are capped (package transfers).
 	ln, err := transfers.Listen(s.Listen)
