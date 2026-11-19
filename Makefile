@@ -4,7 +4,7 @@ BIN     := bin/superit-drive
 IMAGE   := superit-drive:dev
 STORAGE := superit-drive-dev-storage
 
-.PHONY: help ui build test test-short image dev-storage run dev-ui check-storage
+.PHONY: help ui build test test-short test-memory image dev-storage run dev-ui check-storage
 
 help:
 	@grep -E '^[a-z-]+:.*## ' Makefile | sed 's/:.*## /\t/'
@@ -20,6 +20,9 @@ test: ## Run every test (needs Docker running)
 
 test-short: ## Run only the tests that need no Docker
 	go test -short ./...
+
+test-memory: ## Run the image in a 64 MiB container under 40 downloads and 10 uploads of 256 MiB at once (slow; needs Docker)
+	go test -tags memory -count=1 -v -timeout 30m ./test/memory/
 
 image: ## Build the container image superit-drive:dev
 	docker build -t $(IMAGE) .
