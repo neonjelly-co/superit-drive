@@ -193,10 +193,26 @@ type Seen struct {
 	Changed time.Time
 }
 
+// ErrNoItem is returned when an item does not exist where it was looked for.
+var ErrNoItem = errors.New("no such item")
+
+const itemColumns = "id, place_id, name, is_folder, size, changed_at"
+
+func scanItem(row interface{ Scan(...any) error }) (Item, error) {
+	var it Item
+	var changed int64
+	err := row.Scan(&it.ID, &it.PlaceID, &it.Name, &it.Folder, &it.Size, &changed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Item{}, ErrNoItem
+	}
+	it.Changed = time.Unix(changed, 0).UTC()
+	return it, err
+}
+
 // TopItems returns what is directly in the place's top folder, folders first, then by name.
 func (x *Index) TopItems(ctx context.Context, placeID int64) ([]Item, error) {
 	rows, err := x.db.QueryContext(ctx, `
-		SELECT id, place_id, name, is_folder, size, changed_at FROM items
+		SELECT `+itemColumns+` FROM items
 		WHERE place_id = ? AND parent_id IS NULL
 		ORDER BY is_folder DESC, name`, placeID)
 	if err != nil {
@@ -205,15 +221,32 @@ func (x *Index) TopItems(ctx context.Context, placeID int64) ([]Item, error) {
 	defer rows.Close()
 	var items []Item
 	for rows.Next() {
-		var it Item
-		var changed int64
-		if err := rows.Scan(&it.ID, &it.PlaceID, &it.Name, &it.Folder, &it.Size, &changed); err != nil {
+		it, err := scanItem(rows)
+		if err != nil {
 			return nil, err
 		}
-		it.Changed = time.Unix(changed, 0).UTC()
 		items = append(items, it)
 	}
 	return items, rows.Err()
+}
+
+// TopItem finds the item with id directly in the place's top folder. It returns ErrNoItem for an id that is not
+// there, including one in another place: an item is only ever found inside the place it belongs to. (Items deeper in
+// folders arrive with folders, and with them a lookup that walks the tree.)
+func (x *Index) TopItem(ctx context.Context, placeID, id int64) (Item, error) {
+	return scanItem(x.db.QueryRowContext(ctx,
+		"SELECT "+itemColumns+" FROM items WHERE id = ? AND place_id = ? AND parent_id IS NULL", id, placeID))
+}
+
+// PutTopItem records one item the storage now has in the place's top folder, such as a file just uploaded, keeping
+// the id of a known name, and returns it.
+func (x *Index) PutTopItem(ctx context.Context, placeID int64, s Seen) (Item, error) {
+	return scanItem(x.db.QueryRowContext(ctx, `
+		INSERT INTO items (place_id, parent_id, name, is_folder, size, changed_at) VALUES (?, NULL, ?, ?, ?, ?)
+		ON CONFLICT (place_id, IFNULL(parent_id, 0), name) DO UPDATE
+		SET is_folder = excluded.is_folder, size = excluded.size, changed_at = excluded.changed_at
+		RETURNING `+itemColumns,
+		placeID, s.Name, s.Folder, s.Size, s.Changed.Unix()))
 }
 
 // SetTopItems brings the index in step with what the storage showed in the place's top folder: new names are added,

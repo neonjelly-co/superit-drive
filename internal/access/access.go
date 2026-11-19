@@ -5,8 +5,8 @@
 // The package knows nothing about HTTP, the index or the storage. Callers describe who is asking, what they want to do
 // and where, and get a yes or a no. That keeps the rules in one place where a table test can cover every case.
 //
-// Version 1 so far: a member may use the Drive and may list their own "My files". Shared folders, sharing, guests and
-// public links add their rules here.
+// Version 1 so far: a member may use the Drive, and may list, download from and upload into their own "My files".
+// Shared folders, sharing, guests and public links add their rules here.
 package access
 
 import "github.com/neonjelly-co/superit-drive/internal/members"
@@ -40,6 +40,10 @@ const (
 	Enter Action = "enter"
 	// List is seeing what is in a folder of a place.
 	List Action = "list"
+	// Download is reading a file's content. A viewer may, once sharing exists ("open and download").
+	Download Action = "download"
+	// Upload is putting a new file into a folder of a place. An editor may, once sharing exists; a viewer may not.
+	Upload Action = "upload"
 )
 
 // Decide says whether person may do action in place. place is nil for actions that concern no place.
@@ -51,7 +55,7 @@ func Decide(person Person, action Action, place *Place) bool {
 	switch action {
 	case Enter:
 		return place == nil
-	case List:
+	case List, Download, Upload:
 		return place != nil && ownsMyFiles(person, place)
 	}
 	return false

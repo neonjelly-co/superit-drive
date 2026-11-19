@@ -20,14 +20,18 @@ func TestDecide(t *testing.T) {
 
 	people := map[string]Person{"member": reka, "admin": admin, "no user id": nobody}
 	places := map[string]*Place{"no place": nil, "Réka's My files": rekasFiles, "the admin's My files": adminsFiles, "My files without an owner": ownerless}
-	actions := []Action{Enter, List}
+	actions := []Action{Enter, List, Download, Upload}
 
 	// Every combination that is allowed. Everything else must be refused.
 	allowed := map[string]bool{
-		"member enter no place":           true,
-		"admin enter no place":            true,
-		"member list Réka's My files":     true,
-		"admin list the admin's My files": true,
+		"member enter no place":               true,
+		"admin enter no place":                true,
+		"member list Réka's My files":         true,
+		"admin list the admin's My files":     true,
+		"member download Réka's My files":     true,
+		"admin download the admin's My files": true,
+		"member upload Réka's My files":       true,
+		"admin upload the admin's My files":   true,
 	}
 
 	for pn, p := range people {
