@@ -388,6 +388,13 @@ func (d *Drive) WithHeaders(h http.Header) *Client {
 	return &Client{base: d.URL, headers: h}
 }
 
+// With is the same client, also sending the header name with value on every request.
+func (c *Client) With(name, value string) *Client {
+	h := c.headers.Clone()
+	h.Set(name, value)
+	return &Client{base: c.base, headers: h, origin: c.origin}
+}
+
 // Client makes requests to a Drive.
 type Client struct {
 	base    string

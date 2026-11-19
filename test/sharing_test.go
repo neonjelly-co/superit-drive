@@ -682,6 +682,12 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 	payroll := madeSharedFolder(t, b, "Payroll")
 	slip := uploadedInto(t, b, payroll.ID, 0, "Slip.pdf", []byte("slip"))
 	nowhere := slip.ID + x.notes.ID + 1000
+	// Uploads in progress that are not hers: Bence's into Clients and into Bakery (which she was given), and Réka's.
+	notHers := map[string]string{
+		"Bence's upload into Clients":  startedUpload(t, b, x.place, x.clients.ID, "Contract.pdf", 10).ID,
+		"Bence's upload into Bakery":   startedUpload(t, b, x.place, x.bakery.ID, "Invoice.pdf", 10).ID,
+		"Réka's upload into her files": startedUpload(t, d.As(reka), rekas, 0, "Mine.pdf", 10).ID,
+	}
 
 	type try struct{ method, path, body string }
 	at := func(f string, a ...any) string { return fmt.Sprintf(f, a...) }
@@ -702,6 +708,16 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 			"POST /api/places/{place}/items/{item}/move":              {"POST", at("/api/places/%d/items/%d/move", x.place, item), fmt.Sprintf(`{"to":%d}`, x.bakery.ID)},
 			"DELETE /api/places/{place}/items/{item}":                 {"DELETE", at("/api/places/%d/items/%d", x.place, item), ""},
 			"POST /api/places/{place}/trash/{item}/restore":           {"POST", at("/api/places/%d/trash/%d/restore", x.place, item), ""},
+			"GET /api/places/{place}/items/{item}/zip":                {"GET", zipPath(x.place, item), ""},
+			"POST /api/places/{place}/items/{item}/uploads":           {"POST", uploadsPath(x.place, item) + "?name=Planted.txt&size=1&existing=replace", ""},
+		}
+	}
+	uploadTries := func(id string) map[string]try {
+		return map[string]try{
+			"GET /api/places/{place}/uploads/{upload}":         {"GET", sessionPath(x.place, id), ""},
+			"PUT /api/places/{place}/uploads/{upload}":         {"PUT", sessionPath(x.place, id) + "?offset=0", "x"},
+			"POST /api/places/{place}/uploads/{upload}/finish": {"POST", sessionPath(x.place, id) + "/finish?existing=replace", ""},
+			"DELETE /api/places/{place}/uploads/{upload}":      {"DELETE", sessionPath(x.place, id), ""},
 		}
 	}
 	send := func(c *harness.Client, t2 try) harness.Response {
@@ -711,8 +727,8 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 		}
 		return c.Do(t, t2.method, t2.path, body)
 	}
-	if n := len(tries(0)); n != 13 {
-		t.Fatalf("the test tries %d routes that take an item; internal/server/server_test.go lists 13", n)
+	if n := len(tries(0)) + len(uploadTries("")); n != 19 {
+		t.Fatalf("the test tries %d routes that take an item or an upload; internal/server/server_test.go lists 19", n)
 	}
 	none := tries(nowhere)
 	notGiven := map[string]int64{
@@ -730,6 +746,13 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 			sameAs(t, fmt.Sprintf("Dóra: %s with %s", route, what), send(o, tries(id)[route]), missing)
 		}
 	}
+	noUpload := uploadTries("0123456789abcdef0123456789abcdef")
+	for route := range noUpload {
+		missing := send(o, noUpload[route])
+		for what, id := range notHers {
+			sameAs(t, fmt.Sprintf("Dóra: %s with %s", route, what), send(o, uploadTries(id)[route]), missing)
+		}
+	}
 
 	// The place as a whole answers as a place that does not exist.
 	top := func(place int64) map[string]try {
@@ -745,6 +768,8 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 			"DELETE everyone":      {"DELETE", at("/api/places/%d/access/everyone", place), ""},
 			"DELETE place":         {"DELETE", at("/api/places/%d", place), ""},
 			"POST restore":         {"POST", at("/api/places/%d/restore", place), ""},
+			"GET zip":              {"GET", zipPath(place, 0), ""},
+			"POST uploads":         {"POST", uploadsPath(place, 0) + "?name=Planted.txt&size=1", ""},
 		}
 	}
 	for route, x2 := range top(x.place) {
@@ -772,6 +797,9 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 	}
 	if got := onStorage(t, d, "My files/bence@example.com/Clients/Bakery"); !slices.Equal(got, []string{"2026/"}) {
 		t.Errorf("Bakery on the storage: %q", got)
+	}
+	if got := inUploads(t, d.Storage); len(got) != 3 {
+		t.Errorf("the uploads folder: %v, want the three uploads in progress, untouched", got)
 	}
 	want := []string{bence.UserID + " owner (owner)", reka.UserID + " viewer (here)"}
 	if got := accessLines(accessOf(t, b, itemAccessPath(x.place, x.clients.ID))); !slices.Equal(got, want) {

@@ -495,9 +495,13 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 	slip := uploadedInto(t, b, payroll.ID, year.ID, "November.xlsx", []byte("salaries"))
 	old := uploadedInto(t, b, payroll.ID, 0, "Old.zip", []byte("old"))
 	deleted(t, b, payroll.ID, old.ID)
+	// Bence's uploads in progress: into Payroll, into Payroll 2025 before it went to the trash, into his My files.
+	payrollUpload := startedUpload(t, b, payroll.ID, year.ID, "December.xlsx", 10)
 	gone := madeSharedFolder(t, b, "Payroll 2025")
+	goneUpload := startedUpload(t, b, gone.ID, 0, "Old.xlsx", 10)
 	ok(t, "deleting Payroll 2025", deleteSharedFolder(t, b, gone.ID))
 	bences, _ := myFiles(t, d, bence)
+	bencesUpload := startedUpload(t, b, bences, 0, "Payslip.pdf", 10)
 
 	// Dóra's own places, where she may do everything.
 	doras, _ := myFiles(t, d, dora)
@@ -506,7 +510,7 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 	nowhere := payroll.ID + gone.ID + hers.ID + bences + doras + 100
 
 	type try struct{ method, path, body string }
-	tries := func(place, folder, file, trashed int64) map[string]try {
+	tries := func(place, folder, file, trashed int64, upload string) map[string]try {
 		at := func(f string, a ...any) string { return fmt.Sprintf(f, a...) }
 		return map[string]try{
 			"DELETE /api/places/{place}":                         {"DELETE", at("/api/places/%d", place), ""},
@@ -535,6 +539,14 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 			"DELETE /api/places/{place}/items/{item}":                 {"DELETE", at("/api/places/%d/items/%d", place, file), ""},
 			"GET /api/places/{place}/trash":                           {"GET", at("/api/places/%d/trash", place), ""},
 			"POST /api/places/{place}/trash/{item}/restore":           {"POST", at("/api/places/%d/trash/%d/restore", place, trashed), ""},
+			"GET /api/places/{place}/zip":                             {"GET", zipPath(place, 0), ""},
+			"GET /api/places/{place}/items/{item}/zip":                {"GET", zipPath(place, folder), ""},
+			"POST /api/places/{place}/uploads":                        {"POST", uploadsPath(place, 0) + "?name=Planted.txt&size=1&existing=replace", ""},
+			"POST /api/places/{place}/items/{item}/uploads":           {"POST", uploadsPath(place, folder) + "?name=November.xlsx&size=1&existing=replace", ""},
+			"GET /api/places/{place}/uploads/{upload}":                {"GET", sessionPath(place, upload), ""},
+			"PUT /api/places/{place}/uploads/{upload}":                {"PUT", sessionPath(place, upload) + "?offset=0", "x"},
+			"POST /api/places/{place}/uploads/{upload}/finish":        {"POST", sessionPath(place, upload) + "/finish?existing=replace", ""},
+			"DELETE /api/places/{place}/uploads/{upload}":             {"DELETE", sessionPath(place, upload), ""},
 		}
 	}
 	send := func(c *harness.Client, x try) harness.Response {
@@ -545,18 +557,24 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 		return c.Do(t, x.method, x.path, body)
 	}
 
-	none := tries(nowhere, year.ID, slip.ID, old.ID)
+	none := tries(nowhere, year.ID, slip.ID, old.ID, payrollUpload.ID)
+	type placeAndUpload struct {
+		place  int64
+		upload string
+	}
 	for who, c := range map[string]struct {
 		as     *harness.Client
-		places map[string]int64
+		places map[string]placeAndUpload
 	}{
 		// Dóra has no role on Payroll, nor on Payroll 2025 in the trash, and Bence's My files is his alone.
-		"Dóra": {o, map[string]int64{"Payroll": payroll.ID, "Payroll 2025 in the trash": gone.ID, "Bence's My files": bences}},
-		// A project admin manages every shared folder, and still cannot open anyone's My files.
-		"Réka, a project admin": {d.As(reka), map[string]int64{"Bence's My files": bences}},
+		"Dóra": {o, map[string]placeAndUpload{"Payroll": {payroll.ID, payrollUpload.ID},
+			"Payroll 2025 in the trash": {gone.ID, goneUpload.ID}, "Bence's My files": {bences, bencesUpload.ID}}},
+		// A project admin manages every shared folder, and still cannot open anyone's My files; and an upload in
+		// progress is its uploader's alone, even in a shared folder the admin manages.
+		"Réka, a project admin": {d.As(reka), map[string]placeAndUpload{"Bence's My files": {bences, bencesUpload.ID}}},
 	} {
-		for what, place := range c.places {
-			for route, x := range tries(place, year.ID, slip.ID, old.ID) {
+		for what, p := range c.places {
+			for route, x := range tries(p.place, year.ID, slip.ID, old.ID, p.upload) {
 				res, missing := send(c.as, x), send(c.as, none[route])
 				if res.Status != http.StatusNotFound || res.Status != missing.Status || !bytes.Equal(res.Body, missing.Body) {
 					t.Errorf("%s, %s in %s: got %d %s; a place that does not exist answers %d %s",
@@ -569,9 +587,9 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 	// Payroll's items through Dóra's own places, where she may do everything, are not found: an item id from one place
 	// never works through another.
 	for _, own := range []int64{hers.ID, doras} {
-		missing := send(o, tries(own, nowhere, nowhere, nowhere)["GET /api/places/{place}/items/{item}/download"])
-		for route, x := range tries(own, year.ID, slip.ID, old.ID) {
-			if !strings.Contains(route, "{item}") {
+		missing := send(o, tries(own, nowhere, nowhere, nowhere, payrollUpload.ID)["GET /api/places/{place}/items/{item}/download"])
+		for route, x := range tries(own, year.ID, slip.ID, old.ID, payrollUpload.ID) {
+			if !strings.Contains(route, "{item}") && !strings.Contains(route, "{upload}") {
 				continue
 			}
 			res := send(o, x)
@@ -597,6 +615,18 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 	if got := onStorage(t, d, "Shared folders/Payroll"); !slices.Equal(got, []string{"2026/"}) {
 		t.Errorf("Payroll on the storage: %q", got)
 	}
+	if got := onStorage(t, d, "Shared folders/Payroll/2026"); !slices.Equal(got, []string{"November.xlsx"}) {
+		t.Errorf("Payroll's 2026 on the storage: %q", got)
+	}
+	if got := inUploads(t, d.Storage); len(got) != 3 {
+		t.Errorf("the uploads folder: %v, want Bence's three uploads in progress, untouched", got)
+	}
+	// Admins included: Bence's uploads are still his, and Réka's own into Payroll is hers.
+	if s := stateOf(t, b, payroll.ID, payrollUpload.ID); s.Offset != 0 {
+		t.Errorf("Bence's upload into Payroll: %+v", s)
+	}
+	sameAs(t, "Réka with Bence's upload into Payroll, which she manages", d.As(reka).Get(t, sessionPath(payroll.ID, payrollUpload.ID)),
+		d.As(reka).Get(t, sessionPath(payroll.ID, "0123456789abcdef0123456789abcdef")))
 	if got, _ := d.Storage.Get(t, "Shared folders/Payroll/2026/November.xlsx"); string(got) != "salaries" {
 		t.Errorf("November.xlsx holds %q", got)
 	}
