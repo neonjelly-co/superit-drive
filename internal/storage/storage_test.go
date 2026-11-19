@@ -188,6 +188,15 @@ func TestPathsCannotLeaveTheDrivesFolder(t *testing.T) {
 		if err := c.Move(context.Background(), "a.txt", p); !errors.Is(err, ErrBadPath) {
 			t.Errorf("Move(a.txt, %q): got %v, want ErrBadPath", p, err)
 		}
+		if err := c.MoveFolder(context.Background(), p, "a"); !errors.Is(err, ErrBadPath) {
+			t.Errorf("MoveFolder(%q, a): got %v, want ErrBadPath", p, err)
+		}
+		if err := c.MoveFolder(context.Background(), "a", p); !errors.Is(err, ErrBadPath) {
+			t.Errorf("MoveFolder(a, %q): got %v, want ErrBadPath", p, err)
+		}
+		if err := c.CreateFolder(context.Background(), p); !errors.Is(err, ErrBadPath) {
+			t.Errorf("CreateFolder(%q): got %v, want ErrBadPath", p, err)
+		}
 		if err := c.Delete(context.Background(), p); !errors.Is(err, ErrBadPath) {
 			t.Errorf("Delete(%q): got %v, want ErrBadPath", p, err)
 		}
@@ -306,6 +315,104 @@ func TestMoveNeverReplaces(t *testing.T) {
 		if method != "MOVE" || path != "/drive/My%20files/r/a.txt" ||
 			destination != srv.URL+"/drive/My%20files/r/R%C3%A9ka%27s%20b.txt" || overwrite != "F" {
 			t.Errorf("%d: sent %s %s with Destination %q and Overwrite %q", c.status, method, path, destination, overwrite)
+		}
+	}
+}
+
+// A folder is moved by its address with a trailing slash, to an address without one. How Apache answers each case
+// was measured on the stand-in storage (test/webdav): a file already at the new place is 412, a folder there is a
+// redirect without a Location, a folder addressed as a file is a redirect to its address with a slash, a missing
+// folder above the new place is 404 or 409, and moving a folder into itself is 403.
+func TestMoveFolderAddressesTheFolderAndNeverReplaces(t *testing.T) {
+	cases := []struct {
+		status   int
+		location string
+		want     error
+	}{
+		{http.StatusCreated, "", nil},
+		{http.StatusNoContent, "", nil},
+		{http.StatusPreconditionFailed, "", ErrExists},
+		{http.StatusMovedPermanently, "", ErrExists},
+		{http.StatusNotFound, "", ErrNotFound},
+		{http.StatusConflict, "", ErrNotFound},
+		{http.StatusForbidden, "", errOther}, // into itself
+		{http.StatusInternalServerError, "", errOther},
+	}
+	for _, c := range cases {
+		var method, path, destination, overwrite string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			method, path, destination, overwrite = r.Method, r.URL.EscapedPath(), r.Header.Get("Destination"), r.Header.Get("Overwrite")
+			if c.location != "" {
+				w.Header().Set("Location", c.location)
+			}
+			w.WriteHeader(c.status)
+		}))
+		base, _ := url.Parse(srv.URL)
+		err := New(base, "u", "p", "/drive").MoveFolder(context.Background(), "My files/r/Old drafts", "My files/r/Drafts 2026")
+		srv.Close()
+		checkErr(t, strconv.Itoa(c.status), err, c.want)
+		if method != "MOVE" || path != "/drive/My%20files/r/Old%20drafts/" ||
+			destination != srv.URL+"/drive/My%20files/r/Drafts%202026" || overwrite != "F" {
+			t.Errorf("%d: sent %s %s with Destination %q and Overwrite %q", c.status, method, path, destination, overwrite)
+		}
+	}
+	base, _ := url.Parse("http://127.0.0.1:1")
+	for _, top := range []string{"", "/"} {
+		if err := New(base, "u", "p", "/drive").MoveFolder(context.Background(), top, "x"); err == nil {
+			t.Errorf("MoveFolder(%q) was not refused", top)
+		}
+	}
+}
+
+// A file's address that turns out to be a folder's is answered by Apache with a redirect to the folder's address: that
+// is "no file there", not "something is already at the new place".
+func TestMoveOfAFileThatIsAFolder(t *testing.T) {
+	for _, c := range []struct {
+		location string
+		want     error
+	}{
+		{"/drive/My%20files/r/a.txt/", ErrNotFound},
+		{"", ErrExists},
+		{"/drive/My%20files/r/b.txt/", ErrExists},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if c.location != "" {
+				w.Header().Set("Location", c.location)
+			}
+			w.WriteHeader(http.StatusMovedPermanently)
+		}))
+		base, _ := url.Parse(srv.URL)
+		err := New(base, "u", "p", "/drive").Move(context.Background(), "My files/r/a.txt", "My files/r/b.txt")
+		srv.Close()
+		checkErr(t, "redirect to "+c.location, err, c.want)
+	}
+}
+
+func TestCreateFolderMakesOneFolderAndRefusesWhatIsThere(t *testing.T) {
+	cases := []struct {
+		status int
+		want   error
+	}{
+		{http.StatusCreated, nil},
+		{http.StatusMethodNotAllowed, ErrExists}, // a folder is there
+		{http.StatusMovedPermanently, ErrExists},
+		{http.StatusConflict, ErrNotFound}, // the folder above is missing
+		{http.StatusInsufficientStorage, ErrFull},
+		{http.StatusBadRequest, errOther}, // Apache: a file is there
+		{http.StatusUnauthorized, ErrUnauthorized},
+	}
+	for _, c := range cases {
+		var requests []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests = append(requests, r.Method+" "+r.URL.EscapedPath())
+			w.WriteHeader(c.status)
+		}))
+		base, _ := url.Parse(srv.URL)
+		err := New(base, "u", "p", "/drive").CreateFolder(context.Background(), "My files/r/New folder")
+		srv.Close()
+		checkErr(t, strconv.Itoa(c.status), err, c.want)
+		if !slices.Equal(requests, []string{"MKCOL /drive/My%20files/r/New%20folder/"}) {
+			t.Errorf("%d: sent %q, want one MKCOL of the folder", c.status, requests)
 		}
 	}
 }

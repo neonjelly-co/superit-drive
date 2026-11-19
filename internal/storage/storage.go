@@ -8,7 +8,8 @@
 // PUT, GET, GET of a byte range, MOVE, DELETE, and PUT with Content-Range into part of a file (measured on a Storage
 // Box; other servers may not do it, which `superit-drive check-storage` finds out). Folders are always addressed with
 // a trailing slash; without it Apache answers with a redirect. The client never follows a redirect: Go would turn a
-// redirected PUT into a GET.
+// redirected PUT into a GET. Nothing the client does replaces anything already on the storage: PUT sends
+// If-None-Match: *, MOVE sends Overwrite: F, and MKCOL never replaces by its nature.
 package storage
 
 import (
@@ -343,16 +344,34 @@ func parseContentRange(v string) (first, last int64, ok bool) {
 }
 
 // Move moves the file at from to to, on the server: no bytes of the file travel. It never replaces anything: it sends
-// Overwrite: F, and returns ErrExists when something is at to. ErrNotFound means there is no file at from, or the
-// folder above to is missing.
+// Overwrite: F, and returns ErrExists when something is at to. ErrNotFound means there is no file at from (a folder
+// there included), or the folder above to is missing.
 func (c *Client) Move(ctx context.Context, from, to string) error {
+	return c.move(ctx, from, to, c.fileURL(from))
+}
+
+// MoveFolder moves the folder at from, with everything in it, to to, on the server. Like Move, it never replaces
+// anything and returns ErrExists when something is at to; ErrNotFound means there is no folder at from, or the folder
+// above to is missing. Moving a folder into itself is refused by the server with an error of its own.
+//
+// The folder is addressed with a trailing slash (Apache answers a MOVE of a folder without one with a redirect), and
+// its new place without one, so that a file or a folder already there is answered as such (Apache: 412 for a file, a
+// redirect for a folder).
+func (c *Client) MoveFolder(ctx context.Context, from, to string) error {
+	if len(escapeSegments(from)) == 0 {
+		return errors.New("the Drive's own folder on the storage is never moved")
+	}
+	return c.move(ctx, from, to, c.folderURL(from))
+}
+
+func (c *Client) move(ctx context.Context, from, to string, source *url.URL) error {
 	if err := checkPath(from); err != nil {
 		return err
 	}
 	if err := checkPath(to); err != nil {
 		return err
 	}
-	req, err := c.request(ctx, "MOVE", c.fileURL(from), nil)
+	req, err := c.request(ctx, "MOVE", source, nil)
 	if err != nil {
 		return err
 	}
@@ -363,15 +382,31 @@ func (c *Client) Move(ctx context.Context, from, to string) error {
 		return fmt.Errorf("moving %q on the storage: %w", from, err)
 	}
 	defer drain(res)
-	switch res.StatusCode {
-	case http.StatusCreated, http.StatusNoContent:
+	switch {
+	case res.StatusCode == http.StatusCreated || res.StatusCode == http.StatusNoContent:
 		return nil
-	case http.StatusPreconditionFailed:
+	case res.StatusCode == http.StatusPreconditionFailed:
 		return fmt.Errorf("moving %q to %q: %w", from, to, ErrExists)
-	case http.StatusConflict:
-		return fmt.Errorf("moving %q to %q: the folder above it is missing: %w", from, to, ErrNotFound)
+	case res.StatusCode == http.StatusConflict || res.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("moving %q to %q: it is not there, or the folder above the new place is missing: %w", from, to, ErrNotFound)
+	case isRedirect(res.StatusCode) && sameAddress(res.Header.Get("Location"), c.folderURL(from)):
+		// Apache's answer to a file's address that is a folder's: there is no file at from.
+		return fmt.Errorf("moving %q: it is a folder: %w", from, ErrNotFound)
+	case isRedirect(res.StatusCode):
+		// Apache's answer when a folder is already at to.
+		return fmt.Errorf("moving %q to %q: a folder is there: %w", from, to, ErrExists)
 	}
 	return statusError("moving", from, res)
+}
+
+// sameAddress says whether location (as a server sent it, absolute or not) is the address u.
+func sameAddress(location string, u *url.URL) bool {
+	if location == "" {
+		return false
+	}
+	l, err := u.Parse(location)
+	return err == nil && equal(segments(l.EscapedPath()), segments(u.EscapedPath())) &&
+		strings.HasSuffix(l.EscapedPath(), "/") == strings.HasSuffix(u.EscapedPath(), "/")
 }
 
 // Delete removes the file at p. ErrNotFound means there was nothing there.
@@ -427,6 +462,38 @@ func (c *Client) MakeFolder(ctx context.Context, dir string) error {
 		}
 	}
 	return nil
+}
+
+// CreateFolder makes the one folder at dir, for a person who asked for a new folder: unlike MakeFolder, something
+// already there is ErrExists, and a missing folder above it is ErrNotFound rather than made.
+func (c *Client) CreateFolder(ctx context.Context, dir string) error {
+	if err := checkPath(dir); err != nil {
+		return err
+	}
+	if len(escapeSegments(dir)) == 0 {
+		return fmt.Errorf("making the Drive's own folder: %w", ErrExists)
+	}
+	req, err := c.request(ctx, "MKCOL", c.folderURL(dir), nil)
+	if err != nil {
+		return err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("making the folder %q on the storage: %w", dir, err)
+	}
+	defer drain(res)
+	switch {
+	case res.StatusCode == http.StatusCreated:
+		return nil
+	case res.StatusCode == http.StatusMethodNotAllowed || isRedirect(res.StatusCode):
+		// 405: a folder is already there (RFC 4918). Apache answers 400 when a file is; callers look first.
+		return fmt.Errorf("making the folder %q: %w", dir, ErrExists)
+	case res.StatusCode == http.StatusConflict:
+		return fmt.Errorf("making the folder %q: the folder above it is missing: %w", dir, ErrNotFound)
+	case res.StatusCode == http.StatusInsufficientStorage:
+		return fmt.Errorf("making the folder %q: %w", dir, ErrFull)
+	}
+	return statusError("making the folder", dir, res)
 }
 
 func (c *Client) makeOne(ctx context.Context, u *url.URL) error {
