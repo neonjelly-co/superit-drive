@@ -695,6 +695,40 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 	if _, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery"); !errors.Is(err, ErrNoItem) {
 		t.Fatalf("moving Bakery out of Bence's My files again: %v", err)
 	}
+	// A change decided on Bakery while it was in Bence's My files never records anything in his place under it: nothing
+	// in one place is ever under a folder of another, nor under a file, nor under a folder in the trash.
+	notes := put(t, x, bence, 0, "Notes.txt", false, 5)
+	never := func(string) bool { return false }
+	for what, err := range map[string]error{
+		"an upload into Bakery, through Bence's My files": func() error {
+			_, err := x.PutItem(ctx, bence.ID, bakery.ID, Seen{Name: "Late.txt"})
+			return err
+		}(),
+		"a listing of Bakery, through Bence's My files": x.SetChildren(ctx, bence.ID, bakery.ID, []Seen{{Name: "Late.txt"}}, never, func() bool { return false }),
+		"a move into Bakery, inside Bence's My files": func() error {
+			_, err := x.Relocate(ctx, bence.ID, notes.ID, bakery.ID, "Notes.txt")
+			return err
+		}(),
+		"a move into a file": func() error {
+			_, err := x.Relocate(ctx, bence.ID, clients.ID, notes.ID, "Clients")
+			return err
+		}(),
+		"a move into Team, under a folder of Bence's": func() error {
+			_, err := x.MoveToPlace(ctx, bence.ID, notes.ID, team.ID, clients.ID, "Notes.txt")
+			return err
+		}(),
+		"a restore into Bakery, through Bence's My files": func() error {
+			_, err := x.Restore(ctx, bence.ID, old.ID, bakery.ID, "Old.pdf")
+			return err
+		}(),
+	} {
+		if !errors.Is(err, ErrNoFolder) || !errors.Is(err, ErrNoItem) {
+			t.Errorf("%s: %v, want ErrNoFolder", what, err)
+		}
+	}
+	if children, _ := x.Children(ctx, bence.ID, bakery.ID); len(children) != 0 {
+		t.Fatalf("Bence's My files holds items under Bakery: %+v", children)
+	}
 	rows, err := x.db.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {
 		t.Fatal(err)

@@ -39,6 +39,10 @@ type Seen struct {
 // ErrNoItem is returned when an item does not exist where it was looked for.
 var ErrNoItem = errors.New("no such item")
 
+// ErrNoFolder is returned when something was to go into a folder that is not, or no longer, a live folder of the place:
+// it went to the trash, was removed, or moved to another place meanwhile. It is an ErrNoItem too.
+var ErrNoFolder = fmt.Errorf("%w: the folder is not in the place", ErrNoItem)
+
 // itemColumns are read by scanItem, in this order.
 const itemColumns = "items.id, items.place_id, IFNULL(items.parent_id, 0), items.name, items.is_folder, items.size, items.changed_at"
 
@@ -143,6 +147,9 @@ func item(ctx context.Context, q querier, placeID, id int64) (Item, error) {
 func (x *Index) PutItem(ctx context.Context, placeID, folderID int64, s Seen) (Item, error) {
 	var it Item
 	err := x.write(ctx, func(tx *sql.Tx) error {
+		if err := liveFolder(ctx, tx, placeID, folderID); err != nil {
+			return err
+		}
 		if err := upsert(ctx, tx, placeID, folderID, s); err != nil {
 			return err
 		}
@@ -153,6 +160,22 @@ func (x *Index) PutItem(ctx context.Context, placeID, folderID int64, s Seen) (I
 		return err
 	})
 	return it, err
+}
+
+// liveFolder checks that folderID is a folder of the place, not in the trash (0, the top folder, always is), before
+// anything is put into it: ErrNoItem otherwise. A change decided on a folder that has since moved to another place, or
+// gone, never records an item in one place under a folder of another.
+func liveFolder(ctx context.Context, tx *sql.Tx, placeID, folderID int64) error {
+	if folderID == 0 {
+		return nil
+	}
+	var n int
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE id = ? AND place_id = ? AND is_folder = 1 AND trashed_at IS NULL`,
+		folderID, placeID).Scan(&n)
+	if err == nil && n == 0 {
+		return fmt.Errorf("folder %d of place %d: %w", folderID, placeID, ErrNoFolder)
+	}
+	return err
 }
 
 // upsert adds or updates the item called s.Name in the folder, keeping the id of a known name of the same kind.
@@ -184,6 +207,9 @@ func (x *Index) SetChildren(ctx context.Context, placeID, folderID int64, seen [
 	return x.write(ctx, func(tx *sql.Tx) error {
 		if stale() {
 			return nil
+		}
+		if err := liveFolder(ctx, tx, placeID, folderID); err != nil {
+			return err
 		}
 		rows, err := tx.QueryContext(ctx, `
 			SELECT id, name FROM items WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL`,
@@ -256,6 +282,9 @@ func (x *Index) MoveToPlace(ctx context.Context, fromPlace, id, toPlace, folderI
 		} else if busy {
 			return ErrUploading
 		}
+		if err := liveFolder(ctx, tx, toPlace, folderID); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM items
 			WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL`,
@@ -309,6 +338,9 @@ func uploading(ctx context.Context, q querier, placeID, id int64) (bool, error) 
 // and is dropped first.
 func (x *Index) Relocate(ctx context.Context, placeID, id, folderID int64, name string) (Item, error) {
 	err := x.write(ctx, func(tx *sql.Tx) error {
+		if err := liveFolder(ctx, tx, placeID, folderID); err != nil {
+			return err
+		}
 		_, err := tx.ExecContext(ctx, `
 			DELETE FROM items
 			WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL AND id != ?`,

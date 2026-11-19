@@ -343,7 +343,11 @@ func (d *Drive) List(ctx context.Context, p index.Place, folder *index.Item) ([]
 		seen = append(seen, index.Seen{Name: e.Name, Folder: e.Folder, Size: e.Size, Changed: e.Changed})
 	}
 	keep := func(name string) bool { return d.claimed(dir + "/" + name) }
-	if err := d.index.SetChildren(ctx, p.ID, folderID(folder), seen, keep, stale); err != nil {
+	err = d.index.SetChildren(ctx, p.ID, folderID(folder), seen, keep, stale)
+	if errors.Is(err, index.ErrNoFolder) {
+		return nil, ErrGone // it moved to another place, or went, while it was being listed
+	}
+	if err != nil {
 		return nil, err
 	}
 	return d.index.Children(ctx, p.ID, folderID(folder))
