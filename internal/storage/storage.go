@@ -42,7 +42,7 @@ var (
 // A StatusError is an answer from the storage that has no meaning of its own here, such as 403 Forbidden.
 type StatusError struct {
 	Doing    string // what the client was doing, such as "writing"
-	Path     string // the path, relative to the Drive's folder
+	Path     string // the path, relative to the Drive's folder; MakeFolder gives a folder's whole path on the server
 	Status   string // the answer's status, such as "403 Forbidden"
 	Location string // where the answer pointed, for a redirect
 }

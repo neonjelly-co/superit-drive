@@ -277,6 +277,8 @@ func reason(err error) string {
 		return r
 	case errors.Is(err, context.DeadlineExceeded):
 		return "the server did not answer in time"
+	case errors.Is(err, context.Canceled):
+		return "the check was stopped"
 	case errors.As(err, &request):
 		return "could not reach the server: " + request.Err.Error()
 	}
