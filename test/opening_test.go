@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"mime"
-	"net"
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/neonjelly-co/superit-drive/test/harness"
 )
@@ -234,40 +232,6 @@ func TestAVideoOpenedInTheBrowserSeeks(t *testing.T) {
 	}
 	if res := c.With("Range", fmt.Sprintf("bytes=%d-", len(content)+10)).Get(t, openPath(placeID, clip.ID)); res.Status != http.StatusRequestedRangeNotSatisfiable {
 		t.Fatalf("a part after the end: got %d", res.Status)
-	}
-}
-
-// Opening a file is a transfer like a download: it takes one of the 32 slots while its bytes move, and waits its turn
-// when they are all taken.
-func TestOpeningAFileTakesATransferSlot(t *testing.T) {
-	t.Parallel()
-	d := harness.Start(t, reka)
-	placeID, _ := myFiles(t, d, reka)
-	big := uploaded(t, d.As(reka), placeID, "Film.mp4", randomBytes(t, 16<<20)) // more than the network buffers on the way hold
-
-	var held []net.Conn
-	for range 32 {
-		conn, status := heldDownload(t, d, reka, openPath(placeID, big.ID), 5*time.Second)
-		if status != http.StatusOK {
-			t.Fatalf("opening %d: got %d", len(held)+1, status)
-		}
-		held = append(held, conn)
-	}
-	waiting := make(chan int, 1)
-	go func() {
-		conn, status := heldDownload(t, d, reka, downloadPath(placeID, big.ID), 20*time.Second)
-		defer conn.Close()
-		waiting <- status
-	}()
-	time.Sleep(time.Second)
-	select {
-	case s := <-waiting:
-		t.Fatalf("a download while 32 files are open was answered at once: %d", s)
-	default:
-	}
-	held[0].Close()
-	if s := <-waiting; s != http.StatusOK {
-		t.Fatalf("the download, once a slot was free: got %d", s)
 	}
 }
 

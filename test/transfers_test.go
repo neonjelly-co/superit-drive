@@ -721,20 +721,25 @@ func heldDownload(t *testing.T, d *harness.Drive, m harness.Member, path string,
 }
 
 // At most 32 transfers are in flight. Further downloads wait their turn in line; further uploads are told at once to
-// wait, keep their place in line, and get their turn when it comes.
+// wait, keep their place in line, and get their turn when it comes. A file opened in the browser (a video, here) is a
+// transfer like a download: the first of the 32 is one, and the 33rd download gets its turn when it ends.
 func TestAtMost32TransfersAreInFlightAndTheRestWaitTheirTurn(t *testing.T) {
 	t.Parallel()
 	d := harness.Start(t, reka)
 	placeID, _ := myFiles(t, d, reka)
 	c := d.As(reka)
-	big := uploaded(t, c, placeID, "Big.bin", randomBytes(t, 16<<20)) // more than the network buffers on the way hold
+	big := uploaded(t, c, placeID, "Big.mp4", randomBytes(t, 16<<20)) // more than the network buffers on the way hold
 	u := startedUpload(t, c, placeID, 0, "Resumable.bin", 10)
 
 	var held []net.Conn
-	for range 32 {
-		conn, status := heldDownload(t, d, reka, downloadPath(placeID, big.ID), 5*time.Second)
+	for i := range 32 {
+		path := downloadPath(placeID, big.ID)
+		if i == 0 {
+			path = openPath(placeID, big.ID)
+		}
+		conn, status := heldDownload(t, d, reka, path, 5*time.Second)
 		if status != http.StatusOK {
-			t.Fatalf("download %d: got %d", len(held)+1, status)
+			t.Fatalf("transfer %d (%s): got %d", len(held)+1, path, status)
 		}
 		held = append(held, conn)
 	}
@@ -765,7 +770,7 @@ func TestAtMost32TransfersAreInFlightAndTheRestWaitTheirTurn(t *testing.T) {
 		t.Fatalf("the resumable upload's state: %+v, want it waiting", s)
 	}
 
-	// One download ends: the 33rd gets its turn.
+	// The opened video ends: the 33rd gets its turn.
 	held[0].Close()
 	if s := <-waiting; s != http.StatusOK {
 		t.Fatalf("the 33rd download, once a slot was free: got %d", s)
