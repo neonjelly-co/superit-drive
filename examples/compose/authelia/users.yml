@@ -1,0 +1,13 @@
+# The people who can sign in. Each username is that person's userId in ../members/members.json.
+#
+# The passwords are examples: example-password-reka and example-password-bence. Make the hash of a real password with
+#   docker run --rm authelia/authelia:4.39.28 authelia crypto hash generate argon2 --password '<the password>'
+users:
+  reka:
+    displayname: Réka Kovács
+    email: reka@example.com
+    password: $argon2id$v=19$m=65536,t=3,p=4$vfpG1SDla9tk04ypfIzCNw$h2YjKyghTHt+wZ/H4Eb6PDVrBPqkBXF8KLBelkR+WKc
+  bence:
+    displayname: Bence Tóth
+    email: bence@example.com
+    password: $argon2id$v=19$m=65536,t=3,p=4$B6sCO+aghIOGGbfXoghklw$3PzEgAJo99cU9owVuObRivmfEQws+9ClfxAkDjoUuCg

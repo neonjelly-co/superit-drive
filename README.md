@@ -6,7 +6,8 @@ customer's own WebDAV server). It runs as one small container on the customer's 
 
 Version 1 is being built. The spec is [neonjelly-co/superit#38](https://github.com/neonjelly-co/superit/issues/38);
 the build tickets are this repository's issues. Words follow the `GLOSSARY.md` of neonjelly-co/superit (member,
-guest, My files, shared folder, Drive storage, trash).
+guest, My files, shared folder, Drive storage, trash). The Drive also runs without Superit: see
+[Running it yourself](#running-it-yourself).
 
 ## How it works
 
@@ -51,8 +52,9 @@ refused with 403, and the Drive logs both values. The reverse proxy must pass `O
 
 ### Settings
 
-Every setting is an environment variable; there is no settings page. The Drive refuses to start without the
-required ones and names every one that is missing. (`internal/settings` holds the same list.)
+Every setting is an environment variable; there is no settings page. This table is the full list. The Drive refuses
+to start without the required ones and names every one that is missing. (`internal/settings` holds the same list, and
+a test keeps the two equal.)
 
 | Variable | Required | Meaning |
 |---|---|---|
@@ -85,6 +87,148 @@ Storage Box runs, writes to a hidden temporary file and renames it at the end), 
 that is there. Shared folders, and hidden folders for the trash, uploads in progress and the index copy, come with
 their tickets.
 
+## Running it yourself
+
+The Drive runs without Superit, as one container against any WebDAV server that passes the storage check. What it
+does today: a member signs in through the reverse proxy, sees their "My files", uploads files into it and downloads
+them. Folders, the trash, sharing, guests, public links and large or resumable transfers are not built yet.
+
+It needs:
+
+- **The image**, `ghcr.io/neonjelly-co/superit-drive:<version>`, for x86 (`linux/amd64`) and arm64 (`linux/arm64`).
+  Each version has its own tag, and there is no `latest`: you choose the version, and change it to upgrade. No version
+  has been published yet (see [Releases](#releases)); until one is, build the image from this repository with
+  `docker build`.
+- **A WebDAV server** for the files. Check it first (below).
+- **A reverse proxy that signs people in** and, on every request it passes on, adds `Drive-Secret` and
+  `Remote-User-Id` in place of any the browser sent (see [Signing in](#signing-in-headers-and-the-member-list)). The
+  Drive listens on plain HTTP on port 8080: only the reverse proxy should reach it.
+- **The member list file**, in a folder of its own mounted into the container.
+- **The data folder**, `/data` in the container, kept between restarts. It holds the index, which alone knows who
+  has access to what; keep a backup of it.
+
+The settings are in the [table above](#settings).
+
+### Checking a WebDAV server
+
+`superit-drive check-storage` finds out whether a WebDAV server can hold the Drive's files, before a Drive is set up
+on it. It needs only the four storage settings, and it is in the image:
+
+```sh
+docker run --rm -e DRIVE_STORAGE_URL=https://dav.example.com -e DRIVE_STORAGE_USER=drive \
+  -e DRIVE_STORAGE_PASSWORD=example-password -e DRIVE_STORAGE_FOLDER=/drive \
+  ghcr.io/neonjelly-co/superit-drive:<version> check-storage
+```
+
+It takes these steps with the Drive's own WebDAV client and stops at the first that fails:
+
+| Step | What it does |
+|---|---|
+| `sign in` | Lists `DRIVE_STORAGE_FOLDER` with the login. A folder that is not there yet is fine: the Drive makes it. |
+| `make a folder` | Makes a folder of its own, `.superit-drive-check-<random>`, inside it (and `DRIVE_STORAGE_FOLDER` if missing). |
+| `write a file` | Writes a file of 256 KiB there, and finds it listed with its size. |
+| `read part of it` | Reads 1000 bytes from the middle of the file (`GET` with `Range`), and gets only those. |
+| `move it` | Moves the file to another name on the server (`MOVE`), and finds it there and not at its old name. |
+| `delete it` | Deletes the file, and finds it gone. |
+
+Then it finds out whether resuming uploads is supported: it writes half a file, then the other half into the same
+file from its middle (`PUT` with `Content-Range`), and reads the file back. A server that refuses that, or ignores
+where the half goes and replaces the file with it, does not support it; this never fails the check. Last, it removes
+its own folder. If it made `DRIVE_STORAGE_FOLDER`, that stays.
+
+It prints one line per step, then the resume line, then the result, on standard output:
+
+```
+Checking the WebDAV server at https://dav.example.com/drive/ for Superit Drive <version>.
+sign in: ok
+make a folder: ok
+write a file: ok
+read part of it: ok
+move it: ok
+delete it: ok
+resume an upload: not supported: the server ignored where the second half goes (Content-Range) and replaced the file with it
+This server can hold the Drive's files. Resuming uploads: not supported.
+```
+
+A step that fails prints `<step>: failed: <reason>`, then `This server cannot hold the Drive's files: "<step>" failed.`
+and nothing after it but, when its folder could not be removed, a `clean up:` line saying where it is. A step that
+passes prints `<step>: ok`, sometimes with a note in brackets. The exit code is 0 when every step passed (whether or
+not resuming is supported), 1 when a step failed, and 2 when a storage setting is missing or wrong (the reason goes to
+standard error, and nothing was asked of the server). The check takes at most about two and a half minutes.
+
+It does not find out how large a file the server takes, whether an upload cut off midway keeps what arrived, how many
+connections the server allows at once, how fast it is, or how much room it has.
+
+### A worked example
+
+[`examples/compose/`](examples/compose/) runs the Drive with Docker Compose behind [Caddy](https://caddyserver.com)
+(the reverse proxy, which also gets HTTPS certificates) and [Authelia](https://www.authelia.com) (the sign-in: a
+sign-in page and a list of people with passwords). It runs as it is on your own computer, with a stand-in WebDAV
+server and example people:
+
+```sh
+cd examples/compose
+cp example.env .env
+# Set DRIVE_VERSION in .env. Until a version is published, build one first, from the repository's top folder:
+#   docker build -t ghcr.io/neonjelly-co/superit-drive:dev .    and set DRIVE_VERSION=dev
+docker compose up -d
+```
+
+Open <https://drive.example.localhost> and sign in as `reka` with the password `example-password-reka`, or as `bence`
+with `example-password-bence`. Most browsers send names under `.localhost` to your own computer; if yours does not,
+add `drive.example.localhost` and `auth.example.localhost` to your hosts file. The browser warns about the
+certificate: Caddy made it with its own authority, which the browser does not know. Ports 80 and 443 must be free.
+
+What happens on each request:
+
+1. Caddy asks Authelia whether the person is signed in (`forward_auth`). If not, Authelia's answer sends the browser
+   to the sign-in page at `auth.example.localhost`, which sets a session cookie for `example.localhost` and sends the
+   browser back.
+2. If so, Authelia names the person by their username, and Caddy passes the request to the Drive with that username
+   as `Remote-User-Id` and the secret from `.env` as `Drive-Secret`, replacing any the browser sent.
+3. The Drive finds the user id in `members/members.json`, so each Authelia username is a member's `userId` there.
+   The list gives their email address, name and role.
+
+The Drive's port is not published: from the host, and from any container without the secret, it cannot be used. A
+request that reaches it without `Drive-Secret` is refused with 403.
+
+For real use on a server:
+
+- Replace every secret in `.env` with a random one (`openssl rand -hex 32`), and the example people with real ones:
+  in `authelia/users.yml` (each password as a hash, made with the command in that file's comment) and in
+  `members/members.json`. Replace the member list by writing a new file and renaming it over the old one.
+- Replace `drive.example.localhost`, `auth.example.localhost` and `example.localhost` with your own names, in the
+  `Caddyfile`, in `authelia/configuration.yml` and as `DRIVE_ADDRESS` in `compose.yaml`. Point both names at the
+  server; Caddy then gets certificates from Let's Encrypt by itself.
+- Delete the `storage` service from `compose.yaml` and set `DRIVE_STORAGE_*` in `.env` to your WebDAV server. Check
+  it with `docker compose run --rm drive check-storage`, which runs the storage check with those settings.
+- Authelia can do much more, such as a second factor (`policy: two_factor`) and real mail for password resets; see
+  its documentation.
+
+## Releases
+
+Pushing a tag `v<major>.<minor>.<patch>`, such as `v1.2.0`, runs `.github/workflows/release.yml`: it runs every test,
+builds the image for x86 and arm64 (the Dockerfile cross-compiles, so neither needs emulation) and publishes it as
+`ghcr.io/neonjelly-co/superit-drive:1.2.0`, with the version built into the binary. Nothing else is published, never
+a moving tag such as `latest`. A tag that is not such a version publishes nothing, and a version the registry already
+has is refused, not replaced. A published image does not reach Superit's customers by itself: that happens only when
+the daemon's version catalogue lists the version with a tested upgrade path.
+
+Before the first tag, on GitHub:
+
+- If the organisation limits which actions may run, allow `actions/checkout`, `actions/setup-go`,
+  `oven-sh/setup-bun`, `docker/setup-buildx-action`, `docker/login-action` and `docker/build-push-action` (each is
+  pinned to a commit in the workflow). No secrets are needed: the workflow signs in to the registry with its own
+  `GITHUB_TOKEN` and asks for `packages: write` itself.
+- If the organisation limits who may create packages (organisation settings, Packages), allow container packages.
+  The first run creates the package `superit-drive`, linked to this repository by the image's
+  `org.opencontainers.image.source` label. A new package is private. If the package was ever made another way first,
+  give this repository write access to it (package settings, Manage Actions access).
+- When the repository goes public, make the package public too (package settings, Change visibility), so that
+  anyone, and Superit's servers, can pull it without signing in.
+- Protect version tags: a tag ruleset for `v*` that lets only maintainers create them and blocks moving or deleting
+  them.
+
 ## Develop
 
 You need Go 1.27, Bun 1.3 and Docker. `make help` lists the targets.
@@ -99,9 +243,11 @@ make image        # the container image superit-drive:dev
 **Tests.** `test/` holds the tests through the Drive's HTTP interface. Each one starts the real binary against a
 throwaway Apache `mod_dav` container (the stand-in storage, `test/webdav/`) with a temporary data folder, and acts
 only as a browser or an outsider would: requests with the proxy's headers, and WebDAV with the storage login to see
-what is on the storage. Start from `test/harness` and an existing test. Next to the code are unit tests where a rule
-needs a table: the access rules in `internal/access`, settings, the member list, and a check that every route goes
-through the authorisation function. The interface has no tests of its own; check it in a browser.
+what is on the storage. Start from `test/harness` and an existing test. The stand-in storage also has folders that
+refuse or ignore one thing each, such as `MOVE` or `Range`, for the storage check's tests (`test/webdav/storage.conf`).
+Next to the code are unit tests where a rule needs a table: the access rules in `internal/access`, settings, the
+member list, and a check that every route goes through the authorisation function. The interface has no tests of its
+own; check it in a browser.
 
 **Running it locally.**
 
@@ -109,6 +255,7 @@ through the authorisation function. The interface has no tests of its own; check
 make dev-storage  # stand-in storage on 127.0.0.1:8081
 make run          # the Drive on 127.0.0.1:8080, with dev/drive.env and dev/members.json
 make dev-ui       # in another terminal: the interface on http://localhost:5173, with hot reload
+make check-storage  # the storage check against the stand-in storage
 ```
 
 A browser cannot reach the Drive on :8080 directly, because nothing adds the sign-in headers. `make dev-ui` serves the
@@ -116,7 +263,9 @@ interface and passes `/api` to the Drive with the headers for `DEV_USER_ID` (in 
 `DRIVE_ADDRESS` there is `http://localhost:5173`: it is the page the browser is on, so uploads from it are accepted.
 
 **The image.** `docker build` makes one image holding one static binary, CA certificates, and empty `/data` and
-`/tmp`, running as user 65532. It starts with the environment variables above and a member list file:
+`/tmp`, running as user 65532. `make image` tags it `superit-drive:dev`; the [worked example](#a-worked-example)
+expects the name `ghcr.io/neonjelly-co/superit-drive:<version>`. It starts with the environment variables above and a
+member list file:
 
 ```sh
 docker run -p 8080:8080 -v /path/to/members:/members:ro \
@@ -129,22 +278,29 @@ rename.
 ## Repository layout
 
 ```
-cmd/superit-drive/   main: starts internal/app
-internal/app/        wires everything together and serves until stopped
-internal/settings/   every environment variable
-internal/members/    the member list file, re-read when it changes
-internal/access/     the one authorisation function (Decide) and its table test
-internal/server/     HTTP: routes.go lists every route; server.go's guard runs identify → own page (for changes) →
-                     place → access.Decide → item in that place
-internal/drive/      the Drive's operations, joining the index and the storage
-internal/index/      the SQLite index; schema changes are numbered files in migrations/
-internal/storage/    the WebDAV client
-web/                 the interface (Vite, React, Tailwind with the Pilot light tokens); built into web/dist
-test/                tests through HTTP; harness/ runs the Drive; webdav/ is the stand-in storage
-dev/                 settings and a member list for running locally
+cmd/superit-drive/     main: runs the Drive, or the storage check (`check-storage`)
+internal/app/          wires everything together and serves until stopped
+internal/settings/     every environment variable
+internal/members/      the member list file, re-read when it changes
+internal/access/       the one authorisation function (Decide) and its table test
+internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify → own page (for changes) →
+                       place → access.Decide → item in that place
+internal/drive/        the Drive's operations, joining the index and the storage
+internal/index/        the SQLite index; schema changes are numbered files in migrations/
+internal/storage/      the WebDAV client
+internal/storagecheck/ `superit-drive check-storage`: can a WebDAV server hold the Drive's files?
+web/                   the interface (Vite, React, Tailwind with the Pilot light tokens); built into web/dist
+test/                  tests through HTTP; harness/ runs the Drive; webdav/ is the stand-in storage
+dev/                   settings and a member list for running locally
+examples/compose/      the worked example: the Drive behind Caddy and Authelia
+.github/workflows/     release.yml publishes a version's image when it is tagged
 ```
 
 ## Licence
 
 Superit Drive is published by neonjelly studio under the GNU Affero General Public License, version 3 (AGPL-3.0).
 The full text is in [LICENSE](LICENSE).
+
+## Contributing
+
+Code from outside neonjelly studio is not merged until contributor terms exist.

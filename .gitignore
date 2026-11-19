@@ -8,3 +8,6 @@
 /dev/data/
 
 .DS_Store
+
+# The worked example's own settings (examples/compose/example.env is the template)
+/examples/compose/.env

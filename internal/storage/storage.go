@@ -5,8 +5,10 @@
 // names: "My files/reka@example.com/Tax notes.pdf". The client escapes them for the wire.
 //
 // Only what a Storage Box is known to do is used: PROPFIND with Depth 0 or 1 (a recursive listing is refused), MKCOL,
-// PUT and GET, and later ranged GET, MOVE and DELETE. Folders are always addressed with a trailing slash; without it
-// Apache answers with a redirect. The client never follows a redirect: Go would turn a redirected PUT into a GET.
+// PUT, GET, GET of a byte range, MOVE, DELETE, and PUT with Content-Range into part of a file (measured on a Storage
+// Box; other servers may not do it, which `superit-drive check-storage` finds out). Folders are always addressed with
+// a trailing slash; without it Apache answers with a redirect. The client never follows a redirect: Go would turn a
+// redirected PUT into a GET.
 package storage
 
 import (
@@ -27,13 +29,31 @@ import (
 var (
 	ErrNotFound     = errors.New("not found on the storage")
 	ErrUnauthorized = errors.New("the storage refused the Drive's login")
-	// ErrExists is returned by Put when something is already at the path.
+	// ErrExists is returned by Put and Move when something is already at the path.
 	ErrExists = errors.New("already on the storage")
 	// ErrFull is returned when the storage answers that it has no room (507 Insufficient Storage).
 	ErrFull = errors.New("the storage is full")
 	// ErrBadPath is returned for a path with a "." or ".." in it, which could reach outside the Drive's folder.
 	ErrBadPath = errors.New(`a path on the storage cannot contain "." or ".."`)
+	// ErrNoRanges is returned by OpenPart when the server sends the whole file instead of the part asked for.
+	ErrNoRanges = errors.New("the storage sent the whole file instead of part of it")
 )
+
+// A StatusError is an answer from the storage that has no meaning of its own here, such as 403 Forbidden.
+type StatusError struct {
+	Doing    string // what the client was doing, such as "writing"
+	Path     string // the path, relative to the Drive's folder; MakeFolder gives a folder's whole path on the server
+	Status   string // the answer's status, such as "403 Forbidden"
+	Location string // where the answer pointed, for a redirect
+}
+
+func (e *StatusError) Error() string {
+	s := fmt.Sprintf("%s %q on the storage: it answered %s", e.Doing, e.Path, e.Status)
+	if e.Location != "" {
+		s += ", pointing to " + e.Location
+	}
+	return s
+}
 
 // Client is a WebDAV client for one folder on one server.
 type Client struct {
@@ -202,6 +222,40 @@ func (c *Client) Put(ctx context.Context, p string, body io.Reader, size int64) 
 	return statusError("writing", p, res)
 }
 
+// PutPart writes body, which must hold exactly size bytes, into the file at p from offset, and keeps what is before
+// offset: an upload that stopped resumes this way, from the length the file already has. total is the length of the
+// whole file. It sends PUT with Content-Range, which a server may refuse or, worse, ignore and replace the file with
+// body alone (RFC 9110 allows both); `superit-drive check-storage` finds out which a server does.
+func (c *Client) PutPart(ctx context.Context, p string, offset int64, body io.Reader, size, total int64) error {
+	if err := checkPath(p); err != nil {
+		return err
+	}
+	if offset < 0 || size <= 0 || offset+size > total {
+		return fmt.Errorf("writing %q: %d bytes from %d do not fit in a file of %d", p, size, offset, total)
+	}
+	req, err := c.request(ctx, http.MethodPut, c.fileURL(p), body)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = size
+	req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+size-1, total))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	res, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("writing part of %q on the storage: %w", p, err)
+	}
+	defer drain(res)
+	switch res.StatusCode {
+	case http.StatusOK, http.StatusCreated, http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return fmt.Errorf("writing part of %q: the folder above it is missing: %w", p, ErrNotFound)
+	case http.StatusInsufficientStorage:
+		return fmt.Errorf("writing part of %q: %w", p, ErrFull)
+	}
+	return statusError("writing part of", p, res)
+}
+
 // A File is a file being read from the storage. Close it when done.
 type File struct {
 	Body io.ReadCloser
@@ -230,6 +284,132 @@ func (c *Client) Open(ctx context.Context, p string) (*File, error) {
 		return nil, fmt.Errorf("reading %q: it is a folder: %w", p, ErrNotFound)
 	}
 	return nil, statusError("reading", p, res)
+}
+
+// OpenPart starts reading length bytes of the file at p, from offset; fewer when the file ends sooner. It returns
+// ErrNoRanges when the server sends the whole file instead, and ErrNotFound when there is no file there.
+func (c *Client) OpenPart(ctx context.Context, p string, offset, length int64) (*File, error) {
+	if err := checkPath(p); err != nil {
+		return nil, err
+	}
+	if offset < 0 || length <= 0 {
+		return nil, fmt.Errorf("reading %q: there is no part of %d bytes from %d", p, length, offset)
+	}
+	req, err := c.request(ctx, http.MethodGet, c.fileURL(p), nil)
+	if err != nil {
+		return nil, err
+	}
+	last := offset + length - 1
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, last))
+	// A compressed answer would count its range in compressed bytes.
+	req.Header.Set("Accept-Encoding", "identity")
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("reading part of %q on the storage: %w", p, err)
+	}
+	if res.StatusCode == http.StatusPartialContent {
+		first, end, ok := parseContentRange(res.Header.Get("Content-Range"))
+		if !ok || first != offset || end > last {
+			drain(res)
+			return nil, fmt.Errorf("reading part of %q: asked for bytes %d to %d, the storage sent %q", p, offset, last,
+				res.Header.Get("Content-Range"))
+		}
+		return &File{Body: res.Body, Size: end - first + 1}, nil
+	}
+	defer drain(res)
+	switch {
+	case res.StatusCode == http.StatusOK:
+		return nil, fmt.Errorf("reading part of %q: %w", p, ErrNoRanges)
+	case isRedirect(res.StatusCode):
+		return nil, fmt.Errorf("reading part of %q: it is a folder: %w", p, ErrNotFound)
+	}
+	return nil, statusError("reading part of", p, res)
+}
+
+// parseContentRange reads the first and last byte of a Content-Range such as "bytes 100-199/1000" or "bytes 0-9/*".
+func parseContentRange(v string) (first, last int64, ok bool) {
+	spec, found := strings.CutPrefix(v, "bytes ")
+	if !found {
+		return 0, 0, false
+	}
+	span, _, found := strings.Cut(spec, "/")
+	from, to, found2 := strings.Cut(span, "-")
+	if !found || !found2 {
+		return 0, 0, false
+	}
+	first, err1 := strconv.ParseInt(from, 10, 64)
+	last, err2 := strconv.ParseInt(to, 10, 64)
+	return first, last, err1 == nil && err2 == nil && first >= 0 && last >= first
+}
+
+// Move moves the file at from to to, on the server: no bytes of the file travel. It never replaces anything: it sends
+// Overwrite: F, and returns ErrExists when something is at to. ErrNotFound means there is no file at from, or the
+// folder above to is missing.
+func (c *Client) Move(ctx context.Context, from, to string) error {
+	if err := checkPath(from); err != nil {
+		return err
+	}
+	if err := checkPath(to); err != nil {
+		return err
+	}
+	req, err := c.request(ctx, "MOVE", c.fileURL(from), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Destination", c.fileURL(to).String())
+	req.Header.Set("Overwrite", "F")
+	res, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("moving %q on the storage: %w", from, err)
+	}
+	defer drain(res)
+	switch res.StatusCode {
+	case http.StatusCreated, http.StatusNoContent:
+		return nil
+	case http.StatusPreconditionFailed:
+		return fmt.Errorf("moving %q to %q: %w", from, to, ErrExists)
+	case http.StatusConflict:
+		return fmt.Errorf("moving %q to %q: the folder above it is missing: %w", from, to, ErrNotFound)
+	}
+	return statusError("moving", from, res)
+}
+
+// Delete removes the file at p. ErrNotFound means there was nothing there.
+func (c *Client) Delete(ctx context.Context, p string) error {
+	if err := checkPath(p); err != nil {
+		return err
+	}
+	return c.delete(ctx, p, c.fileURL(p))
+}
+
+// DeleteFolder removes the folder at dir and everything in it. It never removes the Drive's own folder ("").
+func (c *Client) DeleteFolder(ctx context.Context, dir string) error {
+	if err := checkPath(dir); err != nil {
+		return err
+	}
+	if len(escapeSegments(dir)) == 0 {
+		return errors.New("the Drive's own folder on the storage is never deleted")
+	}
+	return c.delete(ctx, dir, c.folderURL(dir))
+}
+
+func (c *Client) delete(ctx context.Context, p string, u *url.URL) error {
+	req, err := c.request(ctx, http.MethodDelete, u, nil)
+	if err != nil {
+		return err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("deleting %q on the storage: %w", p, err)
+	}
+	defer drain(res)
+	switch res.StatusCode {
+	case http.StatusOK, http.StatusNoContent:
+		return nil
+	case http.StatusMultiStatus: // a folder of which some things could not be deleted
+		return fmt.Errorf("deleting %q on the storage: some of what is in it could not be deleted", p)
+	}
+	return statusError("deleting", p, res)
 }
 
 func isRedirect(status int) bool { return status >= 300 && status < 400 }
@@ -354,7 +534,11 @@ func statusError(doing, name string, res *http.Response) error {
 	case http.StatusNotFound:
 		return fmt.Errorf("%s %q: %w", doing, name, ErrNotFound)
 	}
-	return fmt.Errorf("%s %q on the storage: it answered %s", doing, name, res.Status)
+	e := &StatusError{Doing: doing, Path: name, Status: res.Status}
+	if isRedirect(res.StatusCode) {
+		e.Location = res.Header.Get("Location")
+	}
+	return e
 }
 
 // drain reads what is left of a response so its connection can be used again, up to a limit.

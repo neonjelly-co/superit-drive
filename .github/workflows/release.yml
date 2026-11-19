@@ -1,0 +1,102 @@
+# Publishes a version of the Drive. Pushing the tag v1.2.3 runs every test, then builds the image for x86
+# (linux/amd64) and arm64 (linux/arm64) and publishes it as ghcr.io/neonjelly-co/superit-drive:1.2.3. Nothing else is
+# published: no `latest` or other moving tag. A version the registry already has is refused, never replaced.
+#
+# What has to be set up on GitHub first is in the README, under "Releases".
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/neonjelly-co/superit-drive
+
+jobs:
+  version:
+    name: Read the version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::$TAG is not a version tag such as v1.2.3, so nothing is published."
+            exit 1
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.6
+      - name: Build
+        run: make build
+      - name: Test (the tests through HTTP run Apache in Docker)
+        run: make test
+
+  publish:
+    name: Publish
+    needs: [version, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse a version that is already published
+        run: |
+          if found=$(docker buildx imagetools inspect "$IMAGE:$VERSION" 2>&1); then
+            echo "::error::$IMAGE:$VERSION is already published. A version is never replaced: tag a new one."
+            exit 1
+          fi
+          echo "Not in the registry yet: $found"
+      # The Dockerfile cross-compiles on the runner, so building for arm64 needs no emulation.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          build-args: VERSION=${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.title=Superit Drive
+            org.opencontainers.image.description=Where a project's people keep, open and share their files, in the browser.
+            org.opencontainers.image.vendor=neonjelly studio
+            org.opencontainers.image.source=https://github.com/neonjelly-co/superit-drive
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}

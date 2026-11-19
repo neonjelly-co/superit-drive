@@ -73,72 +73,104 @@ const MinSecretLength = 32
 // FromEnv reads the settings. getenv is os.Getenv outside tests. Every problem is reported at once, so a person
 // fixing their setup sees the whole list and not one complaint per restart.
 func FromEnv(getenv func(string) string) (Settings, error) {
-	var problems []string
-	value := func(name string) string {
-		for _, v := range Variables {
-			if v.Name != name {
-				continue
-			}
-			s := strings.TrimSpace(getenv(name))
-			if s == "" && v.Required {
-				problems = append(problems, name+" is not set")
-			}
-			if s == "" {
-				return v.Default
-			}
-			return s
-		}
-		panic("settings: " + name + " is missing from Variables")
-	}
-
+	r := &reader{getenv: getenv}
 	s := Settings{
-		Listen:       value("DRIVE_LISTEN"),
-		DataDir:      value("DRIVE_DATA_DIR"),
-		ProjectName:  value("DRIVE_PROJECT_NAME"),
-		MembersFile:  value("DRIVE_MEMBERS_FILE"),
-		HeaderSecret: value("DRIVE_HEADER_SECRET"),
-		Storage: Storage{
-			User:     value("DRIVE_STORAGE_USER"),
-			Password: value("DRIVE_STORAGE_PASSWORD"),
-			Folder:   value("DRIVE_STORAGE_FOLDER"),
-		},
+		Listen:       r.value("DRIVE_LISTEN"),
+		DataDir:      r.value("DRIVE_DATA_DIR"),
+		ProjectName:  r.value("DRIVE_PROJECT_NAME"),
+		MembersFile:  r.value("DRIVE_MEMBERS_FILE"),
+		HeaderSecret: r.value("DRIVE_HEADER_SECRET"),
+		Storage:      r.storage(),
 	}
 
-	if raw := value("DRIVE_STORAGE_URL"); raw != "" {
-		u, err := parseAddress(raw, true)
-		if err != nil {
-			problems = append(problems, "DRIVE_STORAGE_URL "+err.Error())
-		}
-		s.Storage.URL = u
-	}
-	if raw := value("DRIVE_ADDRESS"); raw != "" {
+	if raw := r.value("DRIVE_ADDRESS"); raw != "" {
 		u, err := parseAddress(raw, false)
 		if err != nil {
-			problems = append(problems, "DRIVE_ADDRESS "+err.Error())
+			r.problem("DRIVE_ADDRESS " + err.Error())
 		}
 		s.Address = u
 	}
-	if raw := value("DRIVE_CAPACITY"); raw != "" {
+	if raw := r.value("DRIVE_CAPACITY"); raw != "" {
 		c, err := ParseSize(raw)
 		if err != nil {
-			problems = append(problems, "DRIVE_CAPACITY "+err.Error())
+			r.problem("DRIVE_CAPACITY " + err.Error())
 		}
 		s.Capacity = c
 	}
 	if s.HeaderSecret != "" && len(s.HeaderSecret) < MinSecretLength {
-		problems = append(problems, fmt.Sprintf("DRIVE_HEADER_SECRET must be at least %d characters", MinSecretLength))
+		r.problem(fmt.Sprintf("DRIVE_HEADER_SECRET must be at least %d characters", MinSecretLength))
 	}
 	if strings.ContainsFunc(s.HeaderSecret, func(r rune) bool { return r > unicode.MaxASCII || !unicode.IsPrint(r) }) {
-		problems = append(problems, "DRIVE_HEADER_SECRET must be printable ASCII, so it can travel in a header")
-	}
-	if strings.Contains(s.Storage.Folder, "\\") || strings.Contains("/"+s.Storage.Folder+"/", "/../") {
-		problems = append(problems, "DRIVE_STORAGE_FOLDER must be a plain folder path such as /drive")
+		r.problem("DRIVE_HEADER_SECRET must be printable ASCII, so it can travel in a header")
 	}
 
-	if len(problems) > 0 {
-		return Settings{}, errors.New("the Drive cannot start: " + strings.Join(problems, "; "))
+	if err := r.err("the Drive cannot start: "); err != nil {
+		return Settings{}, err
 	}
 	return s, nil
+}
+
+// StorageFromEnv reads only the storage settings (DRIVE_STORAGE_URL, DRIVE_STORAGE_USER, DRIVE_STORAGE_PASSWORD and
+// DRIVE_STORAGE_FOLDER), for checking a WebDAV server before a Drive is set up on it.
+func StorageFromEnv(getenv func(string) string) (Storage, error) {
+	r := &reader{getenv: getenv}
+	s := r.storage()
+	if err := r.err("the storage cannot be checked: "); err != nil {
+		return Storage{}, err
+	}
+	return s, nil
+}
+
+// A reader reads variables and collects every problem with them.
+type reader struct {
+	getenv   func(string) string
+	problems []string
+}
+
+func (r *reader) problem(p string) { r.problems = append(r.problems, p) }
+
+func (r *reader) err(prefix string) error {
+	if len(r.problems) == 0 {
+		return nil
+	}
+	return errors.New(prefix + strings.Join(r.problems, "; "))
+}
+
+// value is the variable's value, its default when it is not set, and a problem when it is required and not set.
+func (r *reader) value(name string) string {
+	for _, v := range Variables {
+		if v.Name != name {
+			continue
+		}
+		s := strings.TrimSpace(r.getenv(name))
+		if s == "" && v.Required {
+			r.problem(name + " is not set")
+		}
+		if s == "" {
+			return v.Default
+		}
+		return s
+	}
+	panic("settings: " + name + " is missing from Variables")
+}
+
+func (r *reader) storage() Storage {
+	s := Storage{
+		User:     r.value("DRIVE_STORAGE_USER"),
+		Password: r.value("DRIVE_STORAGE_PASSWORD"),
+		Folder:   r.value("DRIVE_STORAGE_FOLDER"),
+	}
+	if raw := r.value("DRIVE_STORAGE_URL"); raw != "" {
+		u, err := parseAddress(raw, true)
+		if err != nil {
+			r.problem("DRIVE_STORAGE_URL " + err.Error())
+		}
+		s.URL = u
+	}
+	if strings.Contains(s.Folder, "\\") || strings.Contains("/"+s.Folder+"/", "/../") {
+		r.problem("DRIVE_STORAGE_FOLDER must be a plain folder path such as /drive")
+	}
+	return s
 }
 
 // parseAddress accepts an absolute http or https address without a login, query or fragment. Only the storage's
