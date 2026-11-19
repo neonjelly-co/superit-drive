@@ -1,0 +1,28 @@
+# Caddy, the reverse proxy: it serves HTTPS, asks Authelia whether the person is signed in, and passes a signed-in
+# person's requests on to the Drive with the two headers the Drive needs.
+{
+	# Names under .localhost get certificates from Caddy's own authority, which browsers do not know, and which Caddy
+	# cannot add to a container's trust store. Real names get certificates from Let's Encrypt.
+	skip_install_trust
+}
+
+# The sign-in page.
+auth.example.localhost {
+	reverse_proxy authelia:9091
+}
+
+# The Drive.
+drive.example.localhost {
+	# Every request asks Authelia first. Without a session, Authelia answers with the way to the sign-in page, and that
+	# answer goes back to the browser. With one, it names the person in Remote-User: their username, which is their
+	# userId in the member list. It is passed on as Remote-User-Id, replacing any the browser sent.
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User>Remote-User-Id
+	}
+
+	reverse_proxy drive:8080 {
+		# The secret that tells the Drive this request came through here. It replaces any the browser sent.
+		header_up Drive-Secret {$DRIVE_HEADER_SECRET}
+	}
+}

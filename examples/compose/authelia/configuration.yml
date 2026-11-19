@@ -1,0 +1,38 @@
+# Authelia, the sign-in for the example: a sign-in page at auth.example.localhost, and the people in users.yml with
+# their passwords. Its secrets come from .env (AUTHELIA_SESSION_SECRET, AUTHELIA_STORAGE_ENCRYPTION_KEY).
+# Authelia's documentation: https://www.authelia.com/configuration/prologue/introduction/
+
+server:
+  address: tcp://:9091/
+
+log:
+  level: info
+
+authentication_backend:
+  password_reset:
+    disable: true
+  file:
+    path: /config/users.yml
+
+access_control:
+  default_policy: deny
+  rules:
+    # Signing in with a password is enough for the Drive. Authelia can also ask for a second factor: two_factor.
+    - domain: drive.example.localhost
+      policy: one_factor
+
+session:
+  cookies:
+    # The sign-in page and the Drive share this parent domain, so the session reaches both.
+    - domain: example.localhost
+      authelia_url: https://auth.example.localhost
+      default_redirection_url: https://drive.example.localhost
+
+storage:
+  local:
+    path: /data/db.sqlite3
+
+# The example sends no mail; Authelia writes what it would send into this file.
+notifier:
+  filesystem:
+    filename: /data/notifications.txt
