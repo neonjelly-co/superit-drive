@@ -11,11 +11,33 @@ export const TOO_LONG =
 
 const encoder = new TextEncoder();
 
-/** Why a file of this name cannot be uploaded where these items are, or undefined when it can. */
-export function uploadProblem(name: string, here: { name: string }[] | undefined): string | undefined {
+/**
+ * A name as the Drive is sent it: in Unicode's composed form (NFC). Safari on macOS gives decomposed names (an "é"
+ * as "e" and an accent), which would otherwise sit beside the same name typed in another browser, looking the same.
+ */
+export const composed = (name: string) => name.normalize("NFC");
+
+/** Why a file or folder cannot have this name, or undefined when it can. */
+export function nameProblem(name: string): string | undefined {
+	if (name === "") return "A name is needed.";
 	if (encoder.encode(name).length > MAX_NAME_BYTES) return TOO_LONG;
-	if (here?.some((item) => item.name === name)) {
-		return `There is already something called “${name}” here, so this file was not uploaded. Rename it and try again.`;
-	}
+	if (name === "." || name === "..") return "“.” and “..” cannot be used as names. Choose another name.";
+	if (name.includes("/")) return "A name cannot contain “/”. Choose another name.";
 	return undefined;
+}
+
+/**
+ * The first name of "Name (2)", "Name (3)" and so on, before a file's extension, that none of the items has; the
+ * Drive names a kept-both upload the same way. Used to suggest a name for a new folder.
+ */
+export function freeName(name: string, items: { name: string }[] | undefined, folder: boolean): string {
+	const taken = new Set(items?.map((i) => i.name));
+	if (!taken.has(name)) return name;
+	const dot = folder ? -1 : name.lastIndexOf(".");
+	const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+	for (let n = 2; n < 1000; n++) {
+		const candidate = `${stem} (${n})${ext}`;
+		if (!taken.has(candidate)) return candidate;
+	}
+	return name;
 }
