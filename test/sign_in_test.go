@@ -27,7 +27,10 @@ func TestAMemberWithTheSecretIsTreatedAsThatMember(t *testing.T) {
 }
 
 // Every address the Drive answers, and some it does not.
-var everyAddress = []string{"/", "/favicon.svg", "/assets/index.js", "/api/me", "/api/places", "/api/places/1/items", "/settings", "/no/such/address"}
+var everyAddress = []string{
+	"/", "/favicon.svg", "/assets/index.js", "/api/me", "/api/places", "/api/places/1/items", "/api/places/1/files?name=a.txt",
+	"/api/places/1/items/1/download", "/settings", "/no/such/address",
+}
 
 func TestARequestWithoutTheRightSecretIsRefusedWhateverItsIdentityHeadersSay(t *testing.T) {
 	t.Parallel()

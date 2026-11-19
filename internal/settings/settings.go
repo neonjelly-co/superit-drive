@@ -59,7 +59,7 @@ var Variables = []Variable{
 	{Name: "DRIVE_STORAGE_PASSWORD", Required: true, Meaning: "Password for the WebDAV server."},
 	{Name: "DRIVE_STORAGE_FOLDER", Default: "/", Meaning: "Folder on the WebDAV server that the Drive keeps everything in. Made if missing."},
 	{Name: "DRIVE_CAPACITY", Meaning: "Size of the storage, in bytes or with a unit (500GB, 1TB, 1TiB). Empty when not known."},
-	{Name: "DRIVE_ADDRESS", Required: true, Meaning: "The Drive's own address as people reach it, such as https://files.example.com."},
+	{Name: "DRIVE_ADDRESS", Required: true, Meaning: "The Drive's own address as people reach it, such as https://files.example.com. Changes are accepted only from pages at this address."},
 	{Name: "DRIVE_PROJECT_NAME", Required: true, Meaning: "Name of the project (the organisation) the Drive belongs to."},
 	{Name: "DRIVE_HEADER_SECRET", Required: true, Meaning: "Secret the reverse proxy adds as the Drive-Secret header on signed-in requests. At least 32 characters."},
 	{Name: "DRIVE_MEMBERS_FILE", Required: true, Meaning: "Path of the member list file. Re-read when it changes."},
