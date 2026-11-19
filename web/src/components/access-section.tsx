@@ -89,6 +89,8 @@ export function AccessSection({ placeId, itemId, what, canChange, roles, me, onC
 									: nameOf(a);
 						const why = whyOf(a);
 						const changeable = canChange && a.given && !a.owner && !a.admin && a.role !== "owner";
+						// Nobody gives access on an item to themselves: their own line can only be taken away (stepping back).
+						const ownOnItem = itemId !== null && !a.everyone && a.userId === me;
 						const Icon = a.everyone ? Users : User;
 						return (
 							// One person can have several lines, from several folders: the place in the list is the key.
@@ -98,41 +100,41 @@ export function AccessSection({ placeId, itemId, what, canChange, roles, me, onC
 									<p className="truncate" title={a.email}>
 										{name}
 									</p>
-									{!changeable && (
+									{(!changeable || ownOnItem) && (
 										<p className="truncate text-muted-foreground">
 											{ROLE_NAME[a.role]}
 											{why ? ` · ${why}` : ""}
 										</p>
 									)}
 								</div>
+								{changeable && !ownOnItem && (
+									<select
+										aria-label={`Role of ${name}`}
+										value={a.role}
+										disabled={busy}
+										onChange={(e) =>
+											void change(() => api.giveAccess(placeId, itemId, granteeOf(a), e.target.value as Role))
+										}
+										className="h-8 rounded-md border border-input bg-card px-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+									>
+										{(a.everyone ? roles.filter((r) => r !== "manager") : roles).map((r) => (
+											<option key={r} value={r}>
+												{ROLE_NAME[r]}
+											</option>
+										))}
+									</select>
+								)}
 								{changeable && (
-									<>
-										<select
-											aria-label={`Role of ${name}`}
-											value={a.role}
-											disabled={busy}
-											onChange={(e) =>
-												void change(() => api.giveAccess(placeId, itemId, granteeOf(a), e.target.value as Role))
-											}
-											className="h-8 rounded-md border border-input bg-card px-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-										>
-											{(a.everyone ? roles.filter((r) => r !== "manager") : roles).map((r) => (
-												<option key={r} value={r}>
-													{ROLE_NAME[r]}
-												</option>
-											))}
-										</select>
-										<Button
-											small
-											variant="ghost"
-											aria-label={`Take away ${name === "You" ? "your" : `${name}’s`} access`}
-											title="Take away"
-											disabled={busy}
-											onClick={() => void change(() => api.takeAccess(placeId, itemId, granteeOf(a)))}
-										>
-											<X aria-hidden />
-										</Button>
-									</>
+									<Button
+										small
+										variant="ghost"
+										aria-label={`Take away ${name === "You" ? "your" : `${name}’s`} access`}
+										title="Take away"
+										disabled={busy}
+										onClick={() => void change(() => api.takeAccess(placeId, itemId, granteeOf(a)))}
+									>
+										<X aria-hidden />
+									</Button>
 								)}
 							</li>
 						);

@@ -144,9 +144,10 @@ its siblings. Taking access away, or giving less, counts from the next request, 
 | At an item (a file or folder), in any place | Viewer | Editor | Manager, owner |
 |---|---|---|---|
 | Open a folder, download a file, see who can see it | yes | yes | yes |
-| Upload into a folder (and replace, or keep both), make folders, rename, move, delete | | yes | yes |
-| Restore it from the trash, back to where it was deleted from | | yes | yes |
-| Share it: give access, change a role, take access away | | yes | yes |
+| Upload into a folder (and replace, or keep both), make folders in it | | yes | yes |
+| Share it: give access to others, change a role, take access away | | yes | yes |
+| Rename, move or delete it: also needs editor of the folder it is in | | yes | yes |
+| Restore it from the trash: also needs editor of the folder it goes back to, and either the place's whole trash or having put it there | | yes | yes |
 
 | In a shared folder as a whole (its top folder) | Viewer | Editor | Manager |
 |---|---|---|---|
@@ -156,11 +157,16 @@ its siblings. Taking access away, or giving less, counts from the next request, 
 
 In their own "My files" the owner may do everything, including sharing any item in it; nobody else may do anything
 there, project admins included, except with what was shared with them. A "My files" whose owner has left the member
-list is held: nothing shared from it opens, until they are back (what happens to it otherwise is a later ticket). Two
-rules hold the tables together, and a test checks them for every person and place: whoever may upload may delete (an
-upload can replace, which puts a file in the trash), and whoever may delete something may restore it ("restore
-anything you could have deleted"). An editor shares further; a viewer cannot. Every list says, for each item, who can
-see it, and the details panel lists each grant and where it comes from.
+list is held: nothing shared from it opens, until they are back (what happens to it otherwise is a later ticket).
+
+Renaming, moving, deleting and restoring change the folder an item is in (or goes back to), so they are decided there
+too, as an upload into it is: whoever may put things into a folder may rename, take out and delete what is in it.
+Whoever may delete something may restore it ("restore anything you could have deleted"), back into a folder they may
+add to; those who may see the place's whole trash restore anything in it, and others only what they put there
+themselves (by deleting it, or replacing it with an upload). Whoever may upload may delete (an upload can replace,
+which puts a file in the trash). A test checks these rules for every person and place. An editor shares further, but
+never with themselves; a viewer cannot share. Every list says, for each item, who can see it, and the details panel
+lists each grant and where it comes from.
 
 **Someone given part of a place.** A member given a folder deep in someone's "My files" (or in a shared folder they
 have no role on as a whole) works inside it as their role allows, and nothing about the rest reaches them:
@@ -170,10 +176,13 @@ have no role on as a whole) works inside it as their role allows, and nothing ab
 - a listing's path starts at the highest folder they can open (`fromTop` is false): the names of the folders above it
   are never sent, nor in "who can see this", which says "from a folder above" for access given there, nor in the
   trash entry a delete answers with;
-- they may rename, delete and restore the very folder their role is on, and move things only into folders where they
-  may upload: not out of what they were given;
+- they work inside the folder they were given, and share it, but cannot rename, move or delete that folder itself:
+  that changes the folder it is in, which they cannot open (a clashing name would tell them what is there). They move
+  things only into folders where they may upload, so nothing leaves what they were given;
 - a place's trash is shown only to those who may upload into its top folder. Someone given part of it restores what
-  they could have deleted by its address (the interface's "Undo");
+  they deleted themselves, by its address (the interface's "Undo"), and only back into a folder they may add to: not
+  what the owner deleted or replaced before or after sharing it, and not into the top folder when the folder it came
+  from is gone. The folder it goes into is decided on again just before it moves;
 - every route answers an item they cannot reach exactly as one that does not exist: one message, "This is not in the
   Drive, or you have no access to it.", for every place, item or item in the trash that is not there or not theirs to
   act on, and for every refused action.
