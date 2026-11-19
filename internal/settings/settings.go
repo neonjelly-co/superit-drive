@@ -7,6 +7,8 @@ package settings
 import (
 	"errors"
 	"fmt"
+	"net"
+	netmail "net/mail"
 	"net/url"
 	"strconv"
 	"strings"
@@ -31,7 +33,37 @@ type Settings struct {
 	Storage Storage
 	// Capacity is the size of the Drive storage in bytes, or 0 when it is not known.
 	Capacity int64
+	// Mail is the mail server the Drive sends its own mail through, such as "shared with you". Its Host is empty when
+	// the Drive sends no mail.
+	Mail Mail
 }
+
+// Mail is the mail server the Drive sends mail through, over SMTP.
+type Mail struct {
+	// Host is the mail server's name or address, such as smtp.example.com; empty when the Drive sends no mail.
+	Host string
+	Port int
+	// TLS is how the connection is encrypted.
+	TLS MailTLS
+	// User and Password are the login, both empty when the server needs none.
+	User     string
+	Password string
+	// From is the address the Drive's mail comes from.
+	From *netmail.Address
+}
+
+// MailTLS is how the connection to the mail server is encrypted.
+type MailTLS string
+
+const (
+	// StartTLS starts in plain text and asks the server to switch to TLS (STARTTLS) before anything else is sent. The
+	// mail is not sent when the server does not offer it.
+	StartTLS MailTLS = "starttls"
+	// ImplicitTLS is TLS from the first byte, as on port 465.
+	ImplicitTLS MailTLS = "implicit"
+	// NoTLS sends everything in plain text: only for a mail server on the same machine or network that needs no login.
+	NoTLS MailTLS = "none"
+)
 
 // Storage is the WebDAV server that holds the files: a Storage Box bought from Superit, or the customer's own.
 type Storage struct {
@@ -65,6 +97,12 @@ var Variables = []Variable{
 	{Name: "DRIVE_MEMBERS_FILE", Required: true, Meaning: "Path of the member list file. Re-read when it changes."},
 	{Name: "DRIVE_DATA_DIR", Required: true, Meaning: "Folder for the index. Set to /data in the container image."},
 	{Name: "DRIVE_LISTEN", Default: ":8080", Meaning: "Address the web server listens on."},
+	{Name: "DRIVE_SMTP_HOST", Meaning: "Mail server the Drive sends its mail through (\"shared with you\"), such as smtp.example.com. Empty: the Drive sends no mail, and sharing works without it."},
+	{Name: "DRIVE_SMTP_PORT", Default: "587", Meaning: "Port of the mail server."},
+	{Name: "DRIVE_SMTP_TLS", Meaning: "How the connection to the mail server is encrypted: starttls, implicit (TLS from the first byte) or none. Empty: implicit on port 465, starttls on any other. none only without a login."},
+	{Name: "DRIVE_SMTP_USER", Meaning: "Login name for the mail server. Empty when it needs none."},
+	{Name: "DRIVE_SMTP_PASSWORD", Meaning: "Password for the mail server, with DRIVE_SMTP_USER."},
+	{Name: "DRIVE_MAIL_FROM", Meaning: "Address the Drive's mail comes from, such as drive@files.example.com or Drive <drive@files.example.com>. Needed with DRIVE_SMTP_HOST."},
 }
 
 // MinSecretLength is the shortest header secret the Drive accepts.
@@ -103,6 +141,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	if strings.ContainsFunc(s.HeaderSecret, func(r rune) bool { return r > unicode.MaxASCII || !unicode.IsPrint(r) }) {
 		r.problem("DRIVE_HEADER_SECRET must be printable ASCII, so it can travel in a header")
 	}
+	s.Mail = r.mail()
 
 	if err := r.err("the Drive cannot start: "); err != nil {
 		return Settings{}, err
@@ -152,6 +191,60 @@ func (r *reader) value(name string) string {
 		return s
 	}
 	panic("settings: " + name + " is missing from Variables")
+}
+
+// mail reads the mail settings. With none of them set, the Drive sends no mail; a mail server named without
+// everything it needs, or settings without a mail server, are refused, so a mistake never passes for "no mail".
+func (r *reader) mail() Mail {
+	m := Mail{
+		Host:     r.value("DRIVE_SMTP_HOST"),
+		User:     r.value("DRIVE_SMTP_USER"),
+		Password: r.value("DRIVE_SMTP_PASSWORD"),
+	}
+	from, tls := r.value("DRIVE_MAIL_FROM"), r.value("DRIVE_SMTP_TLS")
+	if m.Host == "" {
+		for _, name := range []string{"DRIVE_SMTP_PORT", "DRIVE_SMTP_TLS", "DRIVE_SMTP_USER", "DRIVE_SMTP_PASSWORD", "DRIVE_MAIL_FROM"} {
+			if strings.TrimSpace(r.getenv(name)) != "" {
+				r.problem(name + " is set but DRIVE_SMTP_HOST is not: set the mail server too, or leave every mail setting empty")
+				break
+			}
+		}
+		return Mail{}
+	}
+	if strings.ContainsFunc(m.Host, func(c rune) bool { return c <= ' ' || c > unicode.MaxASCII || strings.ContainsRune("/\\@:[]?#", c) }) &&
+		net.ParseIP(m.Host) == nil {
+		r.problem("DRIVE_SMTP_HOST must be a host name or an IP address, without a scheme, port or path")
+	}
+	port, err := strconv.Atoi(r.value("DRIVE_SMTP_PORT"))
+	if err != nil || port < 1 || port > 65535 {
+		r.problem("DRIVE_SMTP_PORT must be a port number from 1 to 65535")
+	}
+	m.Port = port
+	switch MailTLS(tls) {
+	case "":
+		m.TLS = StartTLS
+		if port == 465 {
+			m.TLS = ImplicitTLS
+		}
+	case StartTLS, ImplicitTLS, NoTLS:
+		m.TLS = MailTLS(tls)
+	default:
+		r.problem("DRIVE_SMTP_TLS must be starttls, implicit or none")
+	}
+	if (m.User == "") != (m.Password == "") {
+		r.problem("DRIVE_SMTP_USER and DRIVE_SMTP_PASSWORD go together: set both, or neither")
+	}
+	if m.TLS == NoTLS && m.User != "" {
+		r.problem("DRIVE_SMTP_TLS=none would send the mail server's login unencrypted: it is allowed only without DRIVE_SMTP_USER")
+	}
+	if from == "" {
+		r.problem("DRIVE_MAIL_FROM is not set: the Drive's mail needs an address to come from")
+	} else if a, err := netmail.ParseAddress(from); err != nil || !strings.Contains(a.Address, "@") {
+		r.problem("DRIVE_MAIL_FROM must be one email address, such as drive@files.example.com or Drive <drive@files.example.com>")
+	} else {
+		m.From = a
+	}
+	return m
 }
 
 func (r *reader) storage() Storage {

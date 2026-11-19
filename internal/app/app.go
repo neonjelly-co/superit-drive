@@ -14,6 +14,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/clock"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
+	"github.com/neonjelly-co/superit-drive/internal/mail"
 	"github.com/neonjelly-co/superit-drive/internal/members"
 	"github.com/neonjelly-co/superit-drive/internal/server"
 	"github.com/neonjelly-co/superit-drive/internal/settings"
@@ -53,6 +54,16 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	}
 	d := drive.New(x, store, drive.Options{Now: clock.Now, Log: log})
 
+	// Sends the Drive's own mail in the background, so a request never waits for the mail server; none without one.
+	mailer := mail.New(s.Mail, s.Address.Hostname(), log)
+	mailCtx, stopMail := context.WithCancel(ctx)
+	mailDone := make(chan struct{})
+	go func() {
+		defer close(mailDone)
+		mailer.Run(mailCtx)
+	}()
+	defer func() { stopMail(); <-mailDone }()
+
 	srv := server.New(server.Config{
 		ProjectName:  s.ProjectName,
 		Address:      s.Address,
@@ -60,6 +71,7 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 		Members:      list,
 		Drive:        d,
 		Capacity:     s.Capacity,
+		Mail:         mailer,
 		Interface:    web.Interface(),
 		Log:          log,
 	})
@@ -93,7 +105,7 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	}()
 
 	log.Info("listening", "address", ln.Addr().String(), "version", version, "storage", store.Address(),
-		"members", list.Current().Len(), "data", s.DataDir,
+		"members", list.Current().Len(), "data", s.DataDir, "mail", mailer.Describe(),
 		"memoryLimit", strconv.FormatInt(debug.SetMemoryLimit(-1)>>20, 10)+" MiB")
 	if err := httpServer.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err

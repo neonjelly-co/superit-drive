@@ -70,6 +70,12 @@ a test keeps the two equal.)
 | `DRIVE_MEMBERS_FILE` | yes | Path of the member list file. |
 | `DRIVE_DATA_DIR` | yes | Folder for the index. The container image sets it to `/data`. |
 | `DRIVE_LISTEN` | no, `:8080` | Address the web server listens on. |
+| `DRIVE_SMTP_HOST` | no | Mail server the Drive sends its own mail through (see [Mail](#mail)), such as `smtp.example.com`. Empty: the Drive sends no mail, and sharing works without it. |
+| `DRIVE_SMTP_PORT` | no, `587` | Port of the mail server. |
+| `DRIVE_SMTP_TLS` | no | How the connection to the mail server is encrypted: `starttls`, `implicit` (TLS from the first byte) or `none`. Empty: `implicit` on port 465, `starttls` on any other. `none` only without a login. |
+| `DRIVE_SMTP_USER` | no | Login name for the mail server. Empty when it needs none. |
+| `DRIVE_SMTP_PASSWORD` | no | Password for the mail server, with `DRIVE_SMTP_USER`. |
+| `DRIVE_MAIL_FROM` | no | Address the Drive's mail comes from, such as `drive@files.example.com` or `Drive <drive@files.example.com>`. Needed with `DRIVE_SMTP_HOST`. |
 
 ### Layout on the storage
 

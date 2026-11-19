@@ -26,6 +26,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
+	"github.com/neonjelly-co/superit-drive/internal/mail"
 	"github.com/neonjelly-co/superit-drive/internal/members"
 	"github.com/neonjelly-co/superit-drive/internal/transfers"
 )
@@ -41,6 +42,8 @@ type Config struct {
 	Drive        *drive.Drive
 	// Capacity is the size of the Drive storage in bytes (DRIVE_CAPACITY), or 0 when it is not known.
 	Capacity int64
+	// Mail sends the Drive's own mail, such as "shared with you"; nil, or one without a mail server, sends none.
+	Mail *mail.Mailer
 	// Interface is the built interface (index.html and assets/).
 	Interface fs.FS
 	Log       *slog.Logger
@@ -54,6 +57,8 @@ type Server struct {
 	members  interface{ Current() *members.List }
 	drive    *drive.Drive
 	capacity int64
+	mail     *mail.Mailer
+	address  *url.URL // DRIVE_ADDRESS, for the links in mail
 	ui       fs.FS
 	log      *slog.Logger
 	// slots lets at most transfers.Slots transfers be in flight.
@@ -63,7 +68,7 @@ type Server struct {
 // New makes a server.
 func New(c Config) *Server {
 	s := &Server{project: c.ProjectName, secret: c.HeaderSecret, members: c.Members, drive: c.Drive, capacity: c.Capacity,
-		ui: c.Interface, log: c.Log, slots: transfers.NewGate(transfers.Slots)}
+		mail: c.Mail, address: c.Address, ui: c.Interface, log: c.Log, slots: transfers.NewGate(transfers.Slots)}
 	if c.Address != nil {
 		s.origin = originOf(c.Address)
 	}
