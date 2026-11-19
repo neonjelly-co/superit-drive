@@ -1,0 +1,252 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"slices"
+
+	"github.com/neonjelly-co/superit-drive/internal/access"
+	"github.com/neonjelly-co/superit-drive/internal/drive"
+	"github.com/neonjelly-co/superit-drive/internal/index"
+	"github.com/neonjelly-co/superit-drive/internal/members"
+)
+
+// The handlers for who has access, and for giving it: on a shared folder as a whole (its managers decide) and on any
+// file or folder (whoever may share it: its owner, an editor, a manager). Their routes are in routes.go with all the
+// others; guard has decided before any of these runs.
+
+// accessJSON is one line of "who can see this": someone with access, the role they have by it, and where it comes
+// from.
+type accessJSON struct {
+	// Everyone is true for everyone in the project. Otherwise the line is about one member, by user id, with their
+	// email address and name from the member list.
+	Everyone    bool        `json:"everyone,omitempty"`
+	UserID      string      `json:"userId,omitempty"`
+	Email       string      `json:"email,omitempty"`
+	DisplayName string      `json:"displayName,omitempty"`
+	Role        access.Role `json:"role"`
+	// Owner is true for the member whose "My files" it is; Admin for a project admin, a manager of every shared folder.
+	// Neither was given, and neither can be taken away.
+	Owner bool `json:"owner,omitempty"`
+	Admin bool `json:"admin,omitempty"`
+	// Given is true for access given right here: on this item, or, in a shared folder's own list, on it as a whole.
+	// Whoever may share it can change it or take it away here.
+	Given bool `json:"given"`
+	// Inherited is true for access given on a folder above, or on the shared folder as a whole. From is that folder
+	// (id 0 for the shared folder itself), when the person asking can open it; nil when they cannot, so they never
+	// learn its name.
+	Inherited bool        `json:"inherited,omitempty"`
+	From      *folderJSON `json:"from,omitempty"`
+	// Former is true for access given to someone no longer in the member list.
+	Former bool `json:"former,omitempty"`
+}
+
+// accessList is who has access to the item at the end of path (the folders above it, then the item) in place p, or to
+// the place as a whole when path is empty, as the person who asks may see it: first who has it by the place itself
+// (the owner of a My files; on a shared folder, every project admin), then what was given, from the top down, each
+// in the order it was given. Grants that count for nothing (access.Counts) are left out.
+func (s *Server) accessList(ctx context.Context, who access.Person, p index.Place, path []index.Item) ([]accessJSON, error) {
+	ids := idsOf(path)
+	grants, err := s.drive.GrantsOn(ctx, p, ids)
+	if err != nil {
+		return nil, err
+	}
+	where := s.accessPlace(p, ids, grants)
+	list := s.members.Current()
+	out := []accessJSON{}
+	switch p.Kind {
+	case index.MyFiles:
+		if m, ok := list.Lookup(p.Owner); ok {
+			out = append(out, accessJSON{UserID: m.UserID, Email: m.Email, DisplayName: m.DisplayName, Role: access.Owner, Owner: true})
+		}
+	case index.SharedFolder:
+		for _, m := range list.All() {
+			if m.Role == members.RoleAdmin {
+				out = append(out, accessJSON{UserID: m.UserID, Email: m.Email, DisplayName: m.DisplayName, Role: access.Manager, Admin: true})
+			}
+		}
+	}
+	depth := map[int64]int{0: 0}
+	for i, id := range ids {
+		depth[id] = i + 1
+	}
+	slices.SortStableFunc(grants, func(a, b index.Grant) int { return depth[a.Item] - depth[b.Item] })
+	for _, g := range grants {
+		at, onPath := depth[g.Item]
+		if !onPath || !access.Counts(where.Kind, accessGrant(g)) {
+			continue
+		}
+		e := accessJSON{Everyone: g.Everyone, Role: access.Role(g.Role), Given: at == len(ids)}
+		if !g.Everyone {
+			e.UserID = g.Member
+			if m, ok := list.Lookup(g.Member); ok {
+				e.Email, e.DisplayName = m.Email, m.DisplayName
+			} else {
+				e.Former = true
+			}
+		}
+		if at < len(ids) {
+			e.Inherited = true
+			if access.Decide(who, access.List, where.Up(at)) {
+				if at == 0 {
+					e.From = &folderJSON{ID: 0, Name: p.Name}
+				} else {
+					e.From = &folderJSON{ID: path[at-1].ID, Name: path[at-1].Name}
+				}
+			}
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// pathOfCall is the item a request is about, after the folders above it; none for a place as a whole.
+func pathOfCall(c call) []index.Item {
+	if c.item == nil {
+		return nil
+	}
+	return pathTo(*c.item)
+}
+
+func (s *Server) writeAccess(w http.ResponseWriter, r *http.Request, c call) {
+	list, err := s.accessList(r.Context(), personOf(c.member), *c.place, pathOfCall(c))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"access": list})
+}
+
+// whoHasAccess says who has access to an item, or to a shared folder as a whole, and in which role.
+//
+//	GET /api/places/{place}/access
+//	GET /api/places/{place}/items/{item}/access
+func (s *Server) whoHasAccess(w http.ResponseWriter, r *http.Request, c call) {
+	s.writeAccess(w, r, c)
+}
+
+// grantee says who a route that gives or takes access is about.
+type grantee bool
+
+const (
+	toMember   grantee = false // the member named by the path value "member"
+	toEveryone grantee = true  // everyone in the project
+)
+
+func (g grantee) of(r *http.Request) index.Grantee {
+	if g == toEveryone {
+		return index.Grantee{Everyone: true}
+	}
+	return index.Grantee{Member: r.PathValue("member")}
+}
+
+var errNoManagerLeft = errors.New("the shared folder would have no manager")
+
+// keepsAManager refuses a change to what was given on shared folder p as a whole that would leave nobody in the member
+// list managing it. There is always someone while the project has an admin.
+func (s *Server) keepsAManager(p index.Place) func(after []index.Grant) error {
+	list := s.members.Current()
+	return func(after []index.Grant) error {
+		where := s.accessPlace(p, nil, after)
+		for _, m := range list.All() {
+			if access.RoleAt(personOf(m), where) == access.Manager {
+				return nil
+			}
+		}
+		return errNoManagerLeft
+	}
+}
+
+// giveAccess gives a member, or everyone in the project, a role on an item or on a shared folder as a whole, in place
+// of what they had there, and answers with who has access now.
+//
+//	PUT /api/places/{place}/access/members/{member}              {"role": "viewer" | "editor" | "manager"}
+//	PUT /api/places/{place}/access/everyone                      {"role": "viewer" | "editor"}
+//	PUT /api/places/{place}/items/{item}/access/members/{member} {"role": "viewer" | "editor"}
+//	PUT /api/places/{place}/items/{item}/access/everyone         {"role": "viewer" | "editor"}
+//
+// Only members can be given access (guests come later), including those who have never opened the Drive. Changing a
+// manager of a shared folder into something less is refused when nobody would be left managing it.
+func (s *Server) giveAccess(who grantee) func(http.ResponseWriter, *http.Request, call) {
+	return func(w http.ResponseWriter, r *http.Request, c call) {
+		var body struct {
+			Role access.Role `json:"role"`
+		}
+		if !s.readBody(w, r, &body) {
+			return
+		}
+		to := who.of(r)
+		if !to.Everyone {
+			m, ok := s.members.Current().Lookup(to.Member)
+			if !ok {
+				s.refuse(w, r, http.StatusBadRequest, "This person is not a member of the project.")
+				return
+			}
+			to.Member = m.UserID
+			if c.place.Kind == index.MyFiles && m.UserID == c.place.Owner {
+				s.refuse(w, r, http.StatusBadRequest, "This is in their own My files: they have it already.")
+				return
+			}
+		}
+		var on int64
+		if c.item != nil {
+			on = c.item.ID
+		}
+		if !access.Counts(c.access.Kind, access.Grant{On: on, Member: to.Member, Everyone: to.Everyone, Role: body.Role}) {
+			s.refuse(w, r, http.StatusBadRequest, roleRefused(c, to))
+			return
+		}
+		var check func([]index.Grant) error
+		if c.item == nil {
+			check = s.keepsAManager(*c.place)
+		}
+		err := s.drive.Give(r.Context(), *c.place, c.item, to, string(body.Role), c.member.UserID, check)
+		s.changedAccess(w, r, c, err)
+	}
+}
+
+// roleRefused says which roles can be given where the request tried to give one that cannot.
+func roleRefused(c call, to index.Grantee) string {
+	switch {
+	case c.item != nil:
+		return "Access to a file or folder is given as viewer or editor."
+	case to.Everyone:
+		return "Everyone in the project can be given viewer or editor on a shared folder, not manager."
+	}
+	return "Access to a shared folder is given as viewer, editor or manager."
+}
+
+// takeAccess takes away what was given to a member, or to everyone in the project, on an item or on a shared folder as
+// a whole, and answers with who has access now. Access they have from a folder above stays; it is changed there.
+// Taking away a manager of a shared folder is refused when nobody would be left managing it.
+//
+//	DELETE /api/places/{place}/access/members/{member}
+//	DELETE /api/places/{place}/access/everyone
+//	DELETE /api/places/{place}/items/{item}/access/members/{member}
+//	DELETE /api/places/{place}/items/{item}/access/everyone
+func (s *Server) takeAccess(who grantee) func(http.ResponseWriter, *http.Request, call) {
+	return func(w http.ResponseWriter, r *http.Request, c call) {
+		var check func([]index.Grant) error
+		if c.item == nil {
+			check = s.keepsAManager(*c.place)
+		}
+		err := s.drive.TakeAway(r.Context(), *c.place, c.item, who.of(r), check)
+		s.changedAccess(w, r, c, err)
+	}
+}
+
+// changedAccess answers a change to who has access: with who has it now, or with why it did not happen.
+func (s *Server) changedAccess(w http.ResponseWriter, r *http.Request, c call, err error) {
+	switch {
+	case err == nil:
+		s.writeAccess(w, r, c)
+	case errors.Is(err, errNoManagerLeft):
+		s.refuse(w, r, http.StatusConflict, "A shared folder needs a manager. Make someone else a manager first.")
+	case errors.Is(err, index.ErrNoItem), errors.Is(err, drive.ErrPlaceGone):
+		// It went to the trash after guard found it: the same answer guard gives from now on.
+		s.refuse(w, r, http.StatusNotFound, notHere)
+	default:
+		s.fail(w, r, err)
+	}
+}

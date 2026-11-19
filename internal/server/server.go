@@ -2,12 +2,13 @@
 //
 // Every route is listed in routes.go and registered in Handler, and nowhere else. Each request passes the same steps
 // in guard before its handler runs: who is asking (identify), whether a change came from the Drive's own pages
-// (fromOwnPage), which place it concerns (if any) and the role they were given there, whether they may
-// (access.Decide), and which item in that place, or in that place's trash (if any). A handler only ever sees a request
-// that passed them all. A test fails if anything outside this file registers a handler.
+// (fromOwnPage), which place it concerns (if any), which item in that place or in its trash (if any), the access given
+// on the place and on the way down to the item (accessAt), and whether they may (access.Decide). A handler only ever
+// sees a request that passed them all. A test fails if anything outside this file registers a handler.
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -80,14 +81,16 @@ type route struct {
 	serve   func(http.ResponseWriter, *http.Request, call)
 }
 
-// call is what a handler gets: who is asking, the place the request concerns (nil for no place) as the access package
-// saw it, and the item in it or in its trash (nil for none). All have already passed guard.
+// call is what a handler gets: who is asking, the place the request concerns (nil for no place), the item in it or in
+// its trash (nil for none), and where the request is as the access package saw it. All have already passed guard.
 type call struct {
 	member  members.Member
 	place   *index.Place
 	access  *access.Place
 	item    *index.Item
 	trashed *index.TrashItem
+	// backTo is, for an item in the trash, the folder it goes back to when restored (nil: the place's top folder).
+	backTo *index.Item
 }
 
 // Handler is the Drive's whole HTTP handler. This is the only place routes are registered.
@@ -111,7 +114,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 // guard is the gate every route passes: identify the person, refuse a change from anywhere but the Drive's own pages,
-// find the place, ask access.Decide, find the item in the place, then serve.
+// find the place and the item in it, gather the access given there, ask access.Decide, then serve.
 func (s *Server) guard(rt route) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		member, refused := s.identify(r)
@@ -127,66 +130,84 @@ func (s *Server) guard(rt route) http.Handler {
 			return
 		}
 		c := call{member: member}
-		if rt.place != "" {
-			p, err := s.findPlace(r, rt.place, rt.inTrash)
-			if errors.Is(err, index.ErrNoPlace) {
-				s.refuse(w, r, http.StatusNotFound, noSuchPlace)
-				return
-			}
-			if err != nil {
-				s.fail(w, r, err)
-				return
-			}
-			// The role the index says this person was given there; access decides what it is worth.
-			given, err := s.drive.Given(r.Context(), p, member.UserID)
-			if err != nil {
-				s.fail(w, r, err)
-				return
-			}
-			c.place = &p
-			c.access = accessPlace(p, given)
-		}
-		if !access.Decide(personOf(member), rt.action, c.access) {
-			// The same answer as a place that does not exist: nobody learns that someone else's place is there.
-			s.refuse(w, r, http.StatusNotFound, noSuchPlace)
+		if rt.place != "" && !s.findWhere(w, r, rt, &c) {
 			return
 		}
-		// The item is looked up only inside the place just decided on, and only after the decision, so an item of
-		// another place is never found and a refused person learns nothing about which items exist.
-		if rt.item != "" {
-			it, err := s.findItem(r, *c.place, rt.item)
-			if errors.Is(err, index.ErrNoItem) {
-				s.refuse(w, r, http.StatusNotFound, noSuchItem)
-				return
-			}
-			if err != nil {
-				s.fail(w, r, err)
-				return
-			}
-			c.item = &it
-		}
-		if rt.trashed != "" {
-			t, err := s.findTrashed(r, *c.place, rt.trashed)
-			if errors.Is(err, index.ErrNoItem) {
-				s.refuse(w, r, http.StatusNotFound, noSuchTrashed)
-				return
-			}
-			if err != nil {
-				s.fail(w, r, err)
-				return
-			}
-			c.trashed = &t
+		if !access.Decide(personOf(member), rt.action, c.access) {
+			// The same answer as for a place or an item that does not exist.
+			s.refuse(w, r, http.StatusNotFound, notHere)
+			return
 		}
 		rt.serve(w, r, c)
 	})
 }
 
-const (
-	noSuchPlace   = "There is no such place in this Drive."
-	noSuchItem    = "There is no such file or folder in this Drive."
-	noSuchTrashed = "There is no such file or folder in the trash."
-	refusedOrigin = "This change did not come from the Drive's own page, so it was refused."
-)
+// findWhere finds the place a route concerns and the item in it, or in its trash, and gathers the access given on
+// the place's top folder and on the way down to the item. ok is false when the person was already answered.
+//
+// The item is looked up before access decides, because what someone may do at an item depends on where it is. It is
+// looked up only inside the place, so an item of another place is never found. Every refusal, and every place or item
+// that is not there, gets the one answer notHere: nobody learns from it whether a place or an item they cannot reach
+// exists, including inside a place where they can reach something else.
+func (s *Server) findWhere(w http.ResponseWriter, r *http.Request, rt route, c *call) (ok bool) {
+	p, err := s.findPlace(r, rt.place, rt.inTrash)
+	if errors.Is(err, index.ErrNoPlace) {
+		s.refuse(w, r, http.StatusNotFound, notHere)
+		return false
+	}
+	if err != nil {
+		s.fail(w, r, err)
+		return false
+	}
+	c.place = &p
+	var path []index.Item // the item, after the folders above it; none for the place's top folder
+	if rt.item != "" {
+		it, err := s.findItem(r, p, rt.item)
+		if errors.Is(err, index.ErrNoItem) {
+			s.refuse(w, r, http.StatusNotFound, notHere)
+			return false
+		}
+		if err != nil {
+			s.fail(w, r, err)
+			return false
+		}
+		c.item = &it
+		path = pathTo(it)
+	}
+	if rt.trashed != "" {
+		t, err := s.findTrashed(r, p, rt.trashed)
+		if errors.Is(err, index.ErrNoItem) {
+			s.refuse(w, r, http.StatusNotFound, notHere)
+			return false
+		}
+		if err != nil {
+			s.fail(w, r, err)
+			return false
+		}
+		c.trashed = &t
+		// Restoring is decided where the item goes back to, as if it were there: whoever could have deleted it from
+		// there may restore it.
+		if c.backTo, err = s.drive.RestoreTo(r.Context(), p, t); err != nil {
+			s.fail(w, r, err)
+			return false
+		}
+		if c.backTo != nil {
+			path = pathTo(*c.backTo)
+		}
+		path = append(path, t.Item)
+	}
+	if c.access, err = s.accessAt(r.Context(), p, idsOf(path)); err != nil {
+		s.fail(w, r, err)
+		return false
+	}
+	return true
+}
+
+// notHere is the one answer for a place, an item or an item in the trash that is not there, or that the person may not
+// do what they asked with.
+const notHere = "This is not in the Drive, or you have no access to it."
+
+const refusedOrigin = "This change did not come from the Drive's own page, so it was refused."
 
 // findPlace finds the place whose id is the path value name: one that is not in the trash, or, with inTrash, a shared
 // folder that is.
@@ -249,16 +270,50 @@ func originOf(u *url.URL) string {
 	return scheme + "://" + host
 }
 
-// accessPlace describes a place the way the access package needs it, for a person who was given the role given there
-// ("" for none).
-func accessPlace(p index.Place, given string) *access.Place {
+// accessAt describes the place p, at the item whose path is given (the ids of the folders above it, then the item; none
+// for the place's top folder), the way the access package needs it: with everything given on the place's top folder
+// and on that path. Every decision about a place or an item is made on what this gathers.
+func (s *Server) accessAt(ctx context.Context, p index.Place, path []int64) (*access.Place, error) {
+	grants, err := s.drive.GrantsOn(ctx, p, path)
+	if err != nil {
+		return nil, err
+	}
+	return s.accessPlace(p, path, grants), nil
+}
+
+// accessPlace describes the place p, at the item whose path is given, with the grants already read for it.
+func (s *Server) accessPlace(p index.Place, path []int64, grants []index.Grant) *access.Place {
+	where := &access.Place{Deleted: !p.Deleted.IsZero(), Path: path, Grants: make([]access.Grant, 0, len(grants))}
+	for _, g := range grants {
+		where.Grants = append(where.Grants, accessGrant(g))
+	}
 	switch p.Kind {
 	case index.MyFiles:
-		return &access.Place{Kind: access.MyFiles, Owner: p.Owner, Deleted: !p.Deleted.IsZero()}
+		where.Kind = access.MyFiles
+		where.Owner = p.Owner
+		_, stays := s.members.Current().Lookup(p.Owner)
+		where.OwnerLeft = !stays
 	case index.SharedFolder:
-		return &access.Place{Kind: access.SharedFolder, Deleted: !p.Deleted.IsZero(), Given: access.Role(given)}
+		where.Kind = access.SharedFolder
+	} // any other kind stays without one, and access refuses it
+	return where
+}
+
+func accessGrant(g index.Grant) access.Grant {
+	return access.Grant{On: g.Item, Member: g.Member, Everyone: g.Everyone, Role: access.Role(g.Role)}
+}
+
+// pathTo is an item after the folders above it, from the top of its place down.
+func pathTo(it index.Item) []index.Item {
+	return append(append(make([]index.Item, 0, len(it.Above)+1), it.Above...), it)
+}
+
+func idsOf(items []index.Item) []int64 {
+	ids := make([]int64, 0, len(items))
+	for _, it := range items {
+		ids = append(ids, it.ID)
 	}
-	return &access.Place{} // a kind access has no rule for: refused
+	return ids
 }
 
 // personOf describes a member the way the access package needs it.

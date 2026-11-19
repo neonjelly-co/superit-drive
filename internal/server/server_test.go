@@ -47,8 +47,15 @@ var placeRoutesTriedByAnOutsider = []string{
 	"DELETE /api/places/{place}",
 	"POST /api/places/{place}/restore",
 	"GET /api/places/{place}/access",
-	"PUT /api/places/{place}/access/{member}",
-	"DELETE /api/places/{place}/access/{member}",
+	"PUT /api/places/{place}/access/members/{member}",
+	"DELETE /api/places/{place}/access/members/{member}",
+	"PUT /api/places/{place}/access/everyone",
+	"DELETE /api/places/{place}/access/everyone",
+	"GET /api/places/{place}/items/{item}/access",
+	"PUT /api/places/{place}/items/{item}/access/members/{member}",
+	"DELETE /api/places/{place}/items/{item}/access/members/{member}",
+	"PUT /api/places/{place}/items/{item}/access/everyone",
+	"DELETE /api/places/{place}/items/{item}/access/everyone",
 	"GET /api/places/{place}/items",
 	"GET /api/places/{place}/items/{item}/items",
 	"POST /api/places/{place}/files",
@@ -75,6 +82,43 @@ func TestEveryRouteWithAPlaceIsTriedByAnOutsider(t *testing.T) {
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Fatalf("the routes that take a place are\n%q\nbut the outsider test tries\n%q", got, want)
+	}
+}
+
+// Every route that takes an item, or an item in the trash, is tried in test/sharing_test.go
+// (TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing) by a member who was given one folder deep
+// inside someone's place: for every item they were not given (its parent, its sibling, the item of another place) they
+// must get the same answer as for an item that does not exist, and the routes of the place as a whole must answer as a
+// place that does not exist. This list is that test's; a new route that takes an item fails here until it is added
+// there, and here.
+var itemRoutesTriedWithPartOfAPlace = []string{
+	"GET /api/places/{place}/items/{item}/access",
+	"PUT /api/places/{place}/items/{item}/access/members/{member}",
+	"DELETE /api/places/{place}/items/{item}/access/members/{member}",
+	"PUT /api/places/{place}/items/{item}/access/everyone",
+	"DELETE /api/places/{place}/items/{item}/access/everyone",
+	"GET /api/places/{place}/items/{item}/items",
+	"POST /api/places/{place}/items/{item}/files",
+	"POST /api/places/{place}/items/{item}/folders",
+	"GET /api/places/{place}/items/{item}/download",
+	"POST /api/places/{place}/items/{item}/rename",
+	"POST /api/places/{place}/items/{item}/move",
+	"DELETE /api/places/{place}/items/{item}",
+	"POST /api/places/{place}/trash/{item}/restore",
+}
+
+func TestEveryRouteWithAnItemIsTriedWithPartOfAPlace(t *testing.T) {
+	var got []string
+	for _, rt := range bareServer(t).routes() {
+		if rt.item != "" || rt.trashed != "" {
+			got = append(got, rt.pattern)
+		}
+	}
+	want := slices.Clone(itemRoutesTriedWithPartOfAPlace)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("the routes that take an item are\n%q\nbut the test with part of a place tries\n%q", got, want)
 	}
 }
 

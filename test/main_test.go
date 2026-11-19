@@ -40,15 +40,19 @@ type (
 		Role string   `json:"role"`
 		Can  []string `json:"can"`
 	}
-	// personJSON is someone with a role on a shared folder.
-	personJSON struct {
-		UserID      string `json:"userId"`
-		Email       string `json:"email"`
-		DisplayName string `json:"displayName"`
-		Role        string `json:"role"`
-		Given       bool   `json:"given"`
-		Admin       bool   `json:"admin"`
-		Former      bool   `json:"former"`
+	// accessJSON is one line of "who can see this", for an item or a shared folder as a whole.
+	accessJSON struct {
+		Everyone    bool        `json:"everyone"`
+		UserID      string      `json:"userId"`
+		Email       string      `json:"email"`
+		DisplayName string      `json:"displayName"`
+		Role        string      `json:"role"`
+		Owner       bool        `json:"owner"`
+		Admin       bool        `json:"admin"`
+		Given       bool        `json:"given"`
+		Inherited   bool        `json:"inherited"`
+		From        *folderJSON `json:"from"`
+		Former      bool        `json:"former"`
 	}
 	deletedPlaceJSON struct {
 		ID      int64     `json:"id"`
@@ -60,8 +64,12 @@ type (
 	}
 	itemsJSON struct {
 		Items []itemJSON `json:"items"`
-		// Path is the folders from the top of the place down to the one listed; empty for the top folder.
-		Path []folderJSON `json:"path"`
+		// Path is the folders the person can open, from the highest of them down to the one listed; empty for the top
+		// folder. FromTop says whether it starts at the place's top folder.
+		Path    []folderJSON `json:"path"`
+		FromTop bool         `json:"fromTop"`
+		Role    string       `json:"role"`
+		Can     []string     `json:"can"`
 	}
 	itemJSON struct {
 		ID       int64   `json:"id"`
@@ -70,6 +78,13 @@ type (
 		Size     *int64  `json:"size"`
 		Changed  *string `json:"changed"`
 		Replaced bool    `json:"replaced"` // uploads only
+		// Listings only: what the person may do with it, and who can see it.
+		Can    []string    `json:"can"`
+		SeenBy *seenByJSON `json:"seenBy"`
+	}
+	seenByJSON struct {
+		Everyone bool     `json:"everyone"`
+		Members  []string `json:"members"`
 	}
 	folderJSON struct {
 		ID   int64  `json:"id"`

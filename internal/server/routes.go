@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,11 +15,13 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
+	"github.com/neonjelly-co/superit-drive/internal/members"
 	"github.com/neonjelly-co/superit-drive/internal/storage"
 )
 
 // routes is every route the Drive answers. Add new ones here, each with the action it is. A route that takes a place
-// must also be tried by an outsider in test/shared_folders_test.go (a test here fails until it is).
+// must also be tried by an outsider in test/shared_folders_test.go, and a route that takes an item by someone with
+// access to part of the place in test/sharing_test.go (a test here fails until it is).
 //
 // A folder of a place is addressed as an item; the place's top folder by the place alone. So most things that happen
 // in a folder have two routes, one for the top folder and one for any other.
@@ -35,14 +38,24 @@ func (s *Server) routes() []route {
 		{pattern: "GET /api/places", action: access.Enter, serve: s.places},
 		{pattern: "GET /api/usage", action: access.SeeUsage, serve: s.usage},
 
-		// Shared folders as a whole, and who has access to them (shared.go).
+		// Shared folders as a whole (shared.go).
 		{pattern: "POST /api/places", action: access.MakeSharedFolder, serve: s.newSharedFolder},
 		{pattern: "DELETE /api/places/{place}", action: access.DeleteSharedFolder, place: "place", serve: s.deleteSharedFolder},
 		{pattern: "GET /api/places/deleted", action: access.Enter, serve: s.deletedSharedFolders},
 		{pattern: "POST /api/places/{place}/restore", action: access.RestoreSharedFolder, place: "place", inTrash: true, serve: s.restoreSharedFolder},
+
+		// Who has access to a shared folder as a whole, and to an item, and giving it (sharing.go). "everyone" is
+		// everyone in the project; members are named by their user id, in a part of the address of their own.
 		{pattern: "GET /api/places/{place}/access", action: access.SeeAccess, place: "place", serve: s.whoHasAccess},
-		{pattern: "PUT /api/places/{place}/access/{member}", action: access.ManageAccess, place: "place", serve: s.giveAccess},
-		{pattern: "DELETE /api/places/{place}/access/{member}", action: access.ManageAccess, place: "place", serve: s.takeAccess},
+		{pattern: "PUT /api/places/{place}/access/members/{member}", action: access.ManageAccess, place: "place", serve: s.giveAccess(toMember)},
+		{pattern: "DELETE /api/places/{place}/access/members/{member}", action: access.ManageAccess, place: "place", serve: s.takeAccess(toMember)},
+		{pattern: "PUT /api/places/{place}/access/everyone", action: access.ManageAccess, place: "place", serve: s.giveAccess(toEveryone)},
+		{pattern: "DELETE /api/places/{place}/access/everyone", action: access.ManageAccess, place: "place", serve: s.takeAccess(toEveryone)},
+		{pattern: "GET /api/places/{place}/items/{item}/access", action: access.SeeAccess, place: "place", item: "item", serve: s.whoHasAccess},
+		{pattern: "PUT /api/places/{place}/items/{item}/access/members/{member}", action: access.Share, place: "place", item: "item", serve: s.giveAccess(toMember)},
+		{pattern: "DELETE /api/places/{place}/items/{item}/access/members/{member}", action: access.Share, place: "place", item: "item", serve: s.takeAccess(toMember)},
+		{pattern: "PUT /api/places/{place}/items/{item}/access/everyone", action: access.Share, place: "place", item: "item", serve: s.giveAccess(toEveryone)},
+		{pattern: "DELETE /api/places/{place}/items/{item}/access/everyone", action: access.Share, place: "place", item: "item", serve: s.takeAccess(toEveryone)},
 
 		// What is in a place.
 		{pattern: "GET /api/places/{place}/items", action: access.List, place: "place", serve: s.items},
@@ -77,26 +90,35 @@ type placeJSON struct {
 	Kind string `json:"kind"` // "my-files" or "shared-folder"
 	// Name is a shared folder's name; "My files" has none.
 	Name string `json:"name,omitempty"`
-	// Role is the person's role on a shared folder: "manager", "editor" or "viewer".
+	// Role is the person's role on a shared folder as a whole: "manager", "editor" or "viewer".
 	Role string `json:"role,omitempty"`
-	// Can is every action the person may do in the place (access.InAPlace), so the interface offers only those. The
-	// Drive decides again on every request.
+	// Can is every action the person may do in the place's top folder (access.InAPlace), so the interface offers only
+	// those. The Drive decides again on every request.
 	Can []access.Action `json:"can"`
 }
 
 func placeOf(who access.Person, p index.Place, where *access.Place) placeJSON {
-	j := placeJSON{ID: p.ID, Kind: string(p.Kind), Name: p.Name, Role: string(access.RoleIn(who, where)), Can: []access.Action{}}
-	for _, a := range access.InAPlace {
-		if access.Decide(who, a, where) {
-			j.Can = append(j.Can, a)
-		}
+	j := placeJSON{ID: p.ID, Kind: string(p.Kind), Name: p.Name, Can: can(who, where)}
+	if p.Kind == index.SharedFolder {
+		j.Role = string(access.RoleAt(who, where))
 	}
 	return j
 }
 
+// can is every action the person may do at where, in the order access.InAPlace lists them.
+func can(who access.Person, where *access.Place) []access.Action {
+	out := []access.Action{}
+	for _, a := range access.InAPlace {
+		if access.Decide(who, a, where) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // places lists the places the person can open: their own "My files" (made the first time they ask), then every shared
-// folder they have a role on, by name. Project admins have one on every shared folder. A shared folder the person
-// has no role on is not listed at all.
+// folder they have a role on as a whole, by name. Project admins have one on every shared folder. A shared folder the
+// person has no role on is not listed at all, even when something in it was shared with them.
 func (s *Server) places(w http.ResponseWriter, r *http.Request, c call) {
 	mine, err := s.drive.MyFiles(r.Context(), c.member)
 	if err != nil {
@@ -108,7 +130,7 @@ func (s *Server) places(w http.ResponseWriter, r *http.Request, c call) {
 		s.fail(w, r, err)
 		return
 	}
-	given, err := s.drive.GivenTo(r.Context(), c.member.UserID)
+	given, err := s.drive.TopGrantsFor(r.Context(), c.member.UserID)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -116,7 +138,7 @@ func (s *Server) places(w http.ResponseWriter, r *http.Request, c call) {
 	who := personOf(c.member)
 	out := []placeJSON{}
 	for _, p := range append([]index.Place{mine}, shared...) {
-		where := accessPlace(p, given[p.ID])
+		where := s.accessPlace(p, nil, given[p.ID])
 		if access.Decide(who, access.List, where) {
 			out = append(out, placeOf(who, p, where))
 		}
@@ -207,7 +229,44 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request, c call, notAFold
 	return c.item, true
 }
 
-// items lists what is in a folder of a place, with the path down to it (empty for the place's top folder).
+// listedJSON is an item in a listing: what the person may do with it, and who can see it.
+type listedJSON struct {
+	itemJSON
+	// Can is every action the person may do with it (access.InAPlace), so the interface offers only those.
+	Can []access.Action `json:"can"`
+	// SeenBy is who can see it, for the list's "who can see it".
+	SeenBy seenByJSON `json:"seenBy"`
+}
+
+type seenByJSON struct {
+	// Everyone is true when everyone in the project can see it.
+	Everyone bool `json:"everyone"`
+	// Members is, when Everyone is false, every member in the member list who can see it, by user id: its owner or its
+	// shared folder's managers and the project admins, and everyone it was shared with, on it or on a folder above.
+	Members []string `json:"members"`
+}
+
+// seenBy is who can see what is at where: everyone, or each member access gives a role there.
+func seenBy(list *members.List, where *access.Place) seenByJSON {
+	out := seenByJSON{Members: []string{}}
+	if access.ToEveryone(where) != access.NoRole {
+		out.Everyone = true
+		return out
+	}
+	for _, m := range list.All() {
+		if access.RoleAt(personOf(m), where) != access.NoRole {
+			out.Members = append(out.Members, m.UserID)
+		}
+	}
+	return out
+}
+
+// items lists what is in a folder of a place: each item with what the person may do with it and who can see it, the
+// path down to the folder, and what they may do in it.
+//
+// The path holds only the folders the person can open: for someone given a folder deep inside a place, it starts at
+// that folder, and the names of the folders above it are never sent to them. fromTop says whether it starts at the
+// place's top folder (it is empty there).
 func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
 	folder, ok := s.folder(w, r, c, "This is a file, not a folder.")
 	if !ok {
@@ -222,15 +281,55 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
 		s.failed(w, r, err)
 		return
 	}
-	out := make([]itemJSON, 0, len(items))
+	inside, err := s.drive.GrantsInside(r.Context(), *c.place, folder)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	givenOn := map[int64][]access.Grant{}
+	for _, g := range inside {
+		givenOn[g.Item] = append(givenOn[g.Item], accessGrant(g))
+	}
+	who := personOf(c.member)
+	list := s.members.Current()
+	out := make([]listedJSON, 0, len(items))
 	for _, it := range items {
-		out = append(out, itemOf(it))
+		where := c.access.Below(it.ID, givenOn[it.ID])
+		out = append(out, listedJSON{itemJSON: itemOf(it), Can: can(who, where), SeenBy: seenBy(list, where)})
 	}
-	path := []folderJSON{}
+	var folders []index.Item
 	if folder != nil {
-		path = pathOf(append(append([]index.Item{}, folder.Above...), *folder))
+		folders = pathTo(*folder)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": out, "path": path})
+	open, fromTop := openPath(who, c.access, folders)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": out, "path": pathOf(open), "fromTop": fromTop,
+		"role": access.RoleAt(who, c.access), "can": can(who, c.access),
+	})
+}
+
+// openPath is the part of a path of folders (from the top of a place down) that the person can open. where must be
+// about the last of them, or something inside it, and hold what was given on all of them. Access only widens down
+// the tree, so it is the folders from the first one they can open down to the last; fromTop says whether they can open
+// the place's top folder, and so all of them.
+func openPath(who access.Person, where *access.Place, folders []index.Item) (open []index.Item, fromTop bool) {
+	fromTop = access.Decide(who, access.List, where.Up(0))
+	for i := range folders {
+		if fromTop || access.Decide(who, access.List, where.Up(i+1)) {
+			return folders[i:], fromTop
+		}
+	}
+	return nil, fromTop
+}
+
+// openFolders is openPath for a path of folders in place p that no decision has gathered the access for yet.
+func (s *Server) openFolders(ctx context.Context, who access.Person, p index.Place, folders []index.Item) ([]folderJSON, error) {
+	where, err := s.accessAt(ctx, p, idsOf(folders))
+	if err != nil {
+		return nil, err
+	}
+	open, _ := openPath(who, where, folders)
+	return pathOf(open), nil
 }
 
 type uploadJSON struct {
@@ -357,8 +456,10 @@ func (s *Server) rename(w http.ResponseWriter, r *http.Request, c call) {
 }
 
 // move puts a file or folder, with everything in it, into another folder of the same place: "to" is the folder's id,
-// or null for the place's top folder. The folder is looked up in the place the request was decided on, so the same
-// decision covers both ends. (Moves between places come with the move warning, and need a decision on each.)
+// or null for the place's top folder. The folder is looked up in the place the request was decided on, and the person
+// must be allowed to put things into it (access.Upload), decided there as for any other request: someone given a
+// folder can move things within it, but not out of it into a folder they cannot add to. (Moves between places come
+// with the move warning, and need a decision on each.)
 //
 //	POST /api/places/{place}/items/{item}/move     {"to": 42}
 func (s *Server) move(w http.ResponseWriter, r *http.Request, c call) {
@@ -382,7 +483,7 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, c call) {
 		}
 		folder, err := s.drive.Item(r.Context(), *c.place, id)
 		if errors.Is(err, index.ErrNoItem) {
-			s.refuse(w, r, http.StatusNotFound, "The folder to move it into is not in this Drive any more. Reload the page and try again.")
+			s.refuse(w, r, http.StatusNotFound, noSuchDestination)
 			return
 		}
 		if err != nil {
@@ -390,6 +491,20 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, c call) {
 			return
 		}
 		to = &folder
+	}
+	var into []index.Item
+	if to != nil {
+		into = pathTo(*to)
+	}
+	where, err := s.accessAt(r.Context(), *c.place, idsOf(into))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if !access.Decide(personOf(c.member), access.Upload, where) {
+		// The same answer as for a folder that is not there.
+		s.refuse(w, r, http.StatusNotFound, noSuchDestination)
+		return
 	}
 	it, err := s.drive.Move(r.Context(), *c.place, *c.item, to)
 	var taken *drive.Taken
@@ -402,6 +517,8 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, c call) {
 		s.changeFailed(w, r, err, c.item.Name)
 	}
 }
+
+const noSuchDestination = "The folder to move it into is not in the Drive, or you cannot add to it. Reload the page and try again."
 
 // changeFailed answers a change to a file or folder that did not happen. name is the name it concerned.
 func (s *Server) changeFailed(w http.ResponseWriter, r *http.Request, err error, name string) {
@@ -444,13 +561,22 @@ type trashJSON struct {
 	From []folderJSON `json:"from"`
 }
 
-func trashOf(e drive.TrashEntry) trashJSON {
+// trashOf describes an item of the trash for the person: From holds only the folders they can open. whole says they
+// can open the place's top folder, and so every folder in it.
+func (s *Server) trashOf(ctx context.Context, who access.Person, p index.Place, e drive.TrashEntry, whole bool) (trashJSON, error) {
+	from := pathOf(e.From)
+	if !whole {
+		var err error
+		if from, err = s.openFolders(ctx, who, p, e.From); err != nil {
+			return trashJSON{}, err
+		}
+	}
 	j := trashJSON{ID: e.ID, Name: e.Name, Kind: "file", Size: e.Size, Deleted: e.Deleted, Removed: e.Removed,
-		Replaced: e.Replaced, From: pathOf(e.From)}
+		Replaced: e.Replaced, From: from}
 	if e.Folder {
 		j.Kind = "folder"
 	}
-	return j
+	return j, nil
 }
 
 // delete moves a file or folder, with everything in it, into the place's trash, and answers with it as the trash
@@ -463,26 +589,42 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, c call) {
 		s.changeFailed(w, r, err, c.item.Name)
 		return
 	}
-	writeJSON(w, http.StatusOK, trashOf(e))
+	who := personOf(c.member)
+	j, err := s.trashOf(r.Context(), who, *c.place, e, access.Decide(who, access.List, c.access.Up(0)))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, j)
 }
 
 // trash lists what is in a place's trash, the most recently deleted first. What has been there for 30 days is removed
-// for good before the list is made.
+// for good before the list is made. Only those who may put things into the place's top folder may see its trash
+// (access.SeeTrash); someone given part of a place restores what they deleted there by its address.
 func (s *Server) trash(w http.ResponseWriter, r *http.Request, c call) {
 	entries, err := s.drive.Trash(r.Context(), *c.place)
 	if err != nil {
 		s.failed(w, r, err)
 		return
 	}
+	// Only those who may put things into the top folder see the trash (access.SeeTrash), so they can open every folder.
+	who := personOf(c.member)
+	whole := access.Decide(who, access.List, c.access)
 	out := make([]trashJSON, 0, len(entries))
 	for _, e := range entries {
-		out = append(out, trashOf(e))
+		j, err := s.trashOf(r.Context(), who, *c.place, e, whole)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		out = append(out, j)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
 // restore moves a file or folder out of the place's trash, back to the folder it was deleted from (or the top folder,
-// when that folder is gone), and answers with it and the folders it is now in.
+// when that folder is gone), and answers with it and the folders it is now in that the person can open. Whoever could
+// have deleted it from where it goes back to may.
 //
 //	POST /api/places/{place}/trash/{item}/restore
 func (s *Server) restore(w http.ResponseWriter, r *http.Request, c call) {
@@ -495,7 +637,12 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request, c call) {
 		s.changeFailed(w, r, err, c.trashed.Name)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"item": itemOf(it), "path": pathOf(it.Above)})
+	path, err := s.openFolders(r.Context(), personOf(c.member), *c.place, it.Above)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"item": itemOf(it), "path": path})
 }
 
 // download sends a file's bytes under its original name, as an attachment, so the browser saves it rather than
@@ -545,7 +692,7 @@ func attachment(name string) string {
 func (s *Server) failed(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, drive.ErrPlaceGone) {
 		// The shared folder went to the trash after guard found it: the same answer guard gives from now on.
-		s.refuse(w, r, http.StatusNotFound, noSuchPlace)
+		s.refuse(w, r, http.StatusNotFound, notHere)
 		return
 	}
 	if !errors.Is(err, drive.ErrStorage) {

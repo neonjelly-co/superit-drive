@@ -72,24 +72,30 @@ func madeSharedFolder(t *testing.T, c *harness.Client, name string) placeJSON {
 }
 
 func accessPath(placeID int64, member harness.Member) string {
-	return fmt.Sprintf("/api/places/%d/access/%s", placeID, url.PathEscape(member.UserID))
+	return fmt.Sprintf("/api/places/%d/access/members/%s", placeID, url.PathEscape(member.UserID))
 }
 
-func whoHasAccess(t *testing.T, c *harness.Client, placeID int64) []personJSON {
+// accessOf is who has access, as GET answers it at path.
+func accessOf(t *testing.T, c *harness.Client, path string) []accessJSON {
 	t.Helper()
-	res := c.Get(t, fmt.Sprintf("/api/places/%d/access", placeID))
+	res := c.Get(t, path)
 	if res.Status != http.StatusOK {
-		t.Fatalf("who has access to %d: got %d %s", placeID, res.Status, res.Body)
+		t.Fatalf("who has access at %s: got %d %s", path, res.Status, res.Body)
 	}
 	var l struct {
-		People []personJSON `json:"people"`
+		Access []accessJSON `json:"access"`
 	}
 	res.JSON(t, &l)
-	return l.People
+	return l.Access
 }
 
-// managers is who has access, as "user id (given|admin)" lines, in the order the Drive lists them.
-func managers(people []personJSON) []string {
+func whoHasAccess(t *testing.T, c *harness.Client, placeID int64) []accessJSON {
+	t.Helper()
+	return accessOf(t, c, fmt.Sprintf("/api/places/%d/access", placeID))
+}
+
+// managers is who has access, as "user id role (given|admin|former)" lines, in the order the Drive lists them.
+func managers(people []accessJSON) []string {
 	var out []string
 	for _, p := range people {
 		var why []string
@@ -102,7 +108,11 @@ func managers(people []personJSON) []string {
 		if p.Former {
 			why = append(why, "former")
 		}
-		out = append(out, fmt.Sprintf("%s %s (%s)", p.UserID, p.Role, strings.Join(why, ", ")))
+		who := p.UserID
+		if p.Everyone {
+			who = "everyone"
+		}
+		out = append(out, fmt.Sprintf("%s %s (%s)", who, p.Role, strings.Join(why, ", ")))
 	}
 	return out
 }
@@ -243,7 +253,7 @@ func TestTheCreatorManagesItAndCanMakeOthersManagersAndDeleteIt(t *testing.T) {
 	ledger := uploadedInto(t, b, clients.ID, madeFolder(t, b, clients.ID, 0, "Bakery Ltd").ID, "Ledger.xlsx", []byte("ledger"))
 
 	// Bence was given it; Réka manages every shared folder as a project admin. Dóra has no role, so she cannot see it.
-	want := []string{bence.UserID + " manager (given)", reka.UserID + " manager (admin)"}
+	want := []string{reka.UserID + " manager (admin)", bence.UserID + " manager (given)"}
 	if got := managers(whoHasAccess(t, b, clients.ID)); !slices.Equal(got, want) {
 		t.Fatalf("who manages Clients: %q, want %q", got, want)
 	}
@@ -265,21 +275,24 @@ func TestTheCreatorManagesItAndCanMakeOthersManagersAndDeleteIt(t *testing.T) {
 		t.Fatalf("Dóra downloading Bence's file: %d %s", res.Status, res.Body)
 	}
 	uploadedInto(t, o, clients.ID, 0, "From Dóra.txt", []byte("dóra"))
-	want = []string{bence.UserID + " manager (given)", dora.UserID + " manager (given)", reka.UserID + " manager (admin)"}
+	want = []string{reka.UserID + " manager (admin)", bence.UserID + " manager (given)", dora.UserID + " manager (given)"}
 	if got := managers(whoHasAccess(t, o, clients.ID)); !slices.Equal(got, want) {
 		t.Fatalf("who manages Clients: %q, want %q", got, want)
 	}
 	people := whoHasAccess(t, o, clients.ID)
-	if people[1].Email != dora.Email || people[1].DisplayName != dora.DisplayName {
-		t.Fatalf("Dóra is listed as %+v", people[1])
+	if people[2].Email != dora.Email || people[2].DisplayName != dora.DisplayName {
+		t.Fatalf("Dóra is listed as %+v", people[2])
 	}
 
-	// Only managers, and only members, can be given; nothing else can be given yet.
+	// Only members can be given a role, and only the roles there are; everyone in the project cannot be a manager.
 	stranger := harness.Member{UserID: "u-stranger"}
 	if res := makeManager(t, b, clients.ID, stranger); res.Status != http.StatusBadRequest {
 		t.Errorf("making someone outside the member list a manager: got %d %s, want 400", res.Status, res.Body)
 	}
-	for _, role := range []string{"viewer", "editor", "owner", "admin", ""} {
+	if res := sendJSON(t, b, http.MethodPut, fmt.Sprintf("/api/places/%d/access/everyone", clients.ID), map[string]string{"role": "manager"}); res.Status != http.StatusBadRequest {
+		t.Errorf("making everyone a manager: got %d %s, want 400", res.Status, res.Body)
+	}
+	for _, role := range []string{"owner", "admin", "Manager", ""} {
 		res := sendJSON(t, b, http.MethodPut, accessPath(clients.ID, reka), map[string]string{"role": role})
 		if res.Status != http.StatusBadRequest {
 			t.Errorf("giving the role %q: got %d %s, want 400", role, res.Status, res.Body)
@@ -369,7 +382,7 @@ func TestTheCreatorManagesItAndCanMakeOthersManagersAndDeleteIt(t *testing.T) {
 	if res := o.Get(t, downloadPath(clients.ID, ledger.ID)); res.Status != http.StatusOK || string(res.Body) != "ledger" {
 		t.Fatalf("Ledger.xlsx after the restore: %d %s", res.Status, res.Body)
 	}
-	want = []string{dora.UserID + " manager (given)", reka.UserID + " manager (admin)"}
+	want = []string{reka.UserID + " manager (admin)", dora.UserID + " manager (given)"}
 	if got := managers(whoHasAccess(t, o, clients.ID)); !slices.Equal(got, want) {
 		t.Fatalf("who manages Clients after the restore: %q, want %q", got, want)
 	}
@@ -496,23 +509,32 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 	tries := func(place, folder, file, trashed int64) map[string]try {
 		at := func(f string, a ...any) string { return fmt.Sprintf(f, a...) }
 		return map[string]try{
-			"DELETE /api/places/{place}":                    {"DELETE", at("/api/places/%d", place), ""},
-			"POST /api/places/{place}/restore":              {"POST", at("/api/places/%d/restore", place), ""},
-			"GET /api/places/{place}/access":                {"GET", at("/api/places/%d/access", place), ""},
-			"PUT /api/places/{place}/access/{member}":       {"PUT", accessPath(place, dora), `{"role":"manager"}`},
-			"DELETE /api/places/{place}/access/{member}":    {"DELETE", accessPath(place, bence), ""},
-			"GET /api/places/{place}/items":                 {"GET", listPath(place, 0), ""},
-			"GET /api/places/{place}/items/{item}/items":    {"GET", listPath(place, folder), ""},
-			"POST /api/places/{place}/files":                {"POST", at("/api/places/%d/files?name=Planted.txt&existing=replace", place), "x"},
-			"POST /api/places/{place}/items/{item}/files":   {"POST", at("/api/places/%d/items/%d/files?name=November.xlsx&existing=replace", place, folder), "x"},
-			"POST /api/places/{place}/folders":              {"POST", at("/api/places/%d/folders", place), `{"name":"Planted"}`},
-			"POST /api/places/{place}/items/{item}/folders": {"POST", at("/api/places/%d/items/%d/folders", place, folder), `{"name":"Planted"}`},
-			"GET /api/places/{place}/items/{item}/download": {"GET", downloadPath(place, file), ""},
-			"POST /api/places/{place}/items/{item}/rename":  {"POST", at("/api/places/%d/items/%d/rename", place, file), `{"name":"Renamed.xlsx"}`},
-			"POST /api/places/{place}/items/{item}/move":    {"POST", at("/api/places/%d/items/%d/move", place, file), `{"to":null}`},
-			"DELETE /api/places/{place}/items/{item}":       {"DELETE", at("/api/places/%d/items/%d", place, file), ""},
-			"GET /api/places/{place}/trash":                 {"GET", at("/api/places/%d/trash", place), ""},
-			"POST /api/places/{place}/trash/{item}/restore": {"POST", at("/api/places/%d/trash/%d/restore", place, trashed), ""},
+			"DELETE /api/places/{place}":                         {"DELETE", at("/api/places/%d", place), ""},
+			"POST /api/places/{place}/restore":                   {"POST", at("/api/places/%d/restore", place), ""},
+			"GET /api/places/{place}/access":                     {"GET", at("/api/places/%d/access", place), ""},
+			"PUT /api/places/{place}/access/members/{member}":    {"PUT", accessPath(place, dora), `{"role":"manager"}`},
+			"DELETE /api/places/{place}/access/members/{member}": {"DELETE", accessPath(place, bence), ""},
+			"PUT /api/places/{place}/access/everyone":            {"PUT", at("/api/places/%d/access/everyone", place), `{"role":"editor"}`},
+			"DELETE /api/places/{place}/access/everyone":         {"DELETE", at("/api/places/%d/access/everyone", place), ""},
+			"GET /api/places/{place}/items/{item}/access":        {"GET", at("/api/places/%d/items/%d/access", place, file), ""},
+			"PUT /api/places/{place}/items/{item}/access/members/{member}": {"PUT",
+				at("/api/places/%d/items/%d/access/members/%s", place, file, url.PathEscape(dora.UserID)), `{"role":"editor"}`},
+			"DELETE /api/places/{place}/items/{item}/access/members/{member}": {"DELETE",
+				at("/api/places/%d/items/%d/access/members/%s", place, file, url.PathEscape(bence.UserID)), ""},
+			"PUT /api/places/{place}/items/{item}/access/everyone":    {"PUT", at("/api/places/%d/items/%d/access/everyone", place, folder), `{"role":"editor"}`},
+			"DELETE /api/places/{place}/items/{item}/access/everyone": {"DELETE", at("/api/places/%d/items/%d/access/everyone", place, folder), ""},
+			"GET /api/places/{place}/items":                           {"GET", listPath(place, 0), ""},
+			"GET /api/places/{place}/items/{item}/items":              {"GET", listPath(place, folder), ""},
+			"POST /api/places/{place}/files":                          {"POST", at("/api/places/%d/files?name=Planted.txt&existing=replace", place), "x"},
+			"POST /api/places/{place}/items/{item}/files":             {"POST", at("/api/places/%d/items/%d/files?name=November.xlsx&existing=replace", place, folder), "x"},
+			"POST /api/places/{place}/folders":                        {"POST", at("/api/places/%d/folders", place), `{"name":"Planted"}`},
+			"POST /api/places/{place}/items/{item}/folders":           {"POST", at("/api/places/%d/items/%d/folders", place, folder), `{"name":"Planted"}`},
+			"GET /api/places/{place}/items/{item}/download":           {"GET", downloadPath(place, file), ""},
+			"POST /api/places/{place}/items/{item}/rename":            {"POST", at("/api/places/%d/items/%d/rename", place, file), `{"name":"Renamed.xlsx"}`},
+			"POST /api/places/{place}/items/{item}/move":              {"POST", at("/api/places/%d/items/%d/move", place, file), `{"to":null}`},
+			"DELETE /api/places/{place}/items/{item}":                 {"DELETE", at("/api/places/%d/items/%d", place, file), ""},
+			"GET /api/places/{place}/trash":                           {"GET", at("/api/places/%d/trash", place), ""},
+			"POST /api/places/{place}/trash/{item}/restore":           {"POST", at("/api/places/%d/trash/%d/restore", place, trashed), ""},
 		}
 	}
 	send := func(c *harness.Client, x try) harness.Response {
@@ -578,7 +600,7 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 	if got, _ := d.Storage.Get(t, "Shared folders/Payroll/2026/November.xlsx"); string(got) != "salaries" {
 		t.Errorf("November.xlsx holds %q", got)
 	}
-	if got := managers(whoHasAccess(t, b, payroll.ID)); !slices.Equal(got, []string{bence.UserID + " manager (given)", reka.UserID + " manager (admin)"}) {
+	if got := managers(whoHasAccess(t, b, payroll.ID)); !slices.Equal(got, []string{reka.UserID + " manager (admin)", bence.UserID + " manager (given)"}) {
 		t.Errorf("who manages Payroll: %q", got)
 	}
 	if got := deletedSharedFolders(t, b); len(got) != 1 || got[0].ID != gone.ID {
@@ -613,7 +635,7 @@ func TestASharedFolderOutlivesTheAccountThatMadeIt(t *testing.T) {
 		t.Fatalf("Clients on the storage: %q", got)
 	}
 	// Who manages it says Bence's role is that of someone no longer in the project, and a manager can take it away.
-	want := []string{dora.UserID + " manager (given)", reka.UserID + " manager (admin)", bence.UserID + " manager (given, former)"}
+	want := []string{reka.UserID + " manager (admin)", bence.UserID + " manager (given, former)", dora.UserID + " manager (given)"}
 	if got := managers(whoHasAccess(t, o, clients.ID)); !slices.Equal(got, want) {
 		t.Fatalf("who manages Clients: %q, want %q", got, want)
 	}
