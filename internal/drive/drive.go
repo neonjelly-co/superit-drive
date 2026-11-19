@@ -6,6 +6,7 @@
 //
 //	My files/
 //	    reka@example.com/        one top folder per member's "My files", named after their email address
+//	        Tax notes 2026.pdf   files with their real names (files.go: upload, download, the name rules)
 //	    bence@example.com/
 //
 // Shared folders and the hidden folders for the trash, uploads in progress and the index copy are added by the
@@ -18,6 +19,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
@@ -46,11 +48,16 @@ func storageError(err error) error {
 type Drive struct {
 	index   *index.Index
 	storage *storage.Client
+
+	// writing holds the storage paths of uploads in flight, so two uploads of one name cannot both pass the check
+	// that the name is free and the second replace the first.
+	mu      sync.Mutex
+	writing map[string]bool
 }
 
 // New makes a Drive.
 func New(x *index.Index, s *storage.Client) *Drive {
-	return &Drive{index: x, storage: s}
+	return &Drive{index: x, storage: s, writing: map[string]bool{}}
 }
 
 // Place finds a place by its id.
@@ -117,9 +124,12 @@ func (d *Drive) List(ctx context.Context, p index.Place) ([]index.Item, error) {
 	if err != nil {
 		return nil, storageError(err)
 	}
-	seen := make([]index.Seen, len(entries))
-	for i, e := range entries {
-		seen[i] = index.Seen{Name: e.Name, Folder: e.Folder, Size: e.Size, Changed: e.Changed}
+	seen := make([]index.Seen, 0, len(entries))
+	for _, e := range entries {
+		if _, ok := pathIn(p, e.Name); !ok {
+			continue // a name no path can be made from: never listed, so never opened
+		}
+		seen = append(seen, index.Seen{Name: e.Name, Folder: e.Folder, Size: e.Size, Changed: e.Changed})
 	}
 	if err := d.index.SetTopItems(ctx, p.ID, seen); err != nil {
 		return nil, err

@@ -14,7 +14,7 @@ for (const [icon, extensions] of [
 }
 
 /** The icon for a file or folder: by kind, and for files by the extension of the name. */
-export function FileIcon({ item, className = "size-5" }: { item: Item; className?: string }) {
+export function FileIcon({ item, className = "size-5" }: { item: Pick<Item, "name" | "kind">; className?: string }) {
 	const extension = item.name.includes(".") ? (item.name.split(".").pop() ?? "").toLowerCase() : "";
 	const Icon = item.kind === "folder" ? Folder : (BY_EXTENSION[extension] ?? File);
 	return <Icon aria-hidden className={`${className} shrink-0 text-muted-foreground`} />;

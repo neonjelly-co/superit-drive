@@ -129,6 +129,9 @@ type Drive struct {
 	Storage *Storage
 	// Secret is the header secret the Drive was given.
 	Secret string
+	// Address is the Drive's own address as people reach it (DRIVE_ADDRESS). A browser on the Drive's page sends it
+	// as Origin.
+	Address string
 
 	membersFile string
 	cmd         *exec.Cmd
@@ -218,6 +221,7 @@ func launch(t *testing.T, o Options) *Drive {
 	for k, v := range o.Env {
 		env[k] = v
 	}
+	d.Address = env["DRIVE_ADDRESS"]
 	d.cmd = exec.Command(shared.binary)
 	d.cmd.Env = []string{} // only what is set here: the Drive must start from its settings alone
 	for k, v := range env {
@@ -276,16 +280,20 @@ func (d *Drive) SetMembers(t *testing.T, members ...Member) {
 	}
 }
 
-// As is a client that sends the headers the reverse proxy adds for a signed-in member: the secret and their user id.
-// It also sends the gateway's other identity headers, as the real one does.
+// As is a member's browser on the Drive's own page, reached through the reverse proxy: every request carries the
+// headers the proxy adds for a signed-in member (the secret and their user id, and the gateway's other identity
+// headers, as the real one sends), and every request that is not a GET or HEAD also carries the Drive's address as
+// Origin, as a browser adds it.
 func (d *Drive) As(m Member) *Client {
-	return d.WithHeaders(http.Header{
+	c := d.WithHeaders(http.Header{
 		"Drive-Secret":   {d.Secret},
 		"Remote-User-Id": {m.UserID},
 		"Remote-Email":   {m.Email},
 		"Remote-Name":    {m.DisplayName},
 		"Remote-Role":    {m.Role},
 	})
+	c.origin = d.Address
+	return c
 }
 
 // WithHeaders is a client that sends exactly these headers, as anyone reaching the Drive could.
@@ -297,6 +305,13 @@ func (d *Drive) WithHeaders(h http.Header) *Client {
 type Client struct {
 	base    string
 	headers http.Header
+	origin  string // sent as Origin on requests that are not GET or HEAD; "" for none
+}
+
+// From is the same client on a page at origin instead: a browser that another site's page made send the requests.
+// An empty origin sends none.
+func (c *Client) From(origin string) *Client {
+	return &Client{base: c.base, headers: c.headers, origin: origin}
 }
 
 // Response is what the Drive answered.
@@ -329,6 +344,9 @@ func (c *Client) Do(t *testing.T, method, path string, body io.Reader) Response 
 	}
 	for k, v := range c.headers {
 		req.Header[k] = v
+	}
+	if c.origin != "" && method != http.MethodGet && method != http.MethodHead {
+		req.Header.Set("Origin", c.origin)
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {

@@ -155,6 +155,20 @@ func (s *Storage) Put(t *testing.T, p, content string) {
 	}
 }
 
+// Get reads the file at p. ok is false when there is no such file.
+func (s *Storage) Get(t *testing.T, p string) (content []byte, ok bool) {
+	t.Helper()
+	status, body := s.do(t, http.MethodGet, s.address(p, false), nil, nil)
+	switch status {
+	case http.StatusOK:
+		return body, true
+	case http.StatusNotFound:
+		return nil, false
+	}
+	t.Fatalf("GET %s: %d %s", p, status, body)
+	return nil, false
+}
+
 // Delete removes the file or folder at p.
 func (s *Storage) Delete(t *testing.T, p string, folder bool) {
 	t.Helper()

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,13 +28,14 @@ func bareServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(Config{HeaderSecret: secret, Members: fixedList{l}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	address, _ := url.Parse("https://files.example.com")
+	return New(Config{Address: address, HeaderSecret: secret, Members: fixedList{l}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 }
 
 // examplePath turns a route pattern into an address that matches it.
 func examplePath(pattern string) string {
 	_, p, _ := strings.Cut(pattern, " ")
-	return strings.NewReplacer("{$}", "", "{place}", "1", "{file...}", "x.js").Replace(p)
+	return strings.NewReplacer("{$}", "", "{place}", "1", "{item}", "1", "{file...}", "x.js").Replace(p)
 }
 
 func TestEveryRouteIsGuarded(t *testing.T) {
@@ -60,6 +62,85 @@ func TestEveryRouteIsGuarded(t *testing.T) {
 				if rec.Code != http.StatusForbidden {
 					t.Errorf("%s %s with %s: got %d, want 403", method, path, name, rec.Code)
 				}
+			}
+		}
+	}
+}
+
+// A signed-in member's browser can be made to send a change by a page on another site (cross-site request forgery).
+// Every request that is not a GET or HEAD must carry the Drive's own origin, on every route, and is refused before
+// anything else is looked up: the bare server would panic otherwise.
+func TestEveryChangeMustComeFromTheDrivesOwnPages(t *testing.T) {
+	s := bareServer(t)
+	h := s.Handler()
+	paths := []string{"/no/such/address", "/api/unknown"}
+	for _, rt := range s.routes() {
+		paths = append(paths, examplePath(rt.pattern))
+	}
+	origins := map[string][]string{
+		"no Origin":                  nil,
+		"an empty Origin":            {""},
+		"Origin null":                {"null"},
+		"another site":               {"https://evil.example"},
+		"a sibling subdomain":        {"https://mail.example.com"},
+		"the Drive's host over http": {"http://files.example.com"},
+		"the Drive's host on a port": {"https://files.example.com:8443"},
+		"a longer host":              {"https://files.example.com.evil.example"},
+		"not an address":             {"files.example.com"},
+	}
+	for _, path := range paths {
+		for name, origin := range origins {
+			for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, "PROPFIND"} {
+				req := httptest.NewRequest(method, path, nil)
+				req.Header = http.Header{SecretHeader: {secret}, UserIDHeader: {"u-reka"}}
+				if origin != nil {
+					req.Header["Origin"] = origin
+				}
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "did not come from the Drive's own page") {
+					t.Errorf("%s %s with %s: got %d %s, want 403", method, path, name, rec.Code, rec.Body)
+				}
+			}
+		}
+	}
+}
+
+func TestTheDrivesOwnOriginIsRecognisedHoweverItIsWritten(t *testing.T) {
+	cases := []struct {
+		address, origin string
+		same            bool
+	}{
+		{"https://files.example.com", "https://files.example.com", true},
+		{"https://Files.Example.COM/", "https://files.example.com", true},
+		{"https://files.example.com:443", "https://files.example.com", true},
+		{"https://files.example.com", "https://files.example.com:443", true},
+		{"http://127.0.0.1:8080", "http://127.0.0.1:8080", true},
+		{"http://localhost:5173", "http://localhost:5173", true},
+		{"http://[::1]:8080", "http://[::1]:8080", true},
+		{"http://files.example.com:80", "http://files.example.com", true},
+		{"https://files.example.com", "http://files.example.com", false},
+		{"https://files.example.com", "https://files.example.com:8443", false},
+		{"http://127.0.0.1:8080", "http://localhost:8080", false},
+		{"https://files.example.com", "https://example.com", false},
+	}
+	for _, c := range cases {
+		address, err := url.Parse(c.address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := New(Config{Address: address})
+		for _, method := range []string{http.MethodPost, http.MethodDelete} {
+			req := httptest.NewRequest(method, "/api/x", nil)
+			req.Header.Set("Origin", c.origin)
+			if got := s.fromOwnPage(req); got != c.same {
+				t.Errorf("DRIVE_ADDRESS %s, %s with Origin %s: got %v, want %v", c.address, method, c.origin, got, c.same)
+			}
+		}
+		// Reading never needs an origin.
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			if !s.fromOwnPage(httptest.NewRequest(method, "/api/x", nil)) {
+				t.Errorf("%s without Origin was refused", method)
 			}
 		}
 	}

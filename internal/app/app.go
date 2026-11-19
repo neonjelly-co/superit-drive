@@ -39,6 +39,7 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 
 	srv := server.New(server.Config{
 		ProjectName:  s.ProjectName,
+		Address:      s.Address,
 		HeaderSecret: s.HeaderSecret,
 		Members:      list,
 		Drive:        drive.New(x, store),
