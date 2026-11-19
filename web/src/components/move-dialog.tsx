@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Folder, FolderOpen, User, Users } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { nameOf, ROLE_NAME, whoCanSee, whyOf } from "../access";
-import { type Action, api, type FolderRef, type Item, type Member, type MovePreview } from "../api";
+import { type Access, type Action, api, type FolderRef, type Item, type Member, type SeenBy } from "../api";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
 
@@ -19,11 +19,12 @@ type Props = {
 	 * highest folder they can open.
 	 */
 	root: FolderRef | null;
-	item: Item;
-	/** The folders from the root (or the one below the top folder) down to the one the item is in now; empty for the top folder. */
+	/** What is moved: one item, or several from the same folder (the selection). */
+	items: Item[];
+	/** The folders from the root (or the one below the top folder) down to the one the items are in now; empty for the top folder. */
 	path: FolderRef[];
 	/**
-	 * The shared folders it may go to besides its own place: offered only for what is in the person's own My files
+	 * The shared folders they may go to besides their own place: offered only for what is in the person's own My files
 	 * ("move-out"), and only those they may move things into ("move-in"). A move there comes with the warning.
 	 */
 	otherPlaces: PlaceRef[];
@@ -32,26 +33,51 @@ type Props = {
 	members?: Member[];
 	/** Moves it; resolves when done, rejects with an Error whose message is for the person. */
 	onMove: (to: Destination) => Promise<unknown>;
+	/** While several are being moved: how far it has got. */
+	progress?: string;
 	onClose: () => void;
 };
 
 /**
- * The Move dialog: the place's folder tree, opened one level at a time as the person goes down it (each level is
- * listed from the Drive storage as it is opened), and below it the shared folders the item may go to from the
- * person's own My files. A folder cannot be moved into itself or a folder inside it, so the folder being moved is
- * shown but cannot be chosen or opened, and only folders the person may add to can be chosen; for someone given part
- * of a place, the part they were given.
- *
- * A move into a shared folder makes the item the project's. Before it happens the dialog warns, with who will see it
- * there as the Drive says it (who has access there, and what was given on the item itself, which it keeps), and moves
- * only when the person confirms.
+ * What the warning before a move into another place says: whether it becomes the project's, who will see what is moved
+ * there (what is given there, and for a single item what was given on it too), and, for several items, what each keeps
+ * that was given on it.
  */
-export function MoveDialog({ place, root, item, path, otherPlaces, me, members, onMove, onClose }: Props) {
+type Warning = { becomesProjects: boolean; access: Access[]; seenBy: SeenBy; kept: { name: string; access: Access[] }[] };
+
+/** The warning for moving items, from what the Drive says about each (GET …/move). */
+async function warningFor(placeId: number, items: Item[], dest: Destination): Promise<Warning> {
+	const previews = await Promise.all(items.map((i) => api.movePreview(placeId, i.id, dest.place.id, dest.folder?.id ?? null)));
+	const becomesProjects = previews.some((p) => p.becomesProjects);
+	const [first] = previews;
+	if (first && previews.length === 1) return { access: first.access, seenBy: first.seenBy, becomesProjects, kept: [] };
+	// What every item gets there is what was given there; what was given on each item it keeps, and is said apart.
+	const access = (first?.access ?? []).filter((a) => !a.given);
+	const everyone = access.some((a) => a.everyone);
+	const members = [...new Set(access.filter((a) => a.userId && !a.former).map((a) => a.userId as string))];
+	const kept = previews
+		.map((p, i) => ({ name: items[i]?.name ?? "", access: p.access.filter((a) => a.given) }))
+		.filter((k) => k.access.length > 0);
+	return { becomesProjects, access, seenBy: { everyone, members: everyone ? [] : members }, kept };
+}
+
+/**
+ * The Move dialog, for one item or several from the same folder: the place's folder tree, opened one level at a time
+ * as the person goes down it (each level is listed from the Drive storage as it is opened), and below it the shared
+ * folders the items may go to from the person's own My files. A folder cannot be moved into itself or a folder inside
+ * it, so a folder being moved is shown but cannot be chosen or opened, and only folders the person may add to can be
+ * chosen; for someone given part of a place, the part they were given.
+ *
+ * A move into a shared folder makes what is moved the project's. Before it happens the dialog warns, with who will see
+ * it there as the Drive says it (who has access there, and what was given on each item itself, which it keeps), and
+ * moves only when the person confirms.
+ */
+export function MoveDialog({ place, root, items, path, otherPlaces, me, members, onMove, progress, onClose }: Props) {
 	const here = path.at(-1)?.id ?? null;
-	// The way down to where the item is now starts open, so the person sees it.
+	// The way down to where the items are now starts open, so the person sees it.
 	const [open, setOpen] = useState<Set<string>>(() => new Set([keyOf(place.id, root?.id ?? null), ...path.map((f) => keyOf(place.id, f.id))]));
 	const [dest, setDest] = useState<Destination>();
-	const [warning, setWarning] = useState<MovePreview>();
+	const [warning, setWarning] = useState<Warning>();
 	const [problem, setProblem] = useState<string>();
 	const [busy, setBusy] = useState(false);
 
@@ -83,7 +109,7 @@ export function MoveDialog({ place, root, item, path, otherPlaces, me, members, 
 		setBusy(true);
 		setProblem(undefined);
 		try {
-			setWarning(await api.movePreview(place.id, item.id, dest.place.id, dest.folder?.id ?? null));
+			setWarning(await warningFor(place.id, items, dest));
 		} catch (e) {
 			setProblem(e instanceof Error ? e.message : String(e));
 		} finally {
@@ -93,63 +119,67 @@ export function MoveDialog({ place, root, item, path, otherPlaces, me, members, 
 
 	const chosen = dest ? keyOf(dest.place.id, dest.folder?.id ?? null) : undefined;
 	const staying = dest?.place.id === place.id && (dest.folder?.id ?? null) === here;
-	const node = { moving: item, here, open, toggle, chosen, choose: (p: PlaceRef, f: FolderRef | null) => setDest({ place: p, folder: f }) };
+	const node = { moving: items, here, open, toggle, chosen, choose: (p: PlaceRef, f: FolderRef | null) => setDest({ place: p, folder: f }) };
 	const where = dest ? [dest.place.name, ...(dest.folder ? [dest.folder.name] : [])].join(" › ") : "";
+	const one = items.length === 1 ? items[0] : undefined;
+	const what = one ? `“${one.name}”` : `${items.length} items`;
+	const line = (a: Access, i: number, given: string) => <AccessLine key={i} a={a} me={me} given={given} />;
 
 	if (warning && dest) {
 		return (
 			<Dialog
 				wide
-				title={`Move “${item.name}” to “${dest.place.name}”?`}
+				title={`Move ${what} to “${dest.place.name}”?`}
 				description={
 					warning.becomesProjects
-						? `It leaves your My files and becomes the project's: the managers of “${dest.place.name}” decide who has access to it, and project admins can open it.`
+						? one
+							? `It leaves your My files and becomes the project's: the managers of “${dest.place.name}” decide who has access to it, and project admins can open it.`
+							: `They leave your My files and become the project's: the managers of “${dest.place.name}” decide who has access to them, and project admins can open them.`
 						: undefined
 				}
 				onClose={onClose}
 				onSubmit={() => void move()}
 				footer={
 					<>
+						{progress && (
+							<span className="mr-auto self-center text-sm text-muted-foreground" aria-live="polite">
+								{progress}
+							</span>
+						)}
 						<Button variant="ghost" onClick={() => setWarning(undefined)} disabled={busy}>
 							Back
 						</Button>
 						<Button variant="primary" type="submit" disabled={busy}>
-							Move it
+							{one ? "Move it" : "Move them"}
 						</Button>
 					</>
 				}
 			>
 				<p className="text-sm">
-					<span className="font-semibold">Who will see it in {where}:</span> {whoCanSee(warning.seenBy, me, members)}.
+					<span className="font-semibold">
+						Who will see {one ? "it" : "them"} in {where}:
+					</span>{" "}
+					{whoCanSee(warning.seenBy, me, members)}.
 				</p>
 				<ul aria-label="Who will see it there" className="mt-2 max-h-56 overflow-auto rounded-lg border border-border px-3 text-sm">
-					{warning.access.map((a, i) => {
-						const Icon = a.everyone ? Users : User;
-						const name = a.everyone
-							? "Everyone in the project"
-							: a.former
-								? "Someone no longer in the project"
-								: a.userId === me
-									? "You"
-									: nameOf(a);
-						const why = a.given ? "given on it, and kept" : whyOf(a);
-						return (
-							// One person can have several lines, from several folders: the place in the list is the key.
-							<li key={i} className="flex items-center gap-2.5 border-b border-border py-2 last:border-0">
-								<Icon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-								<span className="min-w-0 flex-1 truncate" title={a.email}>
-									{name}
-								</span>
-								<span className="shrink-0 text-muted-foreground">
-									{ROLE_NAME[a.role]}
-									{why ? ` · ${why}` : ""}
-								</span>
-							</li>
-						);
-					})}
+					{warning.access.map((a, i) => line(a, i, "given on it, and kept"))}
 				</ul>
+				{warning.kept.length > 0 && (
+					<>
+						<p className="mt-3 text-sm font-semibold">Some keep access given on them, so more people see those:</p>
+						<ul aria-label="What each keeps" className="mt-2 max-h-56 overflow-auto rounded-lg border border-border px-3 text-sm">
+							{warning.kept.map((k, i) => (
+								<li key={i} className="border-b border-border py-2 last:border-0">
+									<p className="font-medium break-words">{k.name}</p>
+									<ul>{k.access.map((a, j) => line(a, j, "given on it, and kept"))}</ul>
+								</li>
+							))}
+						</ul>
+					</>
+				)}
 				<p className="mt-3 text-sm text-muted-foreground">
-					It keeps the access given on it and on everything in it. Access it had from the folders it is in now ends.
+					{one ? "It keeps" : "Each keeps"} the access given on it and on everything in it. Access from the folders{" "}
+					{one ? "it is" : "they are"} in now ends.
 				</p>
 				{problem && (
 					<p role="alert" className="mt-3 text-sm text-destructive">
@@ -163,13 +193,22 @@ export function MoveDialog({ place, root, item, path, otherPlaces, me, members, 
 	return (
 		<Dialog
 			wide
-			title={`Move “${item.name}”`}
-			description={`Choose the folder to put ${item.kind === "folder" ? "this folder and everything in it" : "it"} in.`}
+			title={`Move ${what}`}
+			description={
+				one
+					? `Choose the folder to put ${one.kind === "folder" ? "this folder and everything in it" : "it"} in.`
+					: "Choose the folder to put them in. Folders go with everything in them."
+			}
 			onClose={onClose}
 			onSubmit={() => void submit()}
 			footer={
 				<>
-					<Button variant="ghost" onClick={onClose}>
+					{progress && (
+						<span className="mr-auto self-center text-sm text-muted-foreground" aria-live="polite">
+							{progress}
+						</span>
+					)}
+					<Button variant="ghost" onClick={onClose} disabled={busy}>
 						Cancel
 					</Button>
 					<Button variant="primary" type="submit" disabled={busy || !dest || staying}>
@@ -184,7 +223,10 @@ export function MoveDialog({ place, root, item, path, otherPlaces, me, members, 
 			{otherPlaces.length > 0 && (
 				<>
 					<p className="mt-4 text-sm font-semibold">Or into a shared folder</p>
-					<p className="mt-0.5 text-sm text-muted-foreground">It then belongs to the project, not to you. You see who will have access before it moves.</p>
+					<p className="mt-0.5 text-sm text-muted-foreground">
+						{one ? "It then belongs" : "They then belong"} to the project, not to you. You see who will have access before{" "}
+						{one ? "it moves" : "they move"}.
+					</p>
 					<ul aria-label="Shared folders" className="mt-2 max-h-56 overflow-auto rounded-lg border border-border py-1 text-sm">
 						{otherPlaces.map((p) => (
 							<FolderNode key={p.id} {...node} place={p} can="move-in" folder={null} depth={0} />
@@ -208,7 +250,8 @@ type NodeProps = {
 	place: PlaceRef;
 	/** What the person must be allowed to do in a folder to put the item there: upload in its own place, move-in elsewhere. */
 	can: Extract<Action, "upload" | "move-in">;
-	moving: Item;
+	/** What is being moved: a folder among it cannot be opened or chosen. */
+	moving: Item[];
 	here: number | null;
 	open: Set<string>;
 	toggle: (key: string) => void;
@@ -226,7 +269,7 @@ function FolderNode(props: NodeProps) {
 	const id = folder?.id ?? null;
 	const key = keyOf(place.id, id);
 	const own = can === "upload";
-	const isMoving = own && moving.kind === "folder" && id === moving.id;
+	const isMoving = own && moving.some((m) => m.kind === "folder" && m.id === id);
 	const isOpen = open.has(key) && !isMoving;
 	const listing = useQuery({
 		queryKey: ["items", place.id, id],
@@ -294,6 +337,25 @@ function Line({ depth, children }: { depth: number; children: ReactNode }) {
 	return (
 		<li className="py-1.5 pr-2 text-muted-foreground" style={{ paddingLeft: 4 + depth * 20 + 32 }}>
 			{children}
+		</li>
+	);
+}
+
+/** One line of who will see what is moved, where it goes: who, their role, and why. */
+function AccessLine({ a, me, given }: { a: Access; me?: string; given: string }) {
+	const Icon = a.everyone ? Users : User;
+	const name = a.everyone ? "Everyone in the project" : a.former ? "Someone no longer in the project" : a.userId === me ? "You" : nameOf(a);
+	const why = a.given ? given : whyOf(a);
+	return (
+		<li className="flex items-center gap-2.5 border-b border-border py-2 last:border-0">
+			<Icon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+			<span className="min-w-0 flex-1 truncate" title={a.email}>
+				{name}
+			</span>
+			<span className="shrink-0 text-muted-foreground">
+				{ROLE_NAME[a.role]}
+				{why ? ` · ${why}` : ""}
+			</span>
 		</li>
 	);
 }

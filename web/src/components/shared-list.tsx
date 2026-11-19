@@ -1,10 +1,11 @@
 import { RotateCw } from "lucide-react";
 import type { ReactNode } from "react";
 import { nameOf } from "../access";
-import { api, type SharedItem } from "../api";
+import type { SharedItem } from "../api";
 import { formatChanged, formatChangedFull, formatSize } from "../format";
 import { Button } from "./button";
 import { FileIcon } from "./file-icon";
+import { FileLink, FolderButton } from "./file-link";
 
 type Props = {
 	items?: SharedItem[];
@@ -31,7 +32,7 @@ export function sharedByOf(item: SharedItem): string {
  * The "Shared with me" view: what others shared with the person that they reach only through that share, from someone's
  * My files or from a shared folder they have no role on, the most recently shared first. Each is the highest point of
  * what was shared: what is inside a shared folder is found by opening it. The click rule is the list's: a name opens
- * (a folder in the list, a file downloads), the rest of the row selects it and shows its details.
+ * (a folder in the list, a file in the browser or as a download), the rest of the row selects it and shows its details.
  */
 export function SharedList({ items, loading, error, onRetry, onOpen, selected, onSelect }: Props) {
 	return (
@@ -87,27 +88,9 @@ export function SharedList({ items, loading, error, onRetry, onOpen, selected, o
 										<span className="flex min-w-0 items-center gap-2.5">
 											<FileIcon item={item} />
 											{item.kind === "file" ? (
-												<a
-													href={api.downloadUrl(item.place, item.id)}
-													download
-													title={`Download ${item.name}`}
-													onClick={(e) => e.stopPropagation()}
-													className="truncate font-medium underline-offset-4 hover:underline focus-visible:underline"
-												>
-													{item.name}
-												</a>
+												<FileLink placeId={item.place} item={item} />
 											) : (
-												<button
-													type="button"
-													title={`Open ${item.name}`}
-													onClick={(e) => {
-														e.stopPropagation();
-														onOpen(item);
-													}}
-													className="truncate text-left font-medium underline-offset-4 hover:underline focus-visible:underline"
-												>
-													{item.name}
-												</button>
+												<FolderButton item={item} onOpen={() => onOpen(item)} />
 											)}
 										</span>
 									</td>

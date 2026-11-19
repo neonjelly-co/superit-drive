@@ -1,4 +1,4 @@
-import { Download, FolderInput, FolderOpen, PenLine, Trash2, X } from "lucide-react";
+import { Download, ExternalLink, FolderInput, FolderOpen, MapPin, PenLine, Trash2, X } from "lucide-react";
 import { type Action, api, type FolderRef, type Item } from "../api";
 import { formatChangedFull, formatSize } from "../format";
 import { AccessSection } from "./access-section";
@@ -21,9 +21,12 @@ type Props = {
 	here?: boolean;
 	onClose: () => void;
 	onOpen: (folder: Item) => void;
-	onRename: () => void;
-	onMove: () => void;
-	onDelete: () => void;
+	/** Rename, Move and Delete, each offered when given and the person may. */
+	onRename?: () => void;
+	onMove?: () => void;
+	onDelete?: () => void;
+	/** Goes to the folder it is in, for an item found away from it (a search). */
+	onShow?: () => void;
 	/** Called after who has access changed, so the list and the places follow it. */
 	onAccessChanged: () => void;
 	/** True while a change to the item is on its way. */
@@ -32,12 +35,15 @@ type Props = {
 
 /**
  * The details panel on the right of layout D. It opens when one item is selected (a click on its row) and holds the
- * item's details, who can see it and giving access (for whoever may share it), and Rename, Move and Delete. The
- * public link comes with its own ticket.
+ * item's details, Open (a folder, or a file of a kind the browser shows) and Download, who can see it and giving
+ * access (for whoever may share it), and Rename, Move and Delete. The public link comes with its own ticket.
  */
 export function DetailsPanel(props: Props) {
-	const { placeId, where, item, can, me, here, onClose, onOpen, onRename, onMove, onDelete, onAccessChanged, busy } = props;
-	const changes = !here && (can.includes("rename") || can.includes("move") || can.includes("delete"));
+	const { placeId, where, item, can, me, here, onClose, onOpen, onRename, onMove, onDelete, onShow, onAccessChanged, busy } = props;
+	const rename = onRename && can.includes("rename");
+	const move = onMove && can.includes("move");
+	const remove = onDelete && can.includes("delete");
+	const changes = !here && (rename || move || remove);
 	return (
 		<aside aria-label="Details" className="relative w-96 shrink-0 overflow-auto border-l border-border bg-card p-6 pb-24">
 			<button
@@ -88,9 +94,21 @@ export function DetailsPanel(props: Props) {
 							)}
 						</>
 					) : (
-						<a href={api.downloadUrl(placeId, item.id)} download className={link}>
-							<Download aria-hidden className="size-4" /> Download
-						</a>
+						<>
+							{item.opens && (
+								<a href={api.openUrl(placeId, item.id)} target="_blank" rel="noopener noreferrer" className={link}>
+									<ExternalLink aria-hidden className="size-4" /> Open
+								</a>
+							)}
+							<a href={api.downloadUrl(placeId, item.id)} download className={link}>
+								<Download aria-hidden className="size-4" /> Download
+							</a>
+						</>
+					)}
+					{onShow && (
+						<Button onClick={onShow}>
+							<MapPin aria-hidden /> Show where it is
+						</Button>
 					)}
 				</div>
 			)}
@@ -110,24 +128,24 @@ export function DetailsPanel(props: Props) {
 
 			{changes && (
 				<div className="mt-8 flex flex-wrap gap-2 border-t border-border pt-5">
-					{can.includes("rename") && (
+					{rename && (
 						<Button onClick={onRename} disabled={busy}>
 							<PenLine aria-hidden /> Rename
 						</Button>
 					)}
-					{can.includes("move") && (
+					{move && (
 						<Button onClick={onMove} disabled={busy}>
 							<FolderInput aria-hidden /> Move
 						</Button>
 					)}
-					{can.includes("delete") && (
+					{remove && (
 						<Button variant="danger" onClick={onDelete} disabled={busy}>
 							<Trash2 aria-hidden /> Delete
 						</Button>
 					)}
 				</div>
 			)}
-			{changes && can.includes("delete") && (
+			{changes && remove && (
 				<p className="mt-3 text-sm text-muted-foreground">
 					Deleted items go to the trash, where they can be restored for 30 days.
 				</p>

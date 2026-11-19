@@ -98,6 +98,8 @@ export type Item = {
 	/** In a listing: what the person may do with it, and who can see it. */
 	can?: Action[];
 	seenBy?: SeenBy;
+	/** True for a file of a kind that opens in the browser (an ordinary image, a PDF, plain text, a video, a sound). */
+	opens?: boolean;
 };
 
 /** A folder in a path, such as the breadcrumb. */
@@ -144,6 +146,21 @@ export type SharedItem = Item & {
 	toEveryone?: boolean;
 	/** When it was shared (ISO 8601). */
 	shared: string;
+};
+
+/**
+ * A file or folder a search found, with where it is as the person may see it: `path` holds the folders above it that
+ * they can open, from the place's top folder when `fromTop` (then a shared folder's name is `placeName`), and from the
+ * highest folder they were given otherwise. `owner` is whose My files it is in, when it is not theirs.
+ */
+export type Found = Item & {
+	place: number;
+	placeKind: "my-files" | "shared-folder";
+	placeName?: string;
+	owner?: Person;
+	role: RoleAt;
+	path: FolderRef[];
+	fromTop: boolean;
 };
 
 /**
@@ -346,6 +363,11 @@ export const api = {
 		if (to !== null) query.set("to", String(to));
 		return call<MovePreview>("GET", `/api/places/${placeId}/items/${itemId}/move?${query}`);
 	},
+	/**
+	 * Files and folders whose names match, across everything the person can see: the best 50 first, and `more` when a
+	 * longer search would find others.
+	 */
+	search: (q: string) => call<{ items: Found[]; more: boolean }>("GET", `/api/search?${new URLSearchParams({ q })}`),
 	/** What others shared with the person that they reach only through it, the most recently shared first. */
 	sharedWithMe: () => call<{ items: SharedItem[] }>("GET", "/api/shared-with-me").then((r) => r.items),
 	/** Moves an item into the place's trash. */
@@ -373,8 +395,13 @@ export const api = {
 		call<Uploaded>("POST", `${sessionPath(placeId, id)}/finish${existing ? `?existing=${existing}` : ""}`),
 	/** Cancels a resumable upload: what arrived of it is removed. */
 	cancelUpload: (placeId: number, id: string) => call<null>("DELETE", sessionPath(placeId, id)),
-	/** The address that downloads a file under its original name. */
+	/** The address that downloads a file under its original name, whatever kind of file it is. */
 	downloadUrl: (placeId: number, itemId: number) => `/api/places/${placeId}/items/${itemId}/download`,
+	/**
+	 * The address that shows a file in the browser, for a kind that opens there (`opens`); any other file downloads
+	 * from it.
+	 */
+	openUrl: (placeId: number, itemId: number) => `/api/places/${placeId}/items/${itemId}/open`,
 	/**
 	 * The address that downloads a folder of a place (null: its top folder) as one zip; with items, only those items
 	 * of it.
