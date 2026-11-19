@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/neonjelly-co/superit-drive/internal/transfers"
 )
 
 // Errors a caller may want to tell apart.
@@ -70,9 +72,10 @@ func New(address *url.URL, user, password, folder string) *Client {
 	server := &url.URL{Scheme: address.Scheme, Host: address.Host}
 	root := escapeSegments(path.Join(address.Path, folder))
 
-	// One transport for every call to the storage. Large transfers will need their socket buffers capped here to hold
-	// the Drive's memory figure.
+	// One transport for every call to the storage. Each connection's network buffers are capped, to hold the Drive's
+	// memory figure (package transfers).
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = transfers.Dial(30 * time.Second)
 	transport.MaxIdleConnsPerHost = 8
 	transport.ResponseHeaderTimeout = time.Minute
 
