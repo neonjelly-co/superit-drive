@@ -93,6 +93,9 @@ var places = map[string]*Place{
 		DeletedBy: "u-reka", Grants: grants(to("u-reka", onOffer, Editor))},
 	"Bence's My files › 2026, Réka given viewer on Clients": {Kind: MyFiles, Owner: "u-bence", Path: y2026,
 		Grants: grants(to("u-reka", onClients, Viewer))},
+	// One file shared on its own.
+	"Bence's My files › Offer.pdf, Réka given viewer on Offer.pdf": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		Grants: grants(to("u-reka", onOffer, Viewer))},
 	// Deeper levels only add: a higher role lower down adds to a lower one above; a lower one takes nothing away.
 	"Bence's My files › Offer.pdf, Réka given viewer on Clients and editor on Offer.pdf": {Kind: MyFiles, Owner: "u-bence", Path: offer,
 		Grants: grants(to("u-reka", onClients, Viewer), to("u-reka", onOffer, Editor))},
@@ -170,6 +173,8 @@ var places = map[string]*Place{
 		Grants: grants(to("u-reka", onOffer, Editor))},
 	"a shared folder › Offer.pdf, given manager on Bakery": {Kind: SharedFolder, Path: offer,
 		Grants: grants(to("u-reka", onBakery, Manager))},
+	"a shared folder › Offer.pdf, given viewer on Offer.pdf": {Kind: SharedFolder, Path: offer,
+		Grants: grants(to("u-reka", onOffer, Viewer))},
 	"a shared folder › Offer.pdf, everyone given viewer on Clients": {Kind: SharedFolder, Path: offer,
 		Grants: grants(toEveryone(onClients, Viewer))},
 	"a shared folder › Offer.pdf, everyone given viewer on it as a whole": {Kind: SharedFolder, Path: offer,
@@ -195,17 +200,17 @@ var places = map[string]*Place{
 }
 
 // Every action there is. A test below fails when one is added to the package without being added here.
-var everyAction = []Action{Enter, SeeUsage, MakeSharedFolder, List, Download, Upload, MakeFolder, Rename, Move, Delete,
-	SeeTrash, Restore, SeeAccess, Share, ManageAccess, DeleteSharedFolder, RestoreSharedFolder}
+var everyAction = []Action{Enter, SeeUsage, MakeSharedFolder, List, Download, Upload, MakeFolder, Rename, Move, MoveOut,
+	MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, ManageAccess, DeleteSharedFolder, RestoreSharedFolder}
 
 // What the spec gives each role, written out here rather than taken from the package.
 var (
 	// In the top folder of their own My files: everything but showing or managing access, which is about items.
 	// Downloading the top folder is the whole place as one zip.
 	ownerAtTop = []Action{List, Download, Upload, MakeFolder, SeeTrash}
-	// In a shared folder's top folder.
+	// In a shared folder's top folder. Whoever may upload there may also move something in from their own My files.
 	viewerAtTop  = []Action{List, Download, SeeAccess}
-	editorAtTop  = append(slices.Clone(viewerAtTop), Upload, MakeFolder, SeeTrash)
+	editorAtTop  = append(slices.Clone(viewerAtTop), Upload, MakeFolder, SeeTrash, MoveIn)
 	managerAtTop = append(slices.Clone(editorAtTop), ManageAccess, DeleteSharedFolder)
 	// At an item, in any place. Owners of a My files and managers of a shared folder are editors of every item in it.
 	viewerAtItem = []Action{List, Download, SeeAccess}
@@ -216,6 +221,12 @@ var (
 	editorInFolder = append(slices.Clone(editorAtItem), Rename, Move, Delete)
 	// And who may restore it: they see the place's whole trash, or deleted it themselves.
 	allAtItem = append(slices.Clone(editorInFolder), Restore)
+	// The owner of a My files may also move what is in it out, into a shared folder, where it becomes the project's.
+	ownerAtItem = append(slices.Clone(allAtItem), MoveOut)
+	// In a shared folder, whoever may upload into a folder may also move something into it from their own My files.
+	sharedEditorAtItem   = append(slices.Clone(editorAtItem), MoveIn)
+	sharedEditorInFolder = append(slices.Clone(editorInFolder), MoveIn)
+	sharedAllAtItem      = append(slices.Clone(allAtItem), MoveIn)
 )
 
 // The table grows with every kind of person, place, role and action: add each new one to the lists above, and every
@@ -237,10 +248,10 @@ func TestDecide(t *testing.T) {
 	// In her own My files Réka may do everything, whatever was given to whom. Nobody else may do anything there,
 	// admins included, unless an item was shared with them.
 	allow("member", "Réka's My files", ownerAtTop...)
-	allow("member", "Réka's My files › Offer.pdf", allAtItem...)
-	allow("member", "Réka's My files › Offer.pdf, shared with the admin", allAtItem...)
+	allow("member", "Réka's My files › Offer.pdf", ownerAtItem...)
+	allow("member", "Réka's My files › Offer.pdf, shared with the admin", ownerAtItem...)
 	allow("admin", "Réka's My files › Offer.pdf, shared with the admin", viewerAtItem...)
-	allow("member", "Réka's My files › Offer.pdf in the trash, deleted by the admin", allAtItem...)
+	allow("member", "Réka's My files › Offer.pdf in the trash, deleted by the admin", ownerAtItem...)
 	allow("admin", "Réka's My files › Offer.pdf in the trash, deleted by the admin", allAtItem...)
 
 	// What is shared with Réka from Bence's My files, through a folder above it or on the item itself. An editor of
@@ -249,6 +260,7 @@ func TestDecide(t *testing.T) {
 	allow("member", "Bence's My files › Offer.pdf, Réka given editor on Clients", editorInFolder...)
 	allow("member", "Bence's My files › Clients, Réka given editor on Clients", editorAtItem...)
 	allow("member", "Bence's My files › 2026, Réka given viewer on Clients", viewerAtItem...)
+	allow("member", "Bence's My files › Offer.pdf, Réka given viewer on Offer.pdf", viewerAtItem...)
 	allow("member", "Bence's My files › Offer.pdf, Réka given viewer on Clients and editor on Offer.pdf", editorAtItem...)
 	allow("member", "Bence's My files › Offer.pdf, Réka given editor on Clients and viewer on Offer.pdf", editorInFolder...)
 	allow("member", "Bence's My files › Offer.pdf, everyone given viewer on Clients and Réka editor on Bakery", editorInFolder...)
@@ -271,16 +283,17 @@ func TestDecide(t *testing.T) {
 	allow("member", "a shared folder, everyone given viewer", viewerAtTop...)
 	allow("member", "a shared folder, everyone given editor", editorAtTop...)
 	allow("member", "a shared folder › Offer.pdf, given viewer on it as a whole", viewerAtItem...)
-	allow("member", "a shared folder › Offer.pdf, given editor on it as a whole", allAtItem...)
-	allow("member", "a shared folder › Offer.pdf, given manager on it as a whole", allAtItem...)
-	allow("member", "a shared folder › Offer.pdf, given viewer on it as a whole and editor on Bakery", editorInFolder...)
-	allow("member", "a shared folder › Offer.pdf, given editor on it as a whole and viewer on Offer.pdf", allAtItem...)
-	allow("member", "a shared folder › Offer.pdf, given editor on Bakery", editorInFolder...)
-	allow("member", "a shared folder › Bakery, given editor on Bakery", editorAtItem...)
+	allow("member", "a shared folder › Offer.pdf, given editor on it as a whole", sharedAllAtItem...)
+	allow("member", "a shared folder › Offer.pdf, given manager on it as a whole", sharedAllAtItem...)
+	allow("member", "a shared folder › Offer.pdf, given viewer on it as a whole and editor on Bakery", sharedEditorInFolder...)
+	allow("member", "a shared folder › Offer.pdf, given editor on it as a whole and viewer on Offer.pdf", sharedAllAtItem...)
+	allow("member", "a shared folder › Offer.pdf, given editor on Bakery", sharedEditorInFolder...)
+	allow("member", "a shared folder › Bakery, given editor on Bakery", sharedEditorAtItem...)
+	allow("member", "a shared folder › Offer.pdf, given viewer on Offer.pdf", viewerAtItem...)
 	allow("member", "a shared folder › Offer.pdf, everyone given viewer on Clients", viewerAtItem...)
 	allow("member", "a shared folder › Offer.pdf, everyone given viewer on it as a whole", viewerAtItem...)
-	allow("member", "a shared folder › Offer.pdf in the trash, deleted by Bence, given editor on it as a whole", allAtItem...)
-	allow("member", "a shared folder › Offer.pdf in the trash, deleted by Réka, given editor on Bakery", allAtItem...)
+	allow("member", "a shared folder › Offer.pdf in the trash, deleted by Bence, given editor on it as a whole", sharedAllAtItem...)
+	allow("member", "a shared folder › Offer.pdf in the trash, deleted by Réka, given editor on Bakery", sharedAllAtItem...)
 	// A project admin is a manager of every shared folder, whatever they were given, and so an editor of everything in
 	// it, its trash included.
 	for name, place := range places {
@@ -288,7 +301,7 @@ func TestDecide(t *testing.T) {
 			if len(place.Path) == 0 {
 				allow("admin", name, managerAtTop...)
 			} else {
-				allow("admin", name, allAtItem...)
+				allow("admin", name, sharedAllAtItem...)
 			}
 		}
 	}
@@ -411,13 +424,21 @@ func TestTheRulesHangTogether(t *testing.T) {
 			may := func(a Action) bool { return Decide(p, a, l) }
 			where := fmt.Sprintf("%s in %s", pn, ln)
 			// Nobody acts on what they cannot see.
-			for _, a := range []Action{Download, Upload, MakeFolder, Rename, Move, Delete, SeeTrash, Restore, SeeAccess, Share, ManageAccess, DeleteSharedFolder} {
+			for _, a := range []Action{Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, ManageAccess, DeleteSharedFolder} {
 				if may(a) && !may(List) {
 					t.Errorf("%s may %s but not list", where, a)
 				}
 			}
 			if l == nil || l.Deleted {
 				continue
+			}
+			// Moving between places: only out of one's own My files, by whoever may move it there, and only into a
+			// folder of a shared folder where one may upload.
+			if may(MoveOut) != (l.Kind == MyFiles && l.Owner == p.UserID && len(l.Path) > 0 && may(Move)) {
+				t.Errorf("%s: may move it out %v, may move it %v", where, may(MoveOut), may(Move))
+			}
+			if may(MoveIn) != (l.Kind == SharedFolder && may(Upload)) {
+				t.Errorf("%s: may move something in %v, may upload %v", where, may(MoveIn), may(Upload))
 			}
 			child := l.Below(99, nil) // something in it, with nothing given on it
 			if len(l.Path) > 0 {
@@ -460,7 +481,7 @@ func TestTheRulesHangTogether(t *testing.T) {
 				if may(SeeTrash) && (!Decide(p, Delete, child) || !Decide(p, Restore, child)) {
 					t.Errorf("%s may see the trash but not delete and restore what is in the top folder", where)
 				}
-				for _, a := range []Action{Rename, Move, Delete, Restore, Share} {
+				for _, a := range []Action{Rename, Move, MoveOut, Delete, Restore, Share} {
 					if may(a) {
 						t.Errorf("%s may %s, which concerns an item, in a top folder", where, a)
 					}
@@ -488,8 +509,8 @@ func TestTheRulesHangTogether(t *testing.T) {
 			}
 			// Access on a folder applies to everything inside it: what the person may do at the top folder or at a folder
 			// they may also do at anything in it. (Restoring depends on who deleted each item.)
-			for _, a := range []Action{List, Download, Upload, MakeFolder, Rename, Move, Delete, SeeAccess, Share} {
-				if len(l.Path) == 0 && (a == Rename || a == Move || a == Delete || a == Share) {
+			for _, a := range []Action{List, Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeAccess, Share} {
+				if len(l.Path) == 0 && (a == Rename || a == Move || a == MoveOut || a == Delete || a == Share) {
 					continue
 				}
 				if may(a) && !Decide(p, a, child) {
@@ -526,6 +547,48 @@ func TestTheRulesHangTogether(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// "Shared with me" lists, for every person and place the table knows, only the items in listed: what they may open
+// without being able to open the folder it is in. Everything else is left out, written out here rather than worked out
+// from the package: what is inside a folder shared with them (they open the folder), their own My files, a shared
+// folder they have a role on as a whole, a held My files, a grant that counts for nothing or is someone else's.
+func TestSharedWithMe(t *testing.T) {
+	listed := map[string]bool{
+		// Shared on the item itself, by name: a folder of Bence's, a single file of his, a folder or a file in a shared
+		// folder Réka has no role on.
+		"member Bence's My files › Clients, Réka given editor on Clients":     true,
+		"member Bence's My files › Offer.pdf, Réka given viewer on Offer.pdf": true,
+		"member a shared folder › Bakery, given editor on Bakery":             true,
+		"member a shared folder › Offer.pdf, given viewer on Offer.pdf":       true,
+		"admin Réka's My files › Offer.pdf, shared with the admin":            true,
+		// Shared with everyone in the project: every member, the admin included.
+		"member Bence's My files › Offer.pdf, everyone given editor on Offer.pdf": true,
+		"admin Bence's My files › Offer.pdf, everyone given editor on Offer.pdf":  true,
+		// SharedWithMe is about live items: the server never asks it about one in the trash, which no route finds.
+		"member Bence's My files › Offer.pdf in the trash, deleted by Réka, Réka given editor on Offer.pdf": true,
+	}
+	tried := 0
+	for pn, p := range people {
+		for ln, l := range places {
+			key := pn + " " + ln
+			if got := SharedWithMe(p, l); got != listed[key] {
+				t.Errorf("%s: listed %v, want %v", key, got, listed[key])
+			}
+			// Whatever is listed, they may open, and they cannot open its place's top folder: it is not among theirs.
+			if SharedWithMe(p, l) && (!Decide(p, List, l) || Decide(p, List, l.Up(0))) {
+				t.Errorf("%s: listed, but may open it %v and its place %v", key, Decide(p, List, l), Decide(p, List, l.Up(0)))
+			}
+			delete(listed, key)
+			tried++
+		}
+	}
+	for key := range listed {
+		t.Errorf("the table lists %q, which is not a combination the test tried", key)
+	}
+	if want := len(people) * len(places); tried != want {
+		t.Fatalf("tried %d combinations, want %d", tried, want)
 	}
 }
 
