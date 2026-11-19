@@ -1,0 +1,6 @@
+{
+  "members": [
+    { "userId": "dev-reka", "email": "reka@example.com", "displayName": "Réka Kovács", "role": "admin" },
+    { "userId": "dev-bence", "email": "bence@example.com", "displayName": "Bence Tóth", "role": "member" }
+  ]
+}
