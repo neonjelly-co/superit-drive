@@ -536,6 +536,7 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 			"GET /api/places/{place}/items/{item}/download":           {"GET", downloadPath(place, file), ""},
 			"POST /api/places/{place}/items/{item}/rename":            {"POST", at("/api/places/%d/items/%d/rename", place, file), `{"name":"Renamed.xlsx"}`},
 			"POST /api/places/{place}/items/{item}/move":              {"POST", at("/api/places/%d/items/%d/move", place, file), `{"to":null}`},
+			"GET /api/places/{place}/items/{item}/move":               {"GET", at("/api/places/%d/items/%d/move?to=%d", place, file, folder), ""},
 			"DELETE /api/places/{place}/items/{item}":                 {"DELETE", at("/api/places/%d/items/%d", place, file), ""},
 			"GET /api/places/{place}/trash":                           {"GET", at("/api/places/%d/trash", place), ""},
 			"POST /api/places/{place}/trash/{item}/restore":           {"POST", at("/api/places/%d/trash/%d/restore", place, trashed), ""},
@@ -599,6 +600,24 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 		}
 		if res := move(t, o, hers.ID, hersFolder.ID, year.ID); res.Status != http.StatusNotFound {
 			t.Errorf("moving into Payroll's folder from Dóra's shared folder: got %d %s, want 404", res.Status, res.Body)
+		}
+	}
+	// Into Payroll, Payroll 2025 in the trash, or Bence's My files, from her own My files, naming the place: the same
+	// answer as for a place that does not exist, whether she moves or only asks who would see it there.
+	mine := uploaded(t, o, doras, "Mine.txt", []byte("mine"))
+	for _, verb := range []string{"POST", "GET"} {
+		attempt := func(place, folder int64) harness.Response {
+			if verb == "GET" {
+				return o.Get(t, previewPath(doras, mine.ID, place, folder))
+			}
+			return moveInto(t, o, doras, mine.ID, place, folder)
+		}
+		missing := attempt(nowhere, 0)
+		for what, p := range map[string][2]int64{"Payroll": {payroll.ID, 0}, "Payroll's 2026": {payroll.ID, year.ID},
+			"Payroll 2025 in the trash": {gone.ID, 0}, "Bence's My files": {bences, 0}} {
+			if res := attempt(p[0], p[1]); res.Status != http.StatusNotFound || !bytes.Equal(res.Body, missing.Body) {
+				t.Errorf("Dóra moving (%s) her file into %s: got %d %s; a place that does not exist answers %d %s", verb, what, res.Status, res.Body, missing.Status, missing.Body)
+			}
 		}
 	}
 

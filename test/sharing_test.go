@@ -706,6 +706,7 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 			"GET /api/places/{place}/items/{item}/download":           {"GET", downloadPath(x.place, item), ""},
 			"POST /api/places/{place}/items/{item}/rename":            {"POST", at("/api/places/%d/items/%d/rename", x.place, item), `{"name":"Renamed"}`},
 			"POST /api/places/{place}/items/{item}/move":              {"POST", at("/api/places/%d/items/%d/move", x.place, item), fmt.Sprintf(`{"to":%d}`, x.bakery.ID)},
+			"GET /api/places/{place}/items/{item}/move":               {"GET", at("/api/places/%d/items/%d/move?to=%d", x.place, item, x.bakery.ID), ""},
 			"DELETE /api/places/{place}/items/{item}":                 {"DELETE", at("/api/places/%d/items/%d", x.place, item), ""},
 			"POST /api/places/{place}/trash/{item}/restore":           {"POST", at("/api/places/%d/trash/%d/restore", x.place, item), ""},
 			"GET /api/places/{place}/items/{item}/zip":                {"GET", zipPath(x.place, item), ""},
@@ -727,8 +728,8 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 		}
 		return c.Do(t, t2.method, t2.path, body)
 	}
-	if n := len(tries(0)) + len(uploadTries("")); n != 19 {
-		t.Fatalf("the test tries %d routes that take an item or an upload; internal/server/server_test.go lists 19", n)
+	if n := len(tries(0)) + len(uploadTries("")); n != 20 {
+		t.Fatalf("the test tries %d routes that take an item or an upload; internal/server/server_test.go lists 20", n)
 	}
 	none := tries(nowhere)
 	notGiven := map[string]int64{
@@ -786,6 +787,22 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 	noFolder := move(t, o, x.place, x.y2026.ID, nowhere)
 	for what, id := range map[string]int64{"Clients": x.clients.ID, "Private": x.private.ID, "Réka's file": rekasFile.ID, "a folder of Payroll": slip.ID, "the top folder": 0} {
 		sameAs(t, "Dóra moving 2026 into "+what, move(t, o, x.place, x.y2026.ID, id), noFolder)
+	}
+
+	// Nor into another place, naming it: what she was given stays in Bence's My files. Where she cannot add, the same
+	// answer as a place that does not exist; where she can (her own places), the moves between places there are.
+	noPlace := moveInto(t, o, x.place, x.y2026.ID, nowhere, 0)
+	for what, p := range map[string][2]int64{"Réka's My files": {rekas, 0}, "Payroll": {payroll.ID, 0}, "Bence's own top folder": {x.place, 0},
+		"Clients, naming the place": {x.place, x.clients.ID}} {
+		sameAs(t, "Dóra moving 2026 into "+what, moveInto(t, o, x.place, x.y2026.ID, p[0], p[1]), noPlace)
+		sameAs(t, "Dóra asking who would see 2026 in "+what, o.Get(t, previewPath(x.place, x.y2026.ID, p[0], p[1])), o.Get(t, previewPath(x.place, x.y2026.ID, nowhere, 0)))
+	}
+	dorasOwn, _ := myFiles(t, d, dora)
+	dorasShared := madeSharedFolder(t, o, "Dóra's")
+	for what, p := range map[string]int64{"her own My files": dorasOwn, "her own shared folder": dorasShared.ID} {
+		if res := moveInto(t, o, x.place, x.y2026.ID, p, 0); res.Status != http.StatusBadRequest {
+			t.Errorf("Dóra moving 2026 out of Bence's My files into %s: got %d %s, want 400", what, res.Status, res.Body)
+		}
 	}
 
 	// Nothing changed on the storage, and nobody was given anything.
