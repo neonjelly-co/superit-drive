@@ -197,7 +197,8 @@ func (s *Server) guestLink(place, item int64, address string) string {
 		return GuestPrefix + "/?" + link.Encode()
 	}
 	a := *s.address
-	a.Path, a.RawPath, a.RawQuery, a.Fragment = GuestPrefix+"/", "", link.Encode(), "as="+url.QueryEscape(address)
+	a.Path, a.RawPath, a.RawQuery = GuestPrefix+"/", "", link.Encode()
+	a.Fragment, a.RawFragment = "as="+address, "as="+url.QueryEscape(address)
 	return a.String()
 }
 

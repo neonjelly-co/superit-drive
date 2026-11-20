@@ -97,6 +97,17 @@ type (
 		Inherited   bool        `json:"inherited"`
 		From        *folderJSON `json:"from"`
 		Former      bool        `json:"former"`
+		// Guest is set for an invitation; Until for access with an end date; Works, Uses and Used for an invitation, to
+		// whoever may share the item.
+		Guest *guestJSON `json:"guest"`
+		Until *time.Time `json:"until"`
+		Works *bool      `json:"works"`
+		Uses  *int64     `json:"uses"`
+		Used  *time.Time `json:"used"`
+	}
+	guestJSON struct {
+		ID      int64  `json:"id"`
+		Address string `json:"address"`
 	}
 	deletedPlaceJSON struct {
 		ID      int64     `json:"id"`
@@ -125,14 +136,18 @@ type (
 		Changed  *string `json:"changed"`
 		Replaced bool    `json:"replaced"` // uploads only
 		Opens    bool    `json:"opens"`    // files that open in the browser
-		// Listings only: what the person may do with it, and who can see it.
-		Can    []string    `json:"can"`
-		SeenBy *seenByJSON `json:"seenBy"`
+		// Listings only: what the person may do with it, and who can see it; and, for members, which guest added it.
+		Can     []string    `json:"can"`
+		SeenBy  *seenByJSON `json:"seenBy"`
+		AddedBy *struct {
+			Guest string `json:"guest"`
+		} `json:"addedBy"`
 	}
 	seenByJSON struct {
 		Everyone bool     `json:"everyone"`
 		Members  []string `json:"members"`
-		Link     bool     `json:"link"` // anyone with a public link on it, or on a folder above it
+		Link     bool     `json:"link"`   // anyone with a public link on it, or on a folder above it
+		Guests   int      `json:"guests"` // how many guests an invitation on it, or on a folder above it, lets in
 	}
 	folderJSON struct {
 		ID   int64  `json:"id"`

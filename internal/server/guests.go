@@ -35,8 +35,9 @@ import (
 // member's does.
 //
 // A session ends when it ends, when the guest signs out, and at once when the last of what was given to them is taken
-// away or ends (the index removes the guest with it), or when their address appears in the member list (they become a
-// member, and sign in as one).
+// away or ends (the index removes the guest with it), or no longer lets them in anywhere (it is in the trash, gone from
+// the storage, in the My files of someone who left, or its giver may no longer share it), or when their address appears
+// in the member list (they become a member, and sign in as one). Once ended it does not come back: they sign in again.
 
 // codesWaiting is how many asks for a code wait for SendCodes; more are dropped, and answered the same.
 const codesWaiting = 64
@@ -114,7 +115,53 @@ func (s *Server) guestSession(r *http.Request) (guest *index.Guest, stale bool, 
 	if _, member := s.members.Current().ByEmail(g.Address); member {
 		return nil, true, nil // a member signs in as one; their guest's access is theirs as a member (drive.AdmitMembers)
 	}
+	// Nothing given to them lets them in any more (in the trash, gone from the storage, held with its giver's My files,
+	// sharing outside the project switched off): their sessions end, everywhere, for good.
+	open, err := s.guestMayOpenAnything(r.Context(), g)
+	if err != nil {
+		return nil, false, err
+	}
+	if !open {
+		if err := s.drive.EndSessionsOf(r.Context(), g.ID); err != nil {
+			return nil, false, err
+		}
+		return nil, true, nil
+	}
 	return &g, false, nil
+}
+
+// guestMayOpenAnything says whether something given to the guest lets them in now: an item an invitation to them is on
+// that they may open, decided by the access package on the whole way down to it. It stops at the first.
+func (s *Server) guestMayOpenAnything(ctx context.Context, g index.Guest) (bool, error) {
+	granted, err := s.drive.GrantedToGuest(ctx, g.ID)
+	if err != nil {
+		return false, err
+	}
+	who := access.Person{Guest: &access.Guest{ID: g.ID}}
+	for _, at := range granted {
+		p, err := s.drive.Place(ctx, at.Place)
+		if errors.Is(err, index.ErrNoPlace) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		it, err := s.drive.Item(ctx, p, at.Item)
+		if errors.Is(err, index.ErrNoItem) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		where, err := s.accessAt(ctx, p, idsOf(pathTo(it)))
+		if err != nil {
+			return false, err
+		}
+		if access.Decide(who, access.ListAsGuest, where) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // guestCookie is the name of the guests' session cookie: with the __Secure- prefix where the Drive's address is HTTPS,
@@ -498,8 +545,8 @@ func (s *Server) sendCode(ctx context.Context, address string) error {
 	if err != nil {
 		return err
 	}
-	shares, err := s.sharedWithGuest(ctx, g)
-	if err != nil || len(shares) == 0 {
+	open, err := s.guestMayOpenAnything(ctx, g)
+	if err != nil || !open {
 		return err
 	}
 	code, ok, err := s.drive.NewCode(ctx, g, s.codeKey)
