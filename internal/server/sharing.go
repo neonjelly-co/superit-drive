@@ -24,9 +24,11 @@ import (
 // accessJSON is one line of "who can see this": someone with access, the role they have by it, and where it comes
 // from.
 type accessJSON struct {
-	// Everyone is true for everyone in the project. Otherwise the line is about one member, by user id, with their
-	// email address and name from the member list.
+	// Everyone is true for everyone in the project; Link for anyone with the public link on it, or on a folder above it
+	// (as viewer: they see and download), while it works. Otherwise the line is about one member, by user id, with
+	// their email address and name from the member list.
 	Everyone    bool        `json:"everyone,omitempty"`
+	Link        bool        `json:"link,omitempty"`
 	UserID      string      `json:"userId,omitempty"`
 	Email       string      `json:"email,omitempty"`
 	DisplayName string      `json:"displayName,omitempty"`
@@ -50,18 +52,23 @@ type accessJSON struct {
 // accessList is who has access to the item at the end of path (the folders above it, then the item) in place p, or to
 // the place as a whole when path is empty, as the person who asks may see it: first who has it by the place itself
 // (the owner of a My files; on a shared folder, every project admin), then what was given, from the top down, each
-// in the order it was given. Grants that count for nothing (access.Counts) are left out.
+// in the order it was given, and last anyone with a public link on the way down that works now. Grants that count for
+// nothing (access.Counts) are left out.
 func (s *Server) accessList(ctx context.Context, who access.Person, p index.Place, path []index.Item) ([]accessJSON, error) {
 	grants, err := s.drive.GrantsOn(ctx, p, idsOf(path))
 	if err != nil {
 		return nil, err
 	}
-	return s.accessLines(who, p, path, grants), nil
+	links, err := s.drive.LinksOn(ctx, idsOf(path))
+	if err != nil {
+		return nil, err
+	}
+	return s.accessLines(who, p, path, grants, links), nil
 }
 
-// accessLines is accessList with the grants on the place's top folder and on path already gathered: also for where an
-// item would be, before a move.
-func (s *Server) accessLines(who access.Person, p index.Place, path []index.Item, grants []index.Grant) []accessJSON {
+// accessLines is accessList with the grants on the place's top folder and on path, and the links on path, already
+// gathered: also for where an item would be, before a move.
+func (s *Server) accessLines(who access.Person, p index.Place, path []index.Item, grants []index.Grant, links []index.Link) []accessJSON {
 	ids := idsOf(path)
 	grants = slices.Clone(grants)
 	where := s.accessPlace(p, ids, grants)
@@ -99,18 +106,35 @@ func (s *Server) accessLines(who access.Person, p index.Place, path []index.Item
 			}
 		}
 		if at < len(ids) {
-			e.Inherited = true
-			if access.Decide(who, access.List, where.Up(at)) {
-				if at == 0 {
-					e.From = &folderJSON{ID: 0, Name: p.Name}
-				} else {
-					e.From = &folderJSON{ID: path[at-1].ID, Name: path[at-1].Name}
-				}
-			}
+			e.Inherited, e.From = true, inheritedFrom(who, where, p, path, at)
+		}
+		out = append(out, e)
+	}
+	// Anyone with a link on the item, or on a folder above it, that lets them in there now: as viewers.
+	for _, l := range links {
+		at, onPath := depth[l.Item]
+		if !onPath || at == 0 || !access.Decide(visitorOf(l, list), access.SeeThroughLink, where) {
+			continue
+		}
+		e := accessJSON{Link: true, Role: access.Viewer, Given: at == len(ids)}
+		if at < len(ids) {
+			e.Inherited, e.From = true, inheritedFrom(who, where, p, path, at)
 		}
 		out = append(out, e)
 	}
 	return out
+}
+
+// inheritedFrom is the folder access given at depth at on the way down to where (0: the shared folder as a whole)
+// comes from, when the person can open it; nil when they cannot, so they never learn its name.
+func inheritedFrom(who access.Person, where *access.Place, p index.Place, path []index.Item, at int) *folderJSON {
+	if !access.Decide(who, access.List, where.Up(at)) {
+		return nil
+	}
+	if at == 0 {
+		return &folderJSON{ID: 0, Name: p.Name}
+	}
+	return &folderJSON{ID: path[at-1].ID, Name: path[at-1].Name}
 }
 
 // pathOfCall is the item a request is about, after the folders above it; none for a place as a whole.

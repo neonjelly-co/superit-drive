@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,7 +13,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/members"
 )
 
@@ -37,7 +40,12 @@ func bareServer(t *testing.T) *Server {
 func examplePath(pattern string) string {
 	_, p, _ := strings.Cut(pattern, " ")
 	return strings.NewReplacer("{$}", "", "{place}", "1", "{item}", "1", "{member}", "u-reka", "{file...}", "x.js",
-		"{upload}", "0123456789abcdef0123456789abcdef").Replace(p)
+		"{upload}", "0123456789abcdef0123456789abcdef", "{token}", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").Replace(p)
+}
+
+// memberRoutes are the routes outside the public prefix: every one of them needs a member signed in.
+func memberRoutes(s *Server) []route {
+	return slices.DeleteFunc(s.routes(), func(rt route) bool { return rt.link != "" })
 }
 
 // Every route that takes a place is tried as an outsider in test/shared_folders_test.go
@@ -57,6 +65,9 @@ var placeRoutesTriedByAnOutsider = []string{
 	"DELETE /api/places/{place}/items/{item}/access/members/{member}",
 	"PUT /api/places/{place}/items/{item}/access/everyone",
 	"DELETE /api/places/{place}/items/{item}/access/everyone",
+	"GET /api/places/{place}/items/{item}/link",
+	"POST /api/places/{place}/items/{item}/link",
+	"DELETE /api/places/{place}/items/{item}/link",
 	"GET /api/places/{place}/items",
 	"GET /api/places/{place}/items/{item}/items",
 	"POST /api/places/{place}/files",
@@ -108,6 +119,9 @@ var itemRoutesTriedWithPartOfAPlace = []string{
 	"DELETE /api/places/{place}/items/{item}/access/members/{member}",
 	"PUT /api/places/{place}/items/{item}/access/everyone",
 	"DELETE /api/places/{place}/items/{item}/access/everyone",
+	"GET /api/places/{place}/items/{item}/link",
+	"POST /api/places/{place}/items/{item}/link",
+	"DELETE /api/places/{place}/items/{item}/link",
 	"GET /api/places/{place}/items/{item}/items",
 	"POST /api/places/{place}/items/{item}/files",
 	"POST /api/places/{place}/items/{item}/folders",
@@ -128,7 +142,7 @@ var itemRoutesTriedWithPartOfAPlace = []string{
 
 func TestEveryRouteWithAnItemIsTriedWithPartOfAPlace(t *testing.T) {
 	var got []string
-	for _, rt := range bareServer(t).routes() {
+	for _, rt := range memberRoutes(bareServer(t)) {
 		if rt.item != "" || rt.trashed != "" || rt.upload != "" {
 			got = append(got, rt.pattern)
 		}
@@ -144,8 +158,8 @@ func TestEveryRouteWithAnItemIsTriedWithPartOfAPlace(t *testing.T) {
 func TestEveryRouteIsGuarded(t *testing.T) {
 	s := bareServer(t)
 	h := s.Handler()
-	paths := []string{"/no/such/address", "/api/unknown"}
-	for _, rt := range s.routes() {
+	paths := []string{"/no/such/address", "/api/unknown", "/S/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "/s%2FAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+	for _, rt := range memberRoutes(s) {
 		paths = append(paths, examplePath(rt.pattern))
 	}
 	cases := map[string]http.Header{
@@ -177,7 +191,7 @@ func TestEveryChangeMustComeFromTheDrivesOwnPages(t *testing.T) {
 	s := bareServer(t)
 	h := s.Handler()
 	paths := []string{"/no/such/address", "/api/unknown"}
-	for _, rt := range s.routes() {
+	for _, rt := range memberRoutes(s) {
 		paths = append(paths, examplePath(rt.pattern))
 	}
 	origins := map[string][]string{
@@ -280,5 +294,184 @@ func TestOnlyServerGoRegistersHandlers(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Every route that takes a link is tried in test/links_test.go (TestAVisitorCannotGetOutOfTheirLink) by a visitor with a
+// working link on one folder: for every item it does not cover (above it, beside it, in another place, in the trash),
+// and for links that do not work, they must get the same answer as for a link that does not exist. This list is that
+// test's; a new route under the public prefix fails here until it is added there, and here.
+var linkRoutesTriedByAVisitor = []string{
+	"GET /s/{token}",
+	"GET /s/{token}/items/{item}",
+	"GET /s/{token}/items/{item}/download",
+	"GET /s/{token}/items/{item}/open",
+	"GET /s/{token}/items/{item}/zip",
+}
+
+func TestEveryRouteWithALinkIsTriedByAVisitor(t *testing.T) {
+	var got []string
+	for _, rt := range bareServer(t).routes() {
+		if rt.link != "" {
+			got = append(got, rt.pattern)
+		}
+	}
+	want := slices.Clone(linkRoutesTriedByAVisitor)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("the routes that take a link are\n%q\nbut the visitor test tries\n%q", got, want)
+	}
+}
+
+// The tripwire between members and visitors. A route under the public prefix is a visitor's, and decided only as one,
+// through its link, with an action only a visitor may do; every other route is a member's, decided only for a member,
+// with an action no visitor may do. So even a guard handing a visitor to a member's route, or a member to a visitor's,
+// would be refused by the access package: this tries every route's action with every kind of visitor and of member, in
+// every kind of place.
+func TestNoRouteOutsideThePublicPrefixCanBeDecidedForAVisitor(t *testing.T) {
+	member := access.Person{UserID: "u-reka", Role: members.RoleAdmin}
+	visitors := []access.Person{
+		{Link: &access.Link{Item: 10, Kind: access.ViewLink, By: member}},
+		// A signed-in member who came with a link, as a request under the prefix with forged headers would be.
+		{UserID: "u-reka", Role: members.RoleAdmin, Link: &access.Link{Item: 10, Kind: access.ViewLink, By: member}},
+	}
+	places := []*access.Place{nil,
+		{Kind: access.MyFiles, Owner: "u-reka"},
+		{Kind: access.MyFiles, Owner: "u-reka", Path: []int64{10}},
+		{Kind: access.MyFiles, Owner: "u-reka", Path: []int64{10, 11}},
+		{Kind: access.SharedFolder},
+		{Kind: access.SharedFolder, Path: []int64{10, 11}},
+		{Kind: access.SharedFolder, Deleted: true},
+	}
+	for _, rt := range bareServer(t).routes() {
+		visitors_ := patternUnderPublicPrefix(rt.pattern)
+		if visitors_ != (rt.link != "") || visitors_ != slices.Contains(access.ThroughALink, rt.action) {
+			t.Errorf("%s: under the public prefix %v, with a link %v, a visitor's action %v: want all or none",
+				rt.pattern, visitors_, rt.link != "", slices.Contains(access.ThroughALink, rt.action))
+		}
+		if visitors_ && (!strings.HasPrefix(rt.pattern, "GET ") || rt.place != "" || rt.trashed != "" || rt.upload != "") {
+			t.Errorf("%s is a visitor's: it must only read, and find its place through its link", rt.pattern)
+		}
+		for _, place := range places {
+			if !visitors_ {
+				for _, v := range visitors {
+					if access.Decide(v, rt.action, place) {
+						t.Errorf("%s, a member's route, was allowed for a visitor in %+v", rt.pattern, place)
+					}
+				}
+			} else if access.Decide(member, rt.action, place) {
+				t.Errorf("%s, a visitor's route, was allowed for a member in %+v", rt.pattern, place)
+			}
+		}
+	}
+}
+
+// Under the public prefix, a visitor only reads: any other method is refused with 405 before anything else is looked
+// at (the bare server would panic otherwise), whatever headers come with it, and the answer is the same for every
+// address there.
+func TestVisitorsOnlyRead(t *testing.T) {
+	s := bareServer(t)
+	h := s.Handler()
+	paths := []string{"/s/", "/s/x", "/s/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/nothing/here"}
+	for _, rt := range s.routes() {
+		if rt.link != "" {
+			paths = append(paths, examplePath(rt.pattern))
+		}
+	}
+	var first string
+	for _, path := range paths {
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, "PROPFIND", "MKCOL"} {
+			for _, headers := range []http.Header{
+				{},
+				{SecretHeader: {secret}, UserIDHeader: {"u-reka"}, "Origin": {"https://files.example.com"}},
+			} {
+				req := httptest.NewRequest(method, path, strings.NewReader("x"))
+				req.Header = headers.Clone()
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != "GET, HEAD" {
+					t.Errorf("%s %s: got %d, Allow %q, want 405 with GET, HEAD", method, path, rec.Code, rec.Header().Get("Allow"))
+				}
+				if first == "" {
+					first = rec.Body.String()
+				} else if rec.Body.String() != first {
+					t.Errorf("%s %s: the answer differs from another address's", method, path)
+				}
+				checkVisitorHeaders(t, method+" "+path, rec.Header())
+				if rec.Header().Get("Set-Cookie") != "" {
+					t.Errorf("%s %s set a cookie", method, path)
+				}
+			}
+		}
+	}
+}
+
+// checkVisitorHeaders checks the headers every answer under the public prefix carries.
+func checkVisitorHeaders(t *testing.T, what string, h http.Header) {
+	t.Helper()
+	for name, want := range map[string]string{
+		"X-Robots-Tag":                 "noindex, nofollow",
+		"Referrer-Policy":              "no-referrer",
+		"Cache-Control":                "no-store",
+		"X-Content-Type-Options":       "nosniff",
+		"Cross-Origin-Resource-Policy": "same-origin",
+		"Content-Security-Policy":      visitorPolicy,
+	} {
+		if got := h.Values(name); len(got) != 1 || got[0] != want {
+			t.Errorf("%s: %s is %q, want %q", what, name, got, want)
+		}
+	}
+}
+
+// The visitors' pages' policy lets nothing load or run but their own style: it is at least as strict as the members'.
+func TestTheVisitorsPolicyIsStrict(t *testing.T) {
+	for _, part := range []string{"default-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'"} {
+		if !strings.Contains(visitorPolicy, part) {
+			t.Errorf("the visitors' policy %q lacks %q", visitorPolicy, part)
+		}
+	}
+	for _, loose := range []string{"'unsafe-inline'", "'unsafe-eval'", "script-src", "'self'", "*", "data:", "http"} {
+		if strings.Contains(visitorPolicy, loose) {
+			t.Errorf("the visitors' policy %q allows %q", visitorPolicy, loose)
+		}
+	}
+}
+
+// Visitors' requests are worked on a few at a time; a few more wait, each a while; any more are refused at once.
+func TestAdmission(t *testing.T) {
+	a := newAdmission(2, 1, 200*time.Millisecond)
+	l1, ok1 := a.enter(context.Background())
+	l2, ok2 := a.enter(context.Background())
+	if !ok1 || !ok2 {
+		t.Fatal("the first two were not let in")
+	}
+	waited := make(chan bool, 1)
+	go func() {
+		leave, ok := a.enter(context.Background())
+		if ok {
+			defer leave()
+		}
+		waited <- ok
+	}()
+	time.Sleep(50 * time.Millisecond)
+	start := time.Now()
+	if _, ok := a.enter(context.Background()); ok || time.Since(start) > 50*time.Millisecond {
+		t.Fatalf("one more than may wait: let in %v after %v, want refused at once", ok, time.Since(start))
+	}
+	l1()
+	l1() // leaving twice leaves once
+	if !<-waited {
+		t.Fatal("the one waiting was not let in when a turn came free")
+	}
+	// Waiting longer than the while: refused.
+	l3, _ := a.enter(context.Background())
+	if _, ok := a.enter(context.Background()); ok {
+		t.Fatal("let in with every turn taken")
+	}
+	l2()
+	l3()
+	if _, ok := a.enter(context.Background()); !ok {
+		t.Fatal("not let in with turns free")
 	}
 }

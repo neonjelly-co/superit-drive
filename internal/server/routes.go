@@ -20,7 +20,8 @@ import (
 // routes is every route the Drive answers. Add new ones here, each with the action it is. A route that takes a place
 // must also be tried by an outsider in test/shared_folders_test.go, and a route that takes an item (or an upload in
 // progress, which is about the folder it goes into) by someone with access to part of the place in
-// test/sharing_test.go (a test here fails until it is).
+// test/sharing_test.go; a route under the public prefix by a visitor trying to get out of their link in
+// test/links_test.go (a test here fails until it is).
 //
 // A folder of a place is addressed as an item; the place's top folder by the place alone. So most things that happen
 // in a folder have two routes, one for the top folder and one for any other.
@@ -61,6 +62,10 @@ func (s *Server) routes() []route {
 		{pattern: "DELETE /api/places/{place}/items/{item}/access/members/{member}", action: access.Share, place: "place", item: "item", serve: s.takeAccess(toMember)},
 		{pattern: "PUT /api/places/{place}/items/{item}/access/everyone", action: access.Share, place: "place", item: "item", serve: s.giveAccess(toEveryone)},
 		{pattern: "DELETE /api/places/{place}/items/{item}/access/everyone", action: access.Share, place: "place", item: "item", serve: s.takeAccess(toEveryone)},
+		// The public link on a file or folder (links.go): whoever may share it makes one, sees it and removes it.
+		{pattern: "GET /api/places/{place}/items/{item}/link", action: access.ManageLink, place: "place", item: "item", serve: s.linkOf},
+		{pattern: "POST /api/places/{place}/items/{item}/link", action: access.MakeLink, place: "place", item: "item", serve: s.makeLink},
+		{pattern: "DELETE /api/places/{place}/items/{item}/link", action: access.ManageLink, place: "place", item: "item", serve: s.removeLink},
 
 		// What is in a place.
 		{pattern: "GET /api/places/{place}/items", action: access.List, place: "place", serve: s.items},
@@ -93,6 +98,15 @@ func (s *Server) routes() []route {
 		{pattern: "PUT /api/places/{place}/uploads/{upload}", action: access.Upload, place: "place", upload: "upload", serve: s.uploadPart},
 		{pattern: "POST /api/places/{place}/uploads/{upload}/finish", action: access.Upload, place: "place", upload: "upload", serve: s.finishUpload},
 		{pattern: "DELETE /api/places/{place}/uploads/{upload}", action: access.Upload, place: "place", upload: "upload", serve: s.cancelUpload},
+
+		// The public prefix: what a visitor reaches through a public link, without signing in (visitors.go). Only GET
+		// (and HEAD); always a visitor here, whatever the request says about who sent it; the place is the one the link's
+		// item is in, and an item named here must be that item or inside it. A file's bytes go out as they do to members.
+		{pattern: "GET /s/{token}", action: access.SeeThroughLink, link: "token", serve: s.visitorPage},
+		{pattern: "GET /s/{token}/items/{item}", action: access.SeeThroughLink, link: "token", item: "item", serve: s.visitorPage},
+		{pattern: "GET /s/{token}/items/{item}/download", action: access.DownloadThroughLink, link: "token", item: "item", serve: s.download},
+		{pattern: "GET /s/{token}/items/{item}/open", action: access.DownloadThroughLink, link: "token", item: "item", serve: s.open},
+		{pattern: "GET /s/{token}/items/{item}/zip", action: access.DownloadThroughLink, link: "token", item: "item", serve: s.zip},
 	}
 }
 
@@ -269,11 +283,14 @@ type seenByJSON struct {
 	// Members is, when Everyone is false, every member in the member list who can see it, by user id: its owner or its
 	// shared folder's managers and the project admins, and everyone it was shared with, on it or on a folder above.
 	Members []string `json:"members"`
+	// Link is true when anyone with a public link can see it: one on it, or on a folder above it, that works now.
+	Link bool `json:"link"`
 }
 
-// seenBy is who can see what is at where: everyone, or each member access gives a role there.
+// seenBy is who can see what is at where: anyone with a link (from where.Links), and everyone, or each member access
+// gives a role there.
 func seenBy(list *members.List, where *access.Place) seenByJSON {
-	out := seenByJSON{Members: []string{}}
+	out := seenByJSON{Members: []string{}, Link: access.ByLink(where)}
 	if access.ToEveryone(where) != access.NoRole {
 		out.Everyone = true
 		return out
@@ -315,16 +332,31 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
 	for _, g := range inside {
 		givenOn[g.Item] = append(givenOn[g.Item], accessGrant(g))
 	}
+	var folders []index.Item
+	if folder != nil {
+		folders = pathTo(*folder)
+	}
+	// The public links on the folders down to this one reach everything in it; those on its items, only them.
+	here, err := s.withLinksOn(r.Context(), c.access, idsOf(folders))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	links, err := s.drive.LinksInside(r.Context(), *c.place, folder)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	linkOn := map[int64][]access.Link{}
+	for _, l := range s.accessLinks(links) {
+		linkOn[l.Item] = append(linkOn[l.Item], l)
+	}
 	who := personOf(c.member)
 	list := s.members.Current()
 	out := make([]listedJSON, 0, len(items))
 	for _, it := range items {
-		where := c.access.Below(it.ID, givenOn[it.ID])
+		where := here.Below(it.ID, givenOn[it.ID]).WithLinks(linkOn[it.ID]...)
 		out = append(out, listedJSON{itemJSON: itemOf(it), Can: can(who, where), SeenBy: seenBy(list, where)})
-	}
-	var folders []index.Item
-	if folder != nil {
-		folders = pathTo(*folder)
 	}
 	open, fromTop := openPath(who, c.access, folders)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -571,6 +603,9 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request, c call) {
 
 // failed answers a request whose work went wrong: on the storage, or in the Drive itself.
 func (s *Server) failed(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+		return // the person has gone: see fail
+	}
 	if errors.Is(err, drive.ErrPlaceGone) {
 		// The shared folder went to the trash after guard found it: the same answer guard gives from now on.
 		s.refuse(w, r, http.StatusNotFound, notHere)

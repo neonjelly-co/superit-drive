@@ -1,6 +1,7 @@
 package index
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -737,5 +738,138 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 	rows.Close()
 	if broken {
 		t.Fatal("a row refers to one that is not there after the move")
+	}
+}
+
+// A public link hangs on its item: one per item, found by its token's hash wherever the item is now (in another place,
+// in the trash), and gone with the item when it is removed for good or the storage no longer has it. Removing it, or
+// replacing it, ends its token for good. The index holds only the token's hash.
+func TestALinkLivesAndGoesWithItsItem(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	now := time.Now()
+	bence := place(t, x, "u-bence")
+	shared, err := x.AddSharedFolder(ctx, "Clients", "Shared folders/Clients", "u-bence", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := put(t, x, bence, 0, "Clients", true, 0)
+	offer := put(t, x, bence, clients.ID, "Offer.pdf", false, 84)
+	notes := put(t, x, bence, 0, "Notes.txt", false, 5)
+	hash := func(b byte) []byte { return bytes.Repeat([]byte{b}, 32) }
+
+	l, err := x.MakeLink(ctx, bence.ID, clients.ID, hash(1), "view", "u-bence", now, false)
+	if err != nil || l.Item != clients.ID || l.Place != bence.ID || l.Kind != "view" || l.MadeBy != "u-bence" || l.Uses != 0 || !l.Used.IsZero() {
+		t.Fatalf("a new link on Clients: %+v, %v", l, err)
+	}
+	// One per item: another is refused unless it replaces the first, whose token then finds nothing.
+	if _, err := x.MakeLink(ctx, bence.ID, clients.ID, hash(2), "view", "u-bence", now, false); !errors.Is(err, ErrLinkExists) {
+		t.Fatalf("a second link on Clients: %v", err)
+	}
+	again, err := x.MakeLink(ctx, bence.ID, clients.ID, hash(2), "view", "u-dora", now, true)
+	if err != nil || again.ID == l.ID || again.MadeBy != "u-dora" {
+		t.Fatalf("a link in place of the first: %+v, %v", again, err)
+	}
+	if _, _, err := x.LinkByToken(ctx, hash(1)); !errors.Is(err, ErrNoLink) {
+		t.Fatalf("the replaced link's token: %v", err)
+	}
+	found, held, err := x.LinkByToken(ctx, hash(2))
+	if err != nil || found.ID != again.ID || !bytes.Equal(held, hash(2)) {
+		t.Fatalf("the link by its token: %+v, %x, %v", found, held, err)
+	}
+	// Only on a live item of the place given; never a hash that is not one.
+	if _, err := x.MakeLink(ctx, shared.ID, offer.ID, hash(3), "view", "u-bence", now, false); !errors.Is(err, ErrNoItem) {
+		t.Fatalf("a link on Bence's item through another place: %v", err)
+	}
+	if _, err := x.MakeLink(ctx, bence.ID, offer.ID, []byte("short"), "view", "u-bence", now, false); err == nil {
+		t.Fatal("the index holds a token hash of the wrong length")
+	}
+	if _, err := x.MakeLink(ctx, bence.ID, offer.ID, hash(4), "edit", "u-bence", now, false); err == nil {
+		t.Fatal("the index holds a link of a kind nobody knows")
+	}
+	if _, err := x.MakeLink(ctx, bence.ID, notes.ID, hash(2), "view", "u-bence", now, false); err == nil {
+		t.Fatal("two links share a token")
+	}
+	if _, err := x.MakeLink(ctx, bence.ID, offer.ID, hash(5), "view", "u-bence", now, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := x.LinksOn(ctx, []int64{clients.ID, offer.ID, notes.ID}); len(got) != 2 {
+		t.Fatalf("links on Clients, Offer.pdf and Notes.txt: %+v", got)
+	}
+	if got, _ := x.LinksInside(ctx, bence.ID, 0); len(got) != 1 || got[0].Item != clients.ID {
+		t.Fatalf("links on what is in the top folder: %+v", got)
+	}
+
+	// Uses add up, and the last one counts.
+	if err := x.AddUses(ctx, map[int64]Use{again.ID: {Count: 3, Last: now.Add(time.Minute)}, 999: {Count: 1, Last: now}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.AddUses(ctx, map[int64]Use{again.ID: {Count: 2, Last: now}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := x.LinkOn(ctx, clients.ID); got.Uses != 5 || got.Used.UnixMilli() != now.Add(time.Minute).UnixMilli() {
+		t.Fatalf("uses of the link: %+v", got)
+	}
+
+	// In the trash it is still there, and found by its token; moved into a shared folder it follows its item.
+	if err := x.Trash(ctx, bence.ID, clients.ID, now, "e1", "u-bence"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := x.LinkByToken(ctx, hash(2)); err != nil {
+		t.Fatalf("the link of an item in the trash: %v", err)
+	}
+	if _, err := x.Restore(ctx, bence.ID, clients.ID, 0, "Clients"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.MoveToPlace(ctx, bence.ID, clients.ID, shared.ID, 0, "Clients"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := x.LinkByToken(ctx, hash(2)); err != nil || got.Place != shared.ID || got.Item != clients.ID {
+		t.Fatalf("the link after its item moved into the shared folder: %+v, %v", got, err)
+	}
+	if got, _ := x.LinkOn(ctx, offer.ID); got.Place != shared.ID {
+		t.Fatalf("the link on Offer.pdf, inside what moved: %+v", got)
+	}
+
+	// Removed, it is gone; removed for good from the trash, or dropped because the storage no longer has it, it goes
+	// with its item.
+	if err := x.RemoveLink(ctx, shared.ID, offer.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.LinkOn(ctx, offer.ID); !errors.Is(err, ErrNoLink) {
+		t.Fatalf("the removed link: %v", err)
+	}
+	if _, err := x.MakeLink(ctx, bence.ID, notes.ID, hash(6), "view", "u-bence", now, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.Trash(ctx, shared.ID, clients.ID, now, "e2", "u-bence"); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.RemoveFromTrash(ctx, shared.ID, clients.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.SetChildren(ctx, bence.ID, 0, nil, func(string) bool { return false }, func() bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	if err := x.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM links").Scan(&left); err != nil || left != 0 {
+		t.Fatalf("%d links outlived their items (%v)", left, err)
+	}
+}
+
+// A visitor's list of a folder holds at most so many items.
+func TestFirstChildren(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	p := place(t, x, "u-bence")
+	for _, name := range []string{"c.txt", "a.txt", "B", "b.txt"} {
+		put(t, x, p, 0, name, name == "B", 1)
+	}
+	got, more, err := x.FirstChildren(ctx, p.ID, 0, 3)
+	if err != nil || !more || len(got) != 3 || got[0].Name != "B" || got[1].Name != "a.txt" || got[2].Name != "b.txt" {
+		t.Fatalf("the first 3: %+v, more %v, %v", got, more, err)
+	}
+	if got, more, _ := x.FirstChildren(ctx, p.ID, 0, 4); more || len(got) != 4 {
+		t.Fatalf("all 4: %d, more %v", len(got), more)
 	}
 }

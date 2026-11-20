@@ -1,5 +1,6 @@
 # Caddy, the reverse proxy: it serves HTTPS, asks Authelia whether the person is signed in, and passes a signed-in
-# person's requests on to the Drive with the two headers the Drive needs.
+# person's requests on to the Drive with the two headers the Drive needs. The public prefix, /s/, is open to anyone
+# with a public link, without signing in, and carries nothing about who anyone is.
 {
 	# Names under .localhost get certificates from Caddy's own authority, which browsers do not know, and which Caddy
 	# cannot add to a container's trust store. Real names get certificates from Let's Encrypt.
@@ -13,16 +14,34 @@ auth.example.localhost {
 
 # The Drive.
 drive.example.localhost {
-	# Every request asks Authelia first. Without a session, Authelia answers with the way to the sign-in page, and that
-	# answer goes back to the browser. With one, it names the person in Remote-User: their username, which is their
-	# userId in the member list. It is passed on as Remote-User-Id, replacing any the browser sent.
-	forward_auth authelia:9091 {
-		uri /api/authz/forward-auth
-		copy_headers Remote-User>Remote-User-Id
+	# The public prefix: public links (and, later, guests' pages). No sign-in here, and nothing a browser sends about who
+	# it is reaches the Drive: the secret and the identity headers are removed (the Drive treats every request under /s/
+	# as a visitor's anyway, whatever it carries), and so is the sign-in cookie, which the Drive never needs here.
+	handle /s/* {
+		reverse_proxy drive:8080 {
+			header_up -Drive-Secret
+			header_up -Remote-User
+			header_up -Remote-User-Id
+			header_up -Remote-Email
+			header_up -Remote-Name
+			header_up -Remote-Groups
+			header_up -Remote-Role
+			header_up -Cookie
+		}
 	}
 
-	reverse_proxy drive:8080 {
-		# The secret that tells the Drive this request came through here. It replaces any the browser sent.
-		header_up Drive-Secret {$DRIVE_HEADER_SECRET}
+	# Everything else asks Authelia first. Without a session, Authelia answers with the way to the sign-in page, and that
+	# answer goes back to the browser. With one, it names the person in Remote-User: their username, which is their
+	# userId in the member list. It is passed on as Remote-User-Id, replacing any the browser sent.
+	handle {
+		forward_auth authelia:9091 {
+			uri /api/authz/forward-auth
+			copy_headers Remote-User>Remote-User-Id
+		}
+
+		reverse_proxy drive:8080 {
+			# The secret that tells the Drive this request came through here. It replaces any the browser sent.
+			header_up Drive-Secret {$DRIVE_HEADER_SECRET}
+		}
 	}
 }

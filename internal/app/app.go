@@ -86,6 +86,16 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	}()
 	defer func() { stopTidy(); <-tidyDone }() // before the index closes
 
+	// Writes how often each public link was used, counted in memory as visitors use them: every half minute, and once
+	// more when the Drive stops (after the last request, before the index closes).
+	usesCtx, stopUses := context.WithCancel(context.WithoutCancel(ctx))
+	usesDone := make(chan struct{})
+	go func() {
+		defer close(usesDone)
+		d.KeepUses(usesCtx, 30*time.Second)
+	}()
+	defer func() { stopUses(); <-usesDone }()
+
 	// Every connection's network buffers are capped (package transfers).
 	ln, err := transfers.Listen(s.Listen)
 	if err != nil {
@@ -97,7 +107,9 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 		IdleTimeout:       2 * time.Minute,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -110,6 +122,7 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	if err := httpServer.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	<-shutdownDone // the requests under way have ended, or had ten seconds to
 	log.Info("stopped")
 	return nil
 }

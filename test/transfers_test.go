@@ -703,13 +703,24 @@ func keys(m map[string]string) []string {
 // returns the connection and the status, or 0 when no answer came within wait.
 func heldDownload(t *testing.T, d *harness.Drive, m harness.Member, path string, wait time.Duration) (net.Conn, int) {
 	t.Helper()
+	return heldRequest(t, d, fmt.Sprintf("Drive-Secret: %s\r\nRemote-User-Id: %s\r\n", d.Secret, m.UserID), path, wait)
+}
+
+// heldVisitorDownload is heldDownload for a visitor with a public link: nothing but the address.
+func heldVisitorDownload(t *testing.T, d *harness.Drive, path string, wait time.Duration) (net.Conn, int) {
+	t.Helper()
+	return heldRequest(t, d, "", path, wait)
+}
+
+func heldRequest(t *testing.T, d *harness.Drive, headers, path string, wait time.Duration) (net.Conn, int) {
+	t.Helper()
 	address, _ := url.Parse(d.URL)
 	conn, err := net.Dial("tcp", address.Host)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nDrive-Secret: %s\r\nRemote-User-Id: %s\r\n\r\n", path, address.Host, d.Secret, m.UserID)
+	fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", path, address.Host, headers)
 	_ = conn.SetReadDeadline(time.Now().Add(wait))
 	status, err := bufio.NewReader(conn).ReadString('\n')
 	_ = conn.SetReadDeadline(time.Time{})
@@ -720,43 +731,82 @@ func heldDownload(t *testing.T, d *harness.Drive, m harness.Member, path string,
 	return conn, n
 }
 
-// At most 32 transfers are in flight. Further downloads wait their turn in line; further uploads are told at once to
-// wait, keep their place in line, and get their turn when it comes. A file opened in the browser (a video, here) is a
-// transfer like a download: the first of the 32 is one, and the 33rd download gets its turn when it ends.
+// waitingFor starts a download that will wait its turn, and returns where its status arrives (0: none within wait)
+// and its connection, to close once it is answered.
+func waitingFor(held func() (net.Conn, int)) (status <-chan int, conn <-chan net.Conn) {
+	s, c := make(chan int, 1), make(chan net.Conn, 1)
+	go func() {
+		conn, status := held()
+		c <- conn
+		s <- status
+	}()
+	return s, c
+}
+
+// stillWaiting fails the test if the download waiting answered.
+func stillWaiting(t *testing.T, what string, status <-chan int) {
+	t.Helper()
+	select {
+	case s := <-status:
+		t.Fatalf("%s was answered: %d", what, s)
+	default:
+	}
+}
+
+// At most 32 transfers are in flight, of which visitors with a public link hold at most 8. Further downloads wait their
+// turn in line (visitors in a line of their own); further uploads are told at once to wait, keep their place in line,
+// and get their turn when it comes. Members can always use the slots visitors may not, come first when a slot comes
+// back, and use all 32 while no visitor needs one. A file opened in the browser (a video, here) is a transfer like a
+// download.
 func TestAtMost32TransfersAreInFlightAndTheRestWaitTheirTurn(t *testing.T) {
 	t.Parallel()
 	d := harness.Start(t, reka)
 	placeID, _ := myFiles(t, d, reka)
 	c := d.As(reka)
-	big := uploaded(t, c, placeID, "Big.mp4", randomBytes(t, 16<<20)) // more than the network buffers on the way hold
+	films := madeFolder(t, c, placeID, 0, "Films")
+	big := uploadedInto(t, c, placeID, films.ID, "Big.mp4", randomBytes(t, 16<<20)) // more than the network buffers on the way hold
+	_, page := madeLink(t, d, c, placeID, films.ID, false)
 	u := startedUpload(t, c, placeID, 0, "Resumable.bin", 10)
-
-	var held []net.Conn
-	for i := range 32 {
-		path := downloadPath(placeID, big.ID)
+	member := func(i int) string {
 		if i == 0 {
-			path = openPath(placeID, big.ID)
+			return openPath(placeID, big.ID)
 		}
-		conn, status := heldDownload(t, d, reka, path, 5*time.Second)
+		return downloadPath(placeID, big.ID)
+	}
+	visiting := func(i int) string {
+		if i == 0 {
+			return inLink(page, big.ID, "/open")
+		}
+		return inLink(page, big.ID, "/download")
+	}
+
+	// Visitors take 8 slots; a 9th waits in their line, though 24 are free.
+	var visitors []net.Conn
+	for i := range 8 {
+		conn, status := heldVisitorDownload(t, d, visiting(i), 5*time.Second)
 		if status != http.StatusOK {
-			t.Fatalf("transfer %d (%s): got %d", len(held)+1, path, status)
+			t.Fatalf("visitor's transfer %d: got %d", i+1, status)
+		}
+		visitors = append(visitors, conn)
+	}
+	ninth, ninthConn := waitingFor(func() (net.Conn, int) { return heldVisitorDownload(t, d, visiting(1), time.Minute) })
+	time.Sleep(time.Second)
+	stillWaiting(t, "a 9th visitor's download", ninth)
+
+	// Members get the other 24 at once, the first an opened video.
+	var held []net.Conn
+	for i := range 24 {
+		conn, status := heldDownload(t, d, reka, member(i), 5*time.Second)
+		if status != http.StatusOK {
+			t.Fatalf("member's transfer %d (%s), with visitors holding 8: got %d", i+1, member(i), status)
 		}
 		held = append(held, conn)
 	}
 
 	// A 33rd download waits in line: no answer yet.
-	waiting, done := make(chan int, 1), make(chan net.Conn, 1)
-	go func() {
-		conn, status := heldDownload(t, d, reka, downloadPath(placeID, big.ID), 20*time.Second)
-		done <- conn
-		waiting <- status
-	}()
+	waiting, done := waitingFor(func() (net.Conn, int) { return heldDownload(t, d, reka, downloadPath(placeID, big.ID), 20*time.Second) })
 	time.Sleep(time.Second)
-	select {
-	case s := <-waiting:
-		t.Fatalf("a 33rd download was answered at once: %d", s)
-	default:
-	}
+	stillWaiting(t, "a 33rd download", waiting)
 	// An upload is told at once, and keeps its place behind it.
 	res := c.Do(t, http.MethodPost, uploadPath(placeID, "Small.txt")+"&turn=small-1", strings.NewReader("small"))
 	if res.Status != http.StatusServiceUnavailable || res.Header.Get("Retry-After") == "" || !strings.Contains(string(res.Body), `"busy":true`) {
@@ -770,26 +820,54 @@ func TestAtMost32TransfersAreInFlightAndTheRestWaitTheirTurn(t *testing.T) {
 		t.Fatalf("the resumable upload's state: %+v, want it waiting", s)
 	}
 
-	// The opened video ends: the 33rd gets its turn.
-	held[0].Close()
+	// A visitor's video ends: its slot goes to the member waiting, not to the visitor who came earlier.
+	visitors[0].Close()
 	if s := <-waiting; s != http.StatusOK {
-		t.Fatalf("the 33rd download, once a slot was free: got %d", s)
+		t.Fatalf("the 33rd download, once a visitor's slot was free: got %d", s)
 	}
+	stillWaiting(t, "the 9th visitor, while a member waits", ninth)
 	(<-done).Close()
 	// The next slot is kept for the upload in one request, first in line now: without its turn, another upload waits.
 	harness.Eventually(t, "the upload's turn has come", func() bool {
 		return sendPart(t, c, placeID, u.ID, 0, []byte("0123456789")).Status == http.StatusServiceUnavailable &&
 			upload(t, c, placeID, "Other.txt", []byte("x")).Status == http.StatusServiceUnavailable
 	})
+	stillWaiting(t, "the 9th visitor, while a member's upload has its turn", ninth)
 	res = c.Do(t, http.MethodPost, uploadPath(placeID, "Small.txt")+"&turn=small-1", strings.NewReader("small"))
 	if res.Status != http.StatusCreated {
 		t.Fatalf("the upload, sent again in its turn: got %d %s", res.Status, res.Body)
 	}
 	// And the next for the resumable upload.
-	held[1].Close()
 	harness.Eventually(t, "the part's turn has come", func() bool { return !stateOf(t, c, placeID, u.ID).Waiting })
 	sentPart(t, c, placeID, u.ID, 0, []byte("0123456789"))
 	if res := finishUpload(t, c, placeID, u.ID, ""); res.Status != http.StatusCreated {
 		t.Fatalf("finishing: got %d %s", res.Status, res.Body)
 	}
+
+	// The opened video ends with no member waiting: the visitor waiting gets it, as visitors hold 7.
+	held[0].Close()
+	if s := <-ninth; s != http.StatusOK {
+		t.Fatalf("the 9th visitor, once no member waited: got %d", s)
+	}
+	visitors = append(visitors[1:], <-ninthConn)
+
+	// With no visitor holding one, members use all 32, and a visitor waits.
+	for _, conn := range visitors {
+		conn.Close()
+	}
+	for len(held) < 33 {
+		conn, status := heldDownload(t, d, reka, member(1), 5*time.Second)
+		if status != http.StatusOK {
+			t.Fatalf("member's transfer %d, with no visitor holding one: got %d", len(held), status)
+		}
+		held = append(held, conn)
+	}
+	late, lateConn := waitingFor(func() (net.Conn, int) { return heldVisitorDownload(t, d, visiting(1), 20*time.Second) })
+	time.Sleep(time.Second)
+	stillWaiting(t, "a visitor while members hold all 32", late)
+	held[1].Close()
+	if s := <-late; s != http.StatusOK {
+		t.Fatalf("the visitor, once a member's slot was free: got %d", s)
+	}
+	(<-lateConn).Close()
 }

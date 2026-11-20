@@ -90,6 +90,18 @@ func (x *Index) Children(ctx context.Context, placeID, folderID int64) ([]Item, 
 		ORDER BY is_folder DESC, name`, placeID, folderID))
 }
 
+// FirstChildren is Children, at most limit of them, in the same order; more says there are others.
+func (x *Index) FirstChildren(ctx context.Context, placeID, folderID int64, limit int) (items []Item, more bool, err error) {
+	items, err = scanItems(x.db.QueryContext(ctx, `
+		SELECT `+itemColumns+` FROM items
+		WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL
+		ORDER BY is_folder DESC, name LIMIT ?`, placeID, folderID, limit+1))
+	if len(items) > limit {
+		return items[:limit], true, err
+	}
+	return items, false, err
+}
+
 // Item finds the item with id in the place, at any depth, with the folders above it in Above. It returns ErrNoItem for
 // an id that is not there: one in another place, one in the trash or inside a folder in the trash, and one that does
 // not exist. An item is only ever found inside the place it belongs to.

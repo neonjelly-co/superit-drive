@@ -43,6 +43,7 @@ type (
 	// accessJSON is one line of "who can see this", for an item or a shared folder as a whole.
 	accessJSON struct {
 		Everyone    bool        `json:"everyone"`
+		Link        bool        `json:"link"` // anyone with a public link on it, or on a folder above it
 		UserID      string      `json:"userId"`
 		Email       string      `json:"email"`
 		DisplayName string      `json:"displayName"`
@@ -86,6 +87,7 @@ type (
 	seenByJSON struct {
 		Everyone bool     `json:"everyone"`
 		Members  []string `json:"members"`
+		Link     bool     `json:"link"` // anyone with a public link on it, or on a folder above it
 	}
 	folderJSON struct {
 		ID   int64  `json:"id"`

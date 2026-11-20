@@ -17,7 +17,9 @@ guest, My files, shared folder, Drive storage, trash). The Drive also runs witho
   folder, holds the places, the folder tree, the access given on places and items and (as later tickets add them)
   links and guests. The storage wins for which files exist; the index alone holds access.
 - Members do not sign in to the Drive. A reverse proxy in front of it signs them in and adds headers saying who they
-  are (see below). Every route passes through one authorisation function, `internal/access`.
+  are (see below). Everyone else comes in under one public prefix, `/s/`, which the reverse proxy opens without sign-in:
+  so far, visitors with a public link (see [Public links](#public-links)). Every route passes through one authorisation
+  function, `internal/access`.
 
 ### Signing in: headers and the member list
 
@@ -45,6 +47,25 @@ The list is the authority for each member's email address, name and role. (Super
 `role` is `admin` or `member`. A list with a mistake in it is refused whole: at start the Drive does not start, and
 later it keeps the previous list and logs why.
 
+**The public prefix.** Everything someone outside the project reaches lives under `/s/`: the pages of public links, the
+files and zips they download, and (later) guests' pages. The reverse proxy opens it without sign-in, and passes nothing
+about who anyone is there: it removes `Drive-Secret`, the identity headers and its own sign-in cookie, as it removes them
+everywhere else from what a browser sent. The Drive needs no secret there, and reads none of them: a request under
+`/s/` is a visitor's, always, whatever it carries, so a signed-in member who opens a link is a visitor like anyone, and a
+forged `Remote-User-Id` there does nothing. No request outside `/s/` is ever a visitor's: without the secret it is
+refused with 403 as before. In short, the reverse proxy must:
+
+- send `/s/*` to the Drive without sign-in, removing `Drive-Secret`, `Remote-User-Id` (and the other `Remote-*`
+  headers) and its sign-in cookie; and pass `Range`, `If-Range` and the method through as for any other request;
+- sign in everything else and add the two headers above, as before, and never add `Drive-Secret` to a request under
+  `/s/` (the Drive would ignore it there, but the secret would travel where it is not needed);
+- not cache answers under `/s/` (they say `Cache-Control: no-store`) nor log their addresses: an address there is the
+  secret that opens a link.
+
+Paths are matched as the Drive's router cleans them: `/s/x/../../api/places` is redirected to `/api/places`, which
+needs sign-in. Caddy's path matcher ignores case, so it also opens `/S/…` without sign-in; the Drive refuses that as
+any request outside `/s/` without the secret.
+
 **Changes come only from the Drive's own pages.** The reverse proxy signs members in with a cookie, which a browser
 also sends when a page on another site makes it call the Drive. So every request other than `GET` and `HEAD` must
 carry an `Origin` header equal to `DRIVE_ADDRESS` (browsers add it themselves); any other origin, `null`, or none is
@@ -64,7 +85,7 @@ a test keeps the two equal.)
 | `DRIVE_STORAGE_PASSWORD` | yes | Password for the WebDAV server. |
 | `DRIVE_STORAGE_FOLDER` | no, `/` | Folder on the WebDAV server that the Drive keeps everything in. Made if missing. |
 | `DRIVE_CAPACITY` | no | Size of the storage, in bytes or with a unit (`500GB`, `1TB`, `1TiB`). Empty when not known. |
-| `DRIVE_ADDRESS` | yes | The Drive's own address as people reach it, such as `https://files.example.com`. Changes are accepted only from pages at this address. |
+| `DRIVE_ADDRESS` | yes | The Drive's own address as people reach it, such as `https://files.example.com`. Changes are accepted only from pages at this address, and a public link's address starts with it. |
 | `DRIVE_PROJECT_NAME` | yes | Name of the project (the organisation) the Drive belongs to. |
 | `DRIVE_HEADER_SECRET` | yes | Secret the reverse proxy adds as `Drive-Secret`. At least 32 characters. |
 | `DRIVE_MEMBERS_FILE` | yes | Path of the member list file. |
@@ -161,6 +182,7 @@ its siblings. Taking access away, or giving less, counts from the next request, 
 | Open a folder, download a file (or a folder as a zip), see who can see it | yes | yes | yes |
 | Upload into a folder (and replace, or keep both), make folders in it | | yes | yes |
 | Share it: give access to others, change a role, take access away | | yes | yes |
+| Make a [public link](#public-links) to it, see it (who made it, how often it was used), remove it | | yes | yes |
 | Rename, move or delete it: also needs editor of the folder it is in | | yes | yes |
 | Restore it from the trash: also needs editor of the folder it goes back to, and either the place's whole trash or having put it there | | yes | yes |
 
@@ -296,6 +318,90 @@ POST   /api/places/{place}/items/{item}/move    {"to": 42 | null, "place": 7}   
        there or that the person cannot add to    409 a name taken there, or something in it being uploaded
 ```
 
+### Public links
+
+A member who may share a file or folder (an editor, the owner of a My files, a manager of a shared folder, a project
+admin in a shared folder: `access.MakeLink`) makes a public link to it in its details. Anyone with the link's address
+opens it without signing in, on a plain page under `/s/`, and downloads one file, or everything as a zip. A link has no
+password and no end date: it works until it is removed. A viewer cannot make one, see one's details or remove one; they,
+and everyone who can see the item, see in "who can see this" (and in the list's sentence) that anyone with the link can.
+
+- **One link per item**, on a file or a folder, never on a place's top folder (a My files or a shared folder as a
+  whole). A link on a folder covers everything in it, at any depth, and nothing above it or beside it. It lets visitors
+  see and download, nothing else.
+- **The address** is `DRIVE_ADDRESS` + `/s/` + a token of 192 random bits from `crypto/rand`, in base64url (32
+  characters): it says nothing about the item. The index keeps only the token's SHA-256, so a copy or a backup of the
+  index opens no link. The address is therefore given once, in the answer that makes the link: the details panel shows
+  it, with Copy, until the page is reloaded, and says so; later it shows that the link exists, who made it and when, and
+  how often it was used, and offers "Make a new link" (in its place: the old address stops working) and "Remove link".
+- **Removed is dead for good**: its address answers exactly as one that never existed, or a malformed one (the same
+  status, page and headers, after the same work: the token is hashed and looked up either way). A new link gets a new
+  address. Neither the address nor the token is ever written to the log.
+- **It follows its item**, by the item's id: through rename, move (out of a My files into a shared folder too), and
+  replacing a file with an upload. It covers what is in the item where it is now. While the item is in the trash, or in a
+  shared folder in the trash, the link opens nothing; restored, it works again at the same address. Removed for good,
+  or gone from the storage, the item takes its link with it.
+- **Whose it is.** A shared folder belongs to the project, and so do the links made in it: they work whoever made them,
+  also after their maker left the project. In a My files a link is its maker's share: it works only while they may still
+  share the item there. It stops when that is taken away from them (or they leave the project), and works again if it is
+  given back; a held My files (its owner left) opens nothing. Whoever may share the item sees in its details whether the
+  link works now.
+- **Sharing outside the project switched off** (a later ticket adds the switches, for the project and for one shared
+  folder): no link opens there and none can be made, but links can still be seen and removed. The decision is already
+  in `internal/access` (`Place.NoSharingOutside`).
+- **Uses.** For each link the Drive keeps how often it was used and when last, and nothing else about visitors. One use
+  is a page opened through it (its own, or a folder's inside it), or a download, a file opened or a zip from its start;
+  not a `HEAD`, not a part of a file after its start (a video seeking, a download resuming), not a refused request. Link
+  previews (chat programs that fetch a page to show it) and search engines' robots count as uses: nothing tells them
+  apart. Uses are counted in memory, so a visitor's request never waits for the index or a lock for it; they are written
+  every 30 seconds and when the Drive stops (a Drive that is killed loses the last half minute's).
+
+```
+GET    /api/places/{place}/items/{item}/link     200 {"link": {"kind": "view", "made", "madeBy", "former", "uses", "used", "works"} | null}
+POST   /api/places/{place}/items/{item}/link     {"replace": true} (or no body)
+       201 {"link": {…, "address": "https://files.example.com/s/<token>"}}    the only answer with the address
+       409 {"error", "exists": true}             it has a link, and replacing it was not asked for
+DELETE /api/places/{place}/items/{item}/link     204 (also when it has none)
+```
+
+Listings, search and "Shared with me" say `"seenBy": {…, "link": true}` for an item anyone with a working link can see,
+and "who can see this" has a line `{"link": true, "role": "viewer", "given" | "inherited", "from"}`.
+
+**What a visitor reaches**, all under `/s/`, and only with `GET` (or `HEAD`): any other method there is answered 405 with
+`Allow: GET, HEAD` before anything else is looked at.
+
+```
+GET    /s/{token}                          the page of what the link is on
+GET    /s/{token}/items/{item}             the page of a folder (or a file) inside it
+GET    /s/{token}/items/{item}/download    a file, to be saved (as a member's download)
+GET    /s/{token}/items/{item}/open        a file shown in the browser, by the safe list (as a member's …/open)
+GET    /s/{token}/items/{item}/zip         a folder as one zip (as a member's …/zip, ?item=… too)
+```
+
+`{item}` must be the link's item or something inside it. A link that does not work, and anything it does not cover (a
+folder above it, a file beside it, an item of another place or in the trash), gets the one answer: 404 with the page
+"This link does not work".
+
+**The page** is plain HTML made by the Drive (`internal/server/visitors.go`), in one column on every screen, with no
+script and nothing of the members' interface: it works with JavaScript off. It says who shared it (the maker's display
+name, never an email address or user id; the project's name when the maker has none or has left), the item's name, the
+folders from the link's item down to the one shown (never anything above), "Download all as zip" for a folder, and what
+is in it: folders open their own page, files have Download, and Open when their kind opens in the browser. A folder's
+page lists at most 1,000 items (the zip holds them all). It lists what the index knows: what was put on the storage
+directly shows once a member has opened its folder; the zip reads the storage. English for now.
+
+Every answer under `/s/` carries `X-Robots-Tag: noindex, nofollow` (and the page `<meta name="robots">`),
+`Referrer-Policy: no-referrer` (the address is the secret), `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
+`Cross-Origin-Resource-Policy: same-origin` and, on pages, `Content-Security-Policy: default-src 'none'; style-src
+'sha256-…'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`: nothing loads or runs but the page's own style.
+A file's bytes go out with the same content type and policy as to members (below). No cookie is set.
+
+**What visitors can use up, and what bounds it.** Their transfers take at most 8 of the 32 slots, in a line of their
+own, and at most 64 visitors wait in it at once (more are told 503 at once); a transfer that moves nothing for two minutes
+is ended. Besides transfers, at most 16 visitors' requests are worked on at once, and 64 more wait up to 5 seconds; more
+are answered 503 at once. Trying tokens costs a hash and one look in the index, with no lock and no log line. A zip is
+bounded as for members (10,000 entries).
+
 ### Opening files in the browser
 
 A file a member uploaded is served from the Drive's own address, where the sign-in cookie applies: a web page, an SVG
@@ -419,7 +525,10 @@ download (of a file or a zip, or a file opened in the browser), an upload in one
 upload. Three rules hold the
 figure (`internal/transfers`):
 
-- **At most 32 transfers are in flight.** A download waits its turn in line (holding only its idle connection),
+- **At most 32 transfers are in flight, of which visitors with a public link hold at most 8.** Members can always use
+  the other 24, and all 32 while no visitor needs one; when a slot comes back, a member waiting gets it before a
+  visitor. Visitors wait in a line of their own, at most 64 of them; more are told at once that the Drive is busy. A
+  download waits its turn in line (holding only its idle connection),
   for up to ten minutes, then gets 503. An upload is answered at once with 503, `{"busy": true}` and `Retry-After`,
   before any of its bytes are read, and keeps its place in line: a resumable upload by its id, an upload in one request
   by the `turn` it names (any word the interface makes up for it, counted only for that person). When its turn comes, a
@@ -494,9 +603,10 @@ and folders with other members, or with everyone in the project, as viewers or e
 in "Shared with me", get a mail when something is shared with them by name (with the mail settings), and move things
 from their own My files into a shared folder after a warning that says who will see them there. Images, PDFs, text,
 video and sound open in the browser (anything else downloads), a search finds files and folders by name across
-everything a member can see, and several items can be selected to move, download as a zip or delete together. Guests
-and public links are not built yet. Large files upload in parts that resume after a broken connection, downloads resume
-and seek, and folders upload whole and download as zips.
+everything a member can see, and several items can be selected to move, download as a zip or delete together. Members
+who may share a file or folder make a public link to it, which anyone opens without signing in. Guests are not built
+yet. Large files upload in parts that resume after a broken connection, downloads resume and seek, and folders upload
+whole and download as zips.
 
 It needs:
 
@@ -506,8 +616,9 @@ It needs:
   `docker build`.
 - **A WebDAV server** for the files. Check it first (below).
 - **A reverse proxy that signs people in** and, on every request it passes on, adds `Drive-Secret` and
-  `Remote-User-Id` in place of any the browser sent (see [Signing in](#signing-in-headers-and-the-member-list)). The
-  Drive listens on plain HTTP on port 8080: only the reverse proxy should reach it. For large files, the proxy should
+  `Remote-User-Id` in place of any the browser sent (see [Signing in](#signing-in-headers-and-the-member-list)); except
+  under the public prefix `/s/`, which it opens without sign-in and passes on without those headers or its sign-in
+  cookie. The Drive listens on plain HTTP on port 8080: only the reverse proxy should reach it. For large files, the proxy should
   stream request and response bodies rather than hold them, pass `Range` and `If-Range` through, and let a download
   wait up to ten minutes for its answer when the Drive is busy.
 - **The member list file**, in a folder of its own mounted into the container.
@@ -588,6 +699,8 @@ certificate: Caddy made it with its own authority, which the browser does not kn
 
 What happens on each request:
 
+0. A request under `/s/` (a public link) goes straight to the Drive, without sign-in: Caddy removes `Drive-Secret`, the
+   `Remote-*` headers and the cookie (`handle /s/*` in the `Caddyfile`). Everything else goes on as follows.
 1. Caddy asks Authelia whether the person is signed in (`forward_auth`). If not, Authelia's answer sends the browser
    to the sign-in page at `auth.example.localhost`, which sets a session cookie for `example.localhost` and sends the
    browser back.
@@ -597,7 +710,9 @@ What happens on each request:
    The list gives their email address, name and role.
 
 The Drive's port is not published: from the host, and from any container without the secret, it cannot be used. A
-request that reaches it without `Drive-Secret` is refused with 403.
+request that reaches it without `Drive-Secret` is refused with 403, except under `/s/`, where only a public link's
+address opens anything. To try a link, sign in as `reka`, select a file or folder, make a public link in its details, and
+open the address in a private window.
 
 For real use on a server:
 
@@ -708,10 +823,12 @@ internal/mail/         the Drive's own mail over SMTP, sent in the background; m
                        for tests
 internal/access/       the one authorisation function (Decide), the role at an item (RoleAt), what Shared with me lists
                        and what a search finds (SharedWithMe, Finds), and their table tests
-internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify → own page (for changes) →
-                       place → item in it, or in its trash, or the person's upload in progress into it → the access
-                       given there → access.Decide; transfers.go has downloads, zips and uploads, opening.go what
-                       opens in the browser and how, search.go the search by name
+internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify (under /s/, the visitor's
+                       link) → own page (for changes; under /s/, only reading) → place → item in it, or in its trash,
+                       or the person's upload in progress into it → the access given there → access.Decide;
+                       transfers.go has downloads, zips and uploads, opening.go what opens in the browser and how,
+                       search.go the search by name, links.go making and removing public links, visitors.go the
+                       public prefix and the visitor's pages
 internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
                        shared folders, the access given on them
 internal/index/        the SQLite index (search.go: names as a search compares them, and the walk down a scope);

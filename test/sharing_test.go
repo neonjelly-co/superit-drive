@@ -58,6 +58,9 @@ func accessLines(list []accessJSON) []string {
 		if a.Everyone {
 			who = "everyone"
 		}
+		if a.Link {
+			who = "link"
+		}
 		line := who + " " + a.Role
 		switch {
 		case a.Owner:
@@ -218,7 +221,7 @@ func TestAnEditorWorksInsideWhatTheyWereGivenAndSharesItFurther(t *testing.T) {
 	if l.Role != "editor" || !slices.Contains(l.Can, "upload") || !slices.Contains(l.Can, "make-folder") || slices.Contains(l.Can, "see-trash") {
 		t.Fatalf("Dóra's Clients: role %q, can %q", l.Role, l.Can)
 	}
-	if got := named(t, l.Items, "Price list.pdf").Can; !slices.Equal(got, []string{"list", "download", "upload", "make-folder", "rename", "move", "delete", "see-access", "share"}) {
+	if got := named(t, l.Items, "Price list.pdf").Can; !slices.Equal(got, []string{"list", "download", "upload", "make-folder", "rename", "move", "delete", "see-access", "share", "make-link", "manage-link"}) {
 		t.Fatalf("what Dóra may do with Price list.pdf: %q", got)
 	}
 	uploadedInto(t, o, x.place, x.bakery.ID, "Invoice.pdf", []byte("from Dóra"))
@@ -700,6 +703,9 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 				at("/api/places/%d/items/%d/access/members/%s", x.place, item, url.PathEscape(reka.UserID)), ""},
 			"PUT /api/places/{place}/items/{item}/access/everyone":    {"PUT", at("/api/places/%d/items/%d/access/everyone", x.place, item), `{"role":"viewer"}`},
 			"DELETE /api/places/{place}/items/{item}/access/everyone": {"DELETE", at("/api/places/%d/items/%d/access/everyone", x.place, item), ""},
+			"GET /api/places/{place}/items/{item}/link":               {"GET", linkPath(x.place, item), ""},
+			"POST /api/places/{place}/items/{item}/link":              {"POST", linkPath(x.place, item), `{"replace":true}`},
+			"DELETE /api/places/{place}/items/{item}/link":            {"DELETE", linkPath(x.place, item), ""},
 			"GET /api/places/{place}/items/{item}/items":              {"GET", listPath(x.place, item), ""},
 			"POST /api/places/{place}/items/{item}/files":             {"POST", at("/api/places/%d/items/%d/files?name=Planted.txt&existing=replace", x.place, item), "x"},
 			"POST /api/places/{place}/items/{item}/folders":           {"POST", at("/api/places/%d/items/%d/folders", x.place, item), `{"name":"Planted"}`},
@@ -729,8 +735,8 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 		}
 		return c.Do(t, t2.method, t2.path, body)
 	}
-	if n := len(tries(0)) + len(uploadTries("")); n != 21 {
-		t.Fatalf("the test tries %d routes that take an item or an upload; internal/server/server_test.go lists 21", n)
+	if n := len(tries(0)) + len(uploadTries("")); n != 24 {
+		t.Fatalf("the test tries %d routes that take an item or an upload; internal/server/server_test.go lists 24", n)
 	}
 	none := tries(nowhere)
 	notGiven := map[string]int64{
