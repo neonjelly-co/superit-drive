@@ -84,9 +84,13 @@ func (s *Server) routes() []route {
 		{pattern: "POST /api/places/{place}/items/{item}/access/guests", action: access.Share, place: "place", item: "item", serve: s.invite},
 		{pattern: "PUT /api/places/{place}/items/{item}/access/guests/{guest}", action: access.InviteGuest, place: "place", item: "item", serve: s.changeInvitation},
 		{pattern: "DELETE /api/places/{place}/items/{item}/access/guests/{guest}", action: access.Share, place: "place", item: "item", serve: s.takeInvitation},
-		// The public link on a file or folder (links.go): whoever may share it makes one, sees it and removes it.
+		// The public link on a file or folder (links.go): whoever may share it makes one, sees it and removes it; and, while
+		// sharing outside the project is on there, changes what it lets visitors do (a folder's: view or upload-only) and
+		// lets an upload-only link that has taken in all it may take files again.
 		{pattern: "GET /api/places/{place}/items/{item}/link", action: access.ManageLink, place: "place", item: "item", serve: s.linkOf},
 		{pattern: "POST /api/places/{place}/items/{item}/link", action: access.MakeLink, place: "place", item: "item", serve: s.makeLink},
+		{pattern: "PUT /api/places/{place}/items/{item}/link", action: access.MakeLink, place: "place", item: "item", serve: s.setLinkKind},
+		{pattern: "POST /api/places/{place}/items/{item}/link/reset", action: access.MakeLink, place: "place", item: "item", serve: s.resetLink},
 		{pattern: "DELETE /api/places/{place}/items/{item}/link", action: access.ManageLink, place: "place", item: "item", serve: s.removeLink},
 
 		// What is in a place.
@@ -122,13 +126,16 @@ func (s *Server) routes() []route {
 		{pattern: "DELETE /api/places/{place}/uploads/{upload}", action: access.Upload, place: "place", upload: "upload", serve: s.cancelUpload},
 
 		// The public prefix: what a visitor reaches through a public link, without signing in (visitors.go). Only GET
-		// (and HEAD); always a visitor here, whatever the request says about who sent it; the place is the one the link's
-		// item is in, and an item named here must be that item or inside it. A file's bytes go out as they do to members.
-		{pattern: "GET /s/{token}", action: access.SeeThroughLink, link: "token", serve: s.visitorPage},
+		// (and HEAD), but for sending a file in through an upload-only link (POST, into the link's own folder: the one
+		// route that changes anything here); always a visitor here, whatever the request says about who sent it; the place
+		// is the one the link's item is in, and an item named here must be that item or inside it. A file's bytes go out
+		// as they do to members.
+		{pattern: "GET /s/{token}", action: access.EnterThroughLink, link: "token", serve: s.visitorPage},
 		{pattern: "GET /s/{token}/items/{item}", action: access.SeeThroughLink, link: "token", item: "item", serve: s.visitorPage},
 		{pattern: "GET /s/{token}/items/{item}/download", action: access.DownloadThroughLink, link: "token", item: "item", serve: s.download},
 		{pattern: "GET /s/{token}/items/{item}/open", action: access.DownloadThroughLink, link: "token", item: "item", serve: s.open},
 		{pattern: "GET /s/{token}/items/{item}/zip", action: access.DownloadThroughLink, link: "token", item: "item", serve: s.zip},
+		{pattern: "POST /s/{token}/files", action: access.UploadThroughLink, link: "token", serve: s.sendIn},
 
 		// The guests' part of the public prefix (guests.go): signing in with a code mailed to them, their pages, and what
 		// they do with what was given to them. Always a guest here (by the session their cookie names) or nobody; never
@@ -377,20 +384,25 @@ type listedJSON struct {
 	Can []access.Action `json:"can"`
 	// SeenBy is who can see it, for the list's "who can see it".
 	SeenBy seenByJSON `json:"seenBy"`
-	// AddedBy says, for a file or folder a guest added (uploaded or made), which guest: their address as it was then.
-	// Members read it as coming from outside the project. Never sent to a guest.
+	// AddedBy says, for a file or folder a guest added (uploaded or made), which guest: their address as it was then;
+	// and for a file a visitor sent in through an upload-only public link, that it came through a link. Members read it
+	// as coming from outside the project. Never sent to a guest.
 	AddedBy *addedByJSON `json:"addedBy,omitempty"`
 }
 
 type addedByJSON struct {
-	Guest string `json:"guest"`
+	Guest string `json:"guest,omitempty"`
+	Link  bool   `json:"link,omitempty"`
 }
 
 // listedOf is an item in a member's listing.
 func listedOf(it index.Item, can []access.Action, seen seenByJSON) listedJSON {
 	j := listedJSON{itemJSON: itemOf(it), Can: can, SeenBy: seen}
-	if it.AddedByGuest != "" {
+	switch {
+	case it.AddedByGuest != "":
 		j.AddedBy = &addedByJSON{Guest: it.AddedByGuest}
+	case it.AddedThroughLink:
+		j.AddedBy = &addedByJSON{Link: true}
 	}
 	return j
 }

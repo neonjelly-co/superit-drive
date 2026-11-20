@@ -4,6 +4,7 @@ package clock
 
 import (
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -51,6 +52,16 @@ func Copying() (quiet, latest, retry time.Duration, ok bool) {
 		retry = d
 	}
 	return quiet, latest, retry, true
+}
+
+// LinkLimit is how much an upload-only link takes in, in bytes, set by SUPERIT_DRIVE_TEST_LINK_LIMIT; ok is false without
+// it.
+func LinkLimit() (bytes int64, ok bool) {
+	n, err := strconv.ParseInt(os.Getenv("SUPERIT_DRIVE_TEST_LINK_LIMIT"), 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // StopAt stops the Drive at once, with exit code 3 and nothing written or closed, when SUPERIT_DRIVE_TEST_STOP_AT names

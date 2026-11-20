@@ -86,7 +86,8 @@ type (
 	// accessJSON is one line of "who can see this", for an item or a shared folder as a whole.
 	accessJSON struct {
 		Everyone    bool        `json:"everyone"`
-		Link        bool        `json:"link"` // anyone with a public link on it, or on a folder above it
+		Link        bool        `json:"link"`     // anyone with a public link on it, or on a folder above it
+		LinkKind    string      `json:"linkKind"` // "view", or "upload-only" (on the item itself, without a role)
 		UserID      string      `json:"userId"`
 		Email       string      `json:"email"`
 		DisplayName string      `json:"displayName"`
@@ -136,11 +137,13 @@ type (
 		Changed  *string `json:"changed"`
 		Replaced bool    `json:"replaced"` // uploads only
 		Opens    bool    `json:"opens"`    // files that open in the browser
-		// Listings only: what the person may do with it, and who can see it; and, for members, which guest added it.
+		// Listings only: what the person may do with it, and who can see it; and, for members, which guest added it, or
+		// that it came through a link.
 		Can     []string    `json:"can"`
 		SeenBy  *seenByJSON `json:"seenBy"`
 		AddedBy *struct {
 			Guest string `json:"guest"`
+			Link  bool   `json:"link"`
 		} `json:"addedBy"`
 	}
 	seenByJSON struct {

@@ -119,7 +119,7 @@ func TestALookThatStartedBeforeAChangeLeavesTheIndexAlone(t *testing.T) {
 	stale := d.since(key)
 	// Meanwhile an upload ends: on the storage, then in the index, as Upload does it.
 	d.changed(key)
-	uploaded, err := x.PutItem(ctx, p.ID, 0, index.Seen{Name: "a.txt", Size: 1, Changed: time.Now()}, time.Now(), "")
+	uploaded, err := x.PutItem(ctx, p.ID, 0, index.Seen{Name: "a.txt", Size: 1, Changed: time.Now()}, time.Now(), index.AddedBy{})
 	if err != nil {
 		t.Fatal(err)
 	}

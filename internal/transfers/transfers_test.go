@@ -3,6 +3,7 @@ package transfers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"syscall"
 	"testing"
@@ -317,4 +318,64 @@ func TestEveryConnectionsBuffersAreCapped(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Outsiders' keys cost a bounded amount of memory, however many new ones strangers send: beyond MaxOutsidersWaiting
+// kept at once, an outsider's new key keeps no place. A key not tried again within Forget makes room. Members' keys are
+// not bounded this way.
+func TestAtMostSoManyOutsidersKeepAPlace(t *testing.T) {
+	g := NewGate(2, 1)
+	clock := time.Now()
+	g.now = func() time.Time { return clock }
+	hold, _ := g.Try(Outsiders, "")
+	for i := range MaxOutsidersWaiting {
+		if _, ok := g.Try(Outsiders, fmt.Sprintf("upload-%d", i)); ok {
+			t.Fatal("an outsider took a slot beyond their share")
+		}
+	}
+	for i := range MaxOutsidersWaiting {
+		if !g.Waiting(fmt.Sprintf("upload-%d", i)) {
+			t.Fatalf("outsider %d is not in line", i)
+		}
+	}
+	if _, ok := g.Try(Outsiders, "one-too-many"); ok || g.Waiting("one-too-many") {
+		t.Fatal("one outsider's key too many keeps a place")
+	}
+	// Members are not bounded by it.
+	m, _ := g.Try(Members, "")
+	for i := range 2 * MaxOutsidersWaiting {
+		g.Try(Members, fmt.Sprintf("member-%d", i))
+	}
+	if !g.Waiting(fmt.Sprintf("member-%d", 2*MaxOutsidersWaiting-1)) {
+		t.Fatal("a member's key is bounded by the outsiders'")
+	}
+	// Half are tried again in time; the rest are forgotten, and make room for new ones.
+	clock = clock.Add(Forget / 2)
+	for i := range MaxOutsidersWaiting / 2 {
+		g.Try(Outsiders, fmt.Sprintf("upload-%d", i))
+	}
+	clock = clock.Add(Forget/2 + time.Second)
+	if _, ok := g.Try(Outsiders, "later"); ok || !g.Waiting("later") {
+		t.Fatal("a new outsider's key keeps no place once the forgotten ones made room")
+	}
+	if g.Waiting(fmt.Sprintf("upload-%d", MaxOutsidersWaiting-1)) || !g.Waiting("upload-0") {
+		t.Fatal("the wrong keys were forgotten")
+	}
+	g.mu.Lock()
+	kept := g.keyedOutsiders
+	g.mu.Unlock()
+	if kept != MaxOutsidersWaiting/2+1 {
+		t.Fatalf("%d outsiders' keys counted, want %d", kept, MaxOutsidersWaiting/2+1)
+	}
+	// Their turn still comes in the order they came (the members' keys, not tried again, are forgotten too).
+	hold()
+	if !g.Waiting("later") || g.Waiting("upload-0") {
+		t.Fatal("the first outsider in line did not get its turn")
+	}
+	release, ok := g.Try(Outsiders, "upload-0")
+	if !ok {
+		t.Fatal("the first outsider's key did not get the slot kept for it")
+	}
+	release()
+	m()
 }

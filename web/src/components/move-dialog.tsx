@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Folder, FolderOpen, Link2, User, Users } from "lucide-react";
 import { type ReactNode, useState } from "react";
-import { ROLE_NAME, whoCanSee, whoOf, whyOf } from "../access";
+import { roleOf, whoCanSee, whoOf, whyOf } from "../access";
 import { type Access, type Action, api, type FolderRef, type Item, type Member, type Outside, type SeenBy } from "../api";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
@@ -369,8 +369,7 @@ function AccessLine({ a, me, given }: { a: Access; me?: string; given: string })
 				{name}
 			</span>
 			<span className="shrink-0 text-muted-foreground">
-				{ROLE_NAME[a.role]}
-				{why ? ` · ${why}` : ""}
+				{[roleOf(a), why].filter(Boolean).join(" · ")}
 			</span>
 		</li>
 	);

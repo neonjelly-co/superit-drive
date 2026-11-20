@@ -25,16 +25,19 @@ import (
 // accessJSON is one line of "who can see this": someone with access, the role they have by it, and where it comes
 // from.
 type accessJSON struct {
-	// Everyone is true for everyone in the project; Link for anyone with the public link on it, or on a folder above it
-	// (as viewer: they see and download), while it works; Guest for a guest invited by address. Otherwise the line is
-	// about one member, by user id, with their email address and name from the member list.
+	// Everyone is true for everyone in the project; Link for anyone with the public link on it, or on a folder above it,
+	// while it works: through a view link (LinkKind "view") as viewer, who sees and downloads; through an upload-only
+	// link on the item itself (LinkKind "upload-only", and no role), who sends files in and sees nothing. Guest is for a
+	// guest invited by address. Otherwise the line is about one member, by user id, with their email address and name
+	// from the member list.
 	Everyone    bool        `json:"everyone,omitempty"`
 	Link        bool        `json:"link,omitempty"`
+	LinkKind    string      `json:"linkKind,omitempty"`
 	Guest       *guestJSON  `json:"guest,omitempty"`
 	UserID      string      `json:"userId,omitempty"`
 	Email       string      `json:"email,omitempty"`
 	DisplayName string      `json:"displayName,omitempty"`
-	Role        access.Role `json:"role"`
+	Role        access.Role `json:"role,omitempty"`
 	// Until is when it ends, for access given with an end date (an invitation, or a guest's that is now a member's).
 	Until *time.Time `json:"until,omitempty"`
 	// For an invitation, to whoever may share the item: whether it lets its guest in now (not after its end date, not
@@ -137,13 +140,23 @@ func (s *Server) accessLines(who access.Person, p index.Place, path []index.Item
 		}
 		out = append(out, e)
 	}
-	// Anyone with a link on the item, or on a folder above it, that lets them in there now: as viewers.
+	// Anyone with a link on the item, or on a folder above it, that lets them in there now: as viewers. And anyone with
+	// an upload-only link on the item itself, who sends files in and sees nothing (so not on anything inside it).
 	for _, l := range links {
 		at, onPath := depth[l.Item]
-		if !onPath || at == 0 || !access.Decide(visitorOf(l, list), access.SeeThroughLink, where) {
+		if !onPath || at == 0 {
 			continue
 		}
-		e := accessJSON{Link: true, Role: access.Viewer, Given: at == len(ids)}
+		visitor := visitorOf(l, list)
+		var e accessJSON
+		switch {
+		case access.Decide(visitor, access.SeeThroughLink, where):
+			e = accessJSON{Link: true, LinkKind: index.ViewLink, Role: access.Viewer, Given: at == len(ids)}
+		case access.Decide(visitor, access.UploadThroughLink, where):
+			e = accessJSON{Link: true, LinkKind: index.UploadLink, Given: true}
+		default:
+			continue
+		}
 		if at < len(ids) {
 			e.Inherited, e.From = true, inheritedFrom(who, where, p, path, at)
 		}

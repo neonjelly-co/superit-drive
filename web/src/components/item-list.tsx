@@ -185,7 +185,10 @@ function Row({ placeId, item, ticked, onOpen, onSelect, onTick, seen }: RowProps
 			<td className="px-3 py-2.5">
 				<span className="flex min-w-0 items-center gap-2.5">
 					<FileIcon item={item} />
-					{item.kind === "file" ? <FileLink placeId={placeId} item={item} /> : <FolderButton item={item} onOpen={() => onOpen(item)} />}
+					<span className="flex min-w-0 flex-col">
+						{item.kind === "file" ? <FileLink placeId={placeId} item={item} /> : <FolderButton item={item} onOpen={() => onOpen(item)} />}
+						<AddedFromOutside item={item} />
+					</span>
 				</span>
 			</td>
 			<td className="truncate px-4 py-2.5" title={seen}>
@@ -202,6 +205,23 @@ function Row({ placeId, item, ticked, onOpen, onSelect, onTick, seen }: RowProps
 				{item.size !== undefined ? formatSize(item.size) : ""}
 			</td>
 		</tr>
+	);
+}
+
+/**
+ * Who outside the project added an item, as a quiet line under its name: a guest (their address in its details), or
+ * someone who sent it through an upload-only link. Members treat both as coming from outside.
+ */
+function AddedFromOutside({ item }: { item: Item }) {
+	if (!item.addedBy) return null;
+	const guest = item.addedBy.guest;
+	return (
+		<span
+			title={guest ? `Added by the guest ${guest}, from outside the project` : "Sent through an upload-only link, from outside the project"}
+			className="truncate text-xs text-muted-foreground"
+		>
+			{guest ? "From a guest" : "Through a link"}
+		</span>
 	);
 }
 

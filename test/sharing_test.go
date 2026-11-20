@@ -60,8 +60,14 @@ func accessLines(list []accessJSON) []string {
 		}
 		if a.Link {
 			who = "link"
+			if a.LinkKind == "upload-only" {
+				who = "upload-only link" // no role: its visitors send files in, and see nothing
+			}
 		}
-		line := who + " " + a.Role
+		line := who
+		if a.Role != "" {
+			line += " " + a.Role
+		}
 		switch {
 		case a.Owner:
 			line += " (owner)"
@@ -709,6 +715,8 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 			"DELETE /api/places/{place}/items/{item}/access/guests/{guest}": {"DELETE", invitationPath(x.place, item, 1), ""},
 			"GET /api/places/{place}/items/{item}/link":                     {"GET", linkPath(x.place, item), ""},
 			"POST /api/places/{place}/items/{item}/link":                    {"POST", linkPath(x.place, item), `{"replace":true}`},
+			"PUT /api/places/{place}/items/{item}/link":                     {"PUT", linkPath(x.place, item), `{"kind":"upload-only"}`},
+			"POST /api/places/{place}/items/{item}/link/reset":              {"POST", linkPath(x.place, item) + "/reset", ""},
 			"DELETE /api/places/{place}/items/{item}/link":                  {"DELETE", linkPath(x.place, item), ""},
 			"GET /api/places/{place}/items/{item}/items":                    {"GET", listPath(x.place, item), ""},
 			"POST /api/places/{place}/items/{item}/files":                   {"POST", at("/api/places/%d/items/%d/files?name=Planted.txt&existing=replace", x.place, item), "x"},
@@ -739,8 +747,8 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 		}
 		return c.Do(t, t2.method, t2.path, body)
 	}
-	if n := len(tries(0)) + len(uploadTries("")); n != 27 {
-		t.Fatalf("the test tries %d routes that take an item or an upload; internal/server/server_test.go lists 27", n)
+	if n := len(tries(0)) + len(uploadTries("")); n != 29 {
+		t.Fatalf("the test tries %d routes that take an item or an upload; internal/server/server_test.go lists 29", n)
 	}
 	none := tries(nowhere)
 	notGiven := map[string]int64{

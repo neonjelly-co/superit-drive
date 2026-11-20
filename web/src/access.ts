@@ -55,12 +55,30 @@ function whoCanSeeInside(seenBy: SeenBy, me: string | undefined, members: Member
 
 /** Who a line of "who can see this" is about, as the person reading it says it. */
 export function whoOf(a: Access, me: string | undefined): string {
-	if (a.link) return "Anyone with the link";
+	if (a.link) return a.linkKind === "upload-only" ? "Anyone with the upload-only link" : "Anyone with the link";
 	if (a.guest) return a.guest.address;
 	if (a.everyone) return "Everyone in the project";
 	if (a.former) return "Someone no longer in the project";
 	return a.userId === me ? "You" : nameOf(a);
 }
+
+/**
+ * What a line of "who can see this" lets them do, in a word or a few: their role, or, through an upload-only link,
+ * that they send files in.
+ */
+export function roleOf(a: Access): string {
+	if (!a.role) return a.link ? "Can only send files in" : "";
+	return ROLE_NAME[a.role];
+}
+
+/** What a public link lets its visitors do, said where it is chosen. */
+export const LINK_KIND_MEANS = {
+	view: { name: "Open and download", means: "They see what is in it, and download it." },
+	"upload-only": {
+		name: "Only send files in",
+		means: "They send files into this folder. They cannot see what is in it, not even the names, and replace nothing.",
+	},
+} as const;
 
 /** Why someone in "who can see this" has their access, in a few words after their role. */
 export function whyOf(a: Access): string {

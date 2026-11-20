@@ -82,6 +82,8 @@ type Server struct {
 	// last dropped for want of room (Unix seconds), so that it is logged once a minute at most.
 	codes        chan string
 	codesDropped atomic.Int64
+	// sendPolicy is the Content-Security-Policy of an upload-only link's page (sendin.go).
+	sendPolicy string
 }
 
 // New makes a server.
@@ -98,6 +100,7 @@ func New(c Config) *Server {
 	if c.Address != nil {
 		s.origin = originOf(c.Address)
 	}
+	s.sendPolicy = sendPolicyFor(s.origin)
 	return s
 }
 
@@ -209,9 +212,10 @@ func (s *Server) Handler() http.Handler {
 			panic("server: route " + rt.pattern + ": every route under the public prefix, and no other, is a visitor's, with a link, " +
 				"or under the guests' prefix a guest's")
 		}
-		if rt.link != "" && (rt.place != "" || rt.trashed != "" || rt.upload != "" || rt.inTrash || !strings.HasPrefix(rt.pattern, "GET ") ||
+		if rt.link != "" && (rt.place != "" || rt.trashed != "" || rt.upload != "" || rt.inTrash || !visitorsMethod(rt) ||
 			!slices.Contains(access.ThroughALink, rt.action)) {
-			panic("server: route " + rt.pattern + " is a visitor's: it only reads (GET), through its link, with an action through a link")
+			panic("server: route " + rt.pattern + " is a visitor's: it only reads (GET), or sends a file into its link's folder " +
+				"(POST, and only that), through its link, with an action through a link")
 		}
 		if rt.guest && (!slices.Contains(access.AsAGuest, rt.action) || rt.trashed != "" || rt.inTrash ||
 			(rt.place != "" && rt.item == "" && rt.upload == "")) {
@@ -249,6 +253,15 @@ func (s *Server) Handler() http.Handler {
 		visitors.ServeHTTP(w, r)
 	}))
 	return securityHeaders(mux)
+}
+
+// visitorsMethod says whether a visitor's route has the one method it may: GET, which only reads, for all but sending a
+// file in through an upload-only link (UploadThroughLink, into the link's own folder), which is POST.
+func visitorsMethod(rt route) bool {
+	if rt.action == access.UploadThroughLink {
+		return strings.HasPrefix(rt.pattern, "POST ") && rt.item == ""
+	}
+	return strings.HasPrefix(rt.pattern, "GET ")
 }
 
 // guard is the gate every route passes: identify the person (under the public prefix, always a visitor through the

@@ -31,6 +31,10 @@ type linkJSON struct {
 	Used    *time.Time  `json:"used"`
 	Works   bool        `json:"works"`
 	Address string      `json:"address"`
+	// An upload-only link's: what it took in, its limit, and whether it is full.
+	TakenIn *int64 `json:"takenIn"`
+	Limit   *int64 `json:"limit"`
+	Full    bool   `json:"full"`
 }
 
 func linkPath(placeID, itemID int64) string {
@@ -348,8 +352,9 @@ func TestAVisitorCannotGetOutOfTheirLink(t *testing.T) {
 			"GET /s/{token}/items/{item}/zip":      page + "/items/" + item + "/zip",
 		}
 	}
-	if n := len(routes("", "")); n != 5 {
-		t.Fatalf("the test tries %d routes under the public prefix; internal/server/server_test.go lists 5", n)
+	// And the one route that is not a GET: sending a file in, which a view link does not let anyone do (below).
+	if n := len(routes("", "")) + 1; n != 6 {
+		t.Fatalf("the test tries %d routes under the public prefix; internal/server/server_test.go lists 6", n)
 	}
 	missing := v.Get(t, noSuchLink(t))
 	if missing.Status != http.StatusNotFound || !strings.Contains(string(missing.Body), "This link does not work") {
@@ -388,6 +393,10 @@ func TestAVisitorCannotGetOutOfTheirLink(t *testing.T) {
 	}
 	if got := zipEntries(t, v.Get(t, inLink(page, x.bakery.ID, "/zip")+"?item="+fmt.Sprint(x.y2026.ID)).Body); len(got) != 3 {
 		t.Fatalf("a zip of Bakery naming 2026 holds %q", keys(got))
+	}
+	// Sending a file in, through a view link: as a link that does not exist, and nothing is stored.
+	for _, path := range []string{page + "/files?name=Planted.txt", payrollLink + "/files?name=Planted.txt", noSuchLink(t) + "/files?name=Planted.txt"} {
+		sameAsNoLink(t, "POST "+path, v.Do(t, http.MethodPost, path, strings.NewReader("planted")), missing)
 	}
 	// Another link's item through this link, and this link's item through the other.
 	sameAsNoLink(t, "Bakery's link with Slip.pdf, which has a link of its own", v.Get(t, inLink(page, slip.ID, "/download")), missing)
@@ -461,6 +470,9 @@ func TestAVisitorCannotGetOutOfTheirLink(t *testing.T) {
 	// Nothing changed, and the link still opens what it covers.
 	if got := onStorage(t, d, "My files/bence@example.com/Clients/Bakery"); !slices.Equal(got, []string{"2026/"}) {
 		t.Errorf("Bakery on the storage: %q", got)
+	}
+	if got := onStorage(t, d, "Shared folders/Payroll"); !slices.Equal(got, []string{"Slip.pdf"}) {
+		t.Errorf("Payroll on the storage: %q", got)
 	}
 	if res := v.Get(t, inLink(page, x.offer.ID, "/download")); res.Status != http.StatusOK || string(res.Body) != "offer" {
 		t.Errorf("Offer.pdf through the link, after all that: %d %s", res.Status, res.Body)

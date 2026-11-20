@@ -66,7 +66,7 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 		return index.Item{}, storageError(err)
 	}
 	d.changed(folderKey{p.ID, folderID(in)})
-	it, err := d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()}, d.now(), by.Guest.Address)
+	it, err := d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()}, d.now(), by.added())
 	if errors.Is(err, index.ErrNoFolder) {
 		return index.Item{}, ErrGone // its folder moved away, or went, meanwhile; a listing finds the new one there
 	}

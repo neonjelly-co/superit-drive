@@ -29,7 +29,7 @@
 // Every change is two steps, the storage and then the index. files.go has uploads in one request, downloads and the
 // name rules, uploads.go resumable uploads and moving any upload into place, zip.go folders downloaded as one zip,
 // folders.go new folders, renames and moves, trash.go the trash, shared.go shared folders, sharing.go the access given
-// on places and items, links.go public links, reread.go keeping the index in step with changes made on the storage
+// on places and items, links.go public links, sendin.go files sent in through an upload-only link, reread.go keeping the index in step with changes made on the storage
 // directly (a folder re-read when it is opened), walk.go the slow walk through the whole storage, rollback.go the
 // storage put back to a snapshot, held.go handing over or deleting the My files of a member who left, copies.go the
 // copies of the index in the data folder and on the storage, adopt.go making the index from one, and this file the
@@ -82,6 +82,9 @@ type Options struct {
 	// StopAt is called at named points of the Drive's work where a test build may stop it, as if it were killed
 	// (clock.StopAt); nothing when nil.
 	StopAt func(point string)
+	// LinkLimit is how much an upload-only link takes in, in bytes, until it is reset: DefaultLinkLimit when 0. Only a
+	// test build sets another (clock.LinkLimit).
+	LinkLimit int64
 }
 
 // Drive is one Drive: its index and its storage.
@@ -127,12 +130,23 @@ type Drive struct {
 	acts acts
 	// stopAt is Options.StopAt.
 	stopAt func(point string)
+	// linkLimit is how much an upload-only link takes in until it is reset; intake keeps what is on its way through each
+	// (sendin.go).
+	linkLimit int64
+	intake    intake
 }
 
-// By is who does something that is recorded: a member, by user id, or a guest (Member is then "").
+// By is who does something that is recorded: a member, by user id, a guest (Member is then ""), or a visitor through
+// the public link with the id Link (both are then empty).
 type By struct {
 	Member string
 	Guest  index.Guest
+	Link   int64
+}
+
+// added is who added an item from outside the project, as the index labels it: a guest, or a visitor through a link.
+func (b By) added() index.AddedBy {
+	return index.AddedBy{Guest: b.Guest.Address, Link: b.Link != 0}
 }
 
 // Now is the Drive's clock: what it dates things by, and decides end dates on.
@@ -140,7 +154,10 @@ func (d *Drive) Now() time.Time { return d.now() }
 
 // New makes a Drive.
 func New(x *index.Index, s *storage.Client, o Options) *Drive {
-	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}, stopAt: o.StopAt}
+	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}, stopAt: o.StopAt, linkLimit: o.LinkLimit}
+	if d.linkLimit <= 0 {
+		d.linkLimit = DefaultLinkLimit
+	}
 	if d.now == nil {
 		d.now = time.Now
 	}

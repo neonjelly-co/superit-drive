@@ -38,6 +38,10 @@ const (
 	slowRate      = 8 << 20 // bytes a second
 	zips          = 2       // more downloads, after: a folder holding a file of fileSize, as one zip
 	partSize      = 32 << 20
+	// Then strangers send this many files of fileSize at once through an upload-only link (each in one request, as its
+	// page sends them: at most 8 at once, the rest told to wait their turn), while members download this many.
+	strangers          = 12
+	downloadsMeanwhile = 10
 
 	limit         = "64m"
 	driveImage    = "superit-drive:memory-test"
@@ -182,6 +186,45 @@ func TestTheDriveStaysWithin64MiB(t *testing.T) {
 	t.Logf("%d zips of a folder holding %d MiB, at once: %s", zips, fileSize>>20, time.Since(began).Round(time.Millisecond))
 	zipping := sampler.mark()
 
+	// Strangers send files through an upload-only link, each in one request, while members download.
+	inbox := drive.newFolder(t, place, "Inbox")
+	page := drive.uploadOnlyLink(t, place, inbox)
+	began = time.Now()
+	sendErrs := make(chan outcome, strangers+downloadsMeanwhile)
+	strangersSent := make([]pattern, strangers)
+	for j := range strangers {
+		strangersSent[j] = pattern{seed: uint64(200 + j), size: fileSize}
+		go func() {
+			sendErrs <- outcome{fmt.Sprintf("stranger %d", j+1), drive.sendThrough(page, fmt.Sprintf("Sent %d.bin", j+1), strangersSent[j])}
+		}()
+	}
+	for i := range downloadsMeanwhile {
+		go func() {
+			rate := 0
+			if i%2 == 0 {
+				rate = slowRate
+			}
+			sum, n, err := drive.download(place, seedItem, rate)
+			if err == nil && (n != fileSize || sum != seed.sum()) {
+				err = fmt.Errorf("got %d bytes that differ from Seed.bin", n)
+			}
+			sendErrs <- outcome{fmt.Sprintf("member download %d", i+1), err}
+		}()
+	}
+	for range strangers + downloadsMeanwhile {
+		if r := <-sendErrs; r.err != nil {
+			t.Errorf("%s: %v", r.what, r.err)
+		}
+	}
+	t.Logf("%d strangers sending %d MiB each through an upload-only link, and %d member downloads, at once: %s", strangers,
+		fileSize>>20, downloadsMeanwhile, time.Since(began).Round(time.Millisecond))
+	for j, p := range strangersSent {
+		if got := storage.sum(t, fmt.Sprintf("My files/load@example.com/Inbox/Sent %d.bin", j+1)); got != p.sum() {
+			t.Errorf("Sent %d.bin on the storage differs from what was sent", j+1)
+		}
+	}
+	sending := sampler.mark()
+
 	state := strings.Fields(run(t, "docker", "inspect", "-f", "{{.State.OOMKilled}} {{.State.Running}} {{.RestartCount}}", driveID))
 	if state[0] != "false" || state[1] != "true" {
 		t.Fatalf("the Drive's container: OOMKilled %s, running %s", state[0], state[1])
@@ -193,6 +236,7 @@ func TestTheDriveStaysWithin64MiB(t *testing.T) {
 	t.Logf("highest during one resumed upload:      %s", afterOne)
 	t.Logf("highest during 40 downloads + 10 uploads: %s", underLoad)
 	t.Logf("highest during %d zips:                   %s", zips, zipping)
+	t.Logf("highest during %d strangers sending files: %s", strangers, sending)
 	t.Logf("memory.events: %s", strings.Join(strings.Fields(cg["memory.events"]), " "))
 	t.Logf("(anon is the Drive's own memory, sock the kernel's network buffers, file the page cache, which the kernel " +
 		"takes back before it would kill anything)")
@@ -519,6 +563,48 @@ func (c *client) cutOffPart(session string, p pattern, offset, n, sent int64) er
 	}
 	time.Sleep(200 * time.Millisecond)
 	return nil
+}
+
+// uploadOnlyLink makes an upload-only link on a folder, and returns the path of its page.
+func (c *client) uploadOnlyLink(t *testing.T, place, folder int64) string {
+	body := []byte(`{"kind":"upload-only"}`)
+	var got struct{ Link struct{ Address string } }
+	status, err := c.json(http.MethodPost, fmt.Sprintf("/api/places/%d/items/%d/link", place, folder), bytes.NewReader(body), int64(len(body)), &got)
+	page, ok := strings.CutPrefix(got.Link.Address, driveAddress)
+	if err != nil || status != http.StatusCreated || !ok {
+		t.Fatalf("making an upload-only link: %d %v %q", status, err, got.Link.Address)
+	}
+	return page
+}
+
+// sendThrough sends p as a stranger's browser sends a file through an upload-only link's page: one POST with its
+// length, nothing about who sends it, and again with the same turn while the Drive says it is not its turn (an answer
+// that can arrive as a broken connection, the rest of the file unread).
+func (c *client) sendThrough(page, name string, p pattern) error {
+	turn := randomHex(12)
+	for range 900 {
+		req, err := http.NewRequest(http.MethodPost, c.base+page+"/files?"+url.Values{"name": {name}, "turn": {turn}}.Encode(), p.from(0))
+		if err != nil {
+			return err
+		}
+		req.ContentLength = p.size
+		res, err := c.http.Do(req)
+		if err != nil {
+			time.Sleep(time.Second)
+			continue
+		}
+		data, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		switch res.StatusCode {
+		case http.StatusCreated:
+			return nil
+		case http.StatusServiceUnavailable:
+			time.Sleep(time.Second)
+		default:
+			return fmt.Errorf("got %d %s", res.StatusCode, data)
+		}
+	}
+	return fmt.Errorf("its turn never came")
 }
 
 // download reads a file, at rate bytes a second (0: as fast as it comes), and returns what it read and its sum.

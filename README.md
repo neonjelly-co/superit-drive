@@ -22,7 +22,8 @@ guest, My files, shared folder, Drive storage, trash). The Drive also runs witho
   with the sharing the lost one had (see [The copy of the index](#the-copy-of-the-index)).
 - Members do not sign in to the Drive. A reverse proxy in front of it signs them in and adds headers saying who they
   are (see below). Everyone else comes in under one public prefix, `/s/`, which the reverse proxy opens without sign-in:
-  visitors with a public link (see [Public links](#public-links)), and guests, who sign in there with a code mailed to
+  visitors with a public link, who open and download what it is on or, through an upload-only link, send files into a
+  folder and see nothing of it (see [Public links](#public-links)), and guests, who sign in there with a code mailed to
   them (see [Guests](#guests)). Every route passes through one authorisation function, `internal/access`.
 
 ### Signing in: headers and the member list
@@ -61,10 +62,12 @@ whatever it carries. A signed-in member who opens a link is a visitor like anyon
 does nothing. No request outside `/s/` is ever a visitor's or a guest's: without the secret it is refused with 403 as
 before. In short, the reverse proxy must:
 
-- send `/s/*` to the Drive without sign-in, removing `Drive-Secret`, `Remote-User-Id` (and the other `Remote-*`
-  headers) and its own sign-in cookie, and nothing else: every method (guests upload, rename, move and delete there
-  with `POST`, `PUT` and `DELETE`), the request body, `Origin`, `Range`, `If-Range`, and the guests' cookie
-  (`__Secure-drive-guest`, or `drive-guest` when `DRIVE_ADDRESS` is plain HTTP) both ways, as for any other request;
+- send `/s/*` to the Drive without sign-in, removing `Drive-Secret`, `Remote-User-Id` (and the other `Remote-*` headers)
+  and its own sign-in cookie, and nothing else: every method (guests upload, rename, move and delete there with `POST`,
+  `PUT` and `DELETE`; visitors send files through an upload-only link with `POST`), the request body streamed as it
+  arrives (a file sent through a link is one request, up to 10 GB), `Origin`, `Range`, `If-Range`, and the guests'
+  cookie (`__Secure-drive-guest`, or `drive-guest` when `DRIVE_ADDRESS` is plain HTTP) both ways, as for any other
+  request;
 - sign in everything else and add the two headers above, as before, and never add `Drive-Secret` to a request under
   `/s/` (the Drive would ignore it there, but the secret would travel where it is not needed);
 - not cache answers under `/s/` (they say `Cache-Control: no-store`) nor log their addresses: an address there can be
@@ -79,7 +82,9 @@ also sends when a page on another site makes it call the Drive; so does the Driv
 request other than `GET` and `HEAD`, a member's or a guest's (signing in included), must carry an `Origin` header equal
 to `DRIVE_ADDRESS` (browsers add it themselves); any other origin, `null`, or none is refused with 403, and the Drive
 logs both values. The reverse proxy must pass `Origin` through unchanged, and `DRIVE_ADDRESS` must be the address in the
-browser's address bar.
+browser's address bar. The one change that needs no `Origin` is a file sent through an upload-only link: it carries no
+cookie and says nothing about who sends it, so another site's page can do through it only what anyone with the
+address can (and the link's own page sends `Origin: null`, under its `no-referrer` policy).
 
 ### Settings
 
@@ -133,8 +138,9 @@ Shared folders/
             2026-11-19 0c41d2aa/Payroll     a shared folder deleted whole: its top folder, beside what was
                                             deleted from it
     uploads/
-        3f9c0b…e1                           one file per upload while its bytes arrive, named after a random id;
-                                            moved into its folder when whole
+        3f9c0b…e1                           one file per upload while its bytes arrive (a file sent through an
+                                            upload-only link too), named after a random id; moved into its folder
+                                            when whole
     index/
         1a5ff6fe…73/                        the copies of the index whose storage id this is (the mark's)
             copy-000000000042.sqlite        the latest copy of the index (see "The copy of the index")
@@ -371,15 +377,16 @@ changed; and as the Drive stops (after the last request is answered), when acces
 a snapshot of the data folder taken once it has stopped, as before an upgrade, holds every change.
 
 An access change is anything that changes who may reach what: a share given, changed or taken away; a public link made,
-replaced or removed; a guest invited, their invitation changed, or gone with it; a shared folder made, deleted,
-restored or removed for good, and its managers; a switch of sharing outside the project; a held My files handed over
-or deleted; and an item renamed, moved, deleted or restored (what was given on it, and on what is in it, hangs on its
-id, which an older copy would not find where the storage now has it). The index counts them itself, in the transaction
-that makes them (migration `0011`: triggers on its tables), so none is missed, whatever makes it: a look at the storage
-that drops something shared counts too. A burst of them makes one copy: it is written once nothing changed for 30
-seconds, and no change waits more than five minutes for its copy, however much changes meanwhile. Files added, folders
-made and how often links and invitations were used are not access changes: a copy older than them finds the files on
-the storage, with the access of their folder, and the counts are a night behind at most.
+replaced or removed, or its kind changed (view or upload-only); a guest invited, their invitation changed, or gone with
+it; a shared folder made, deleted, restored or removed for good, and its managers; a switch of sharing outside the
+project; a held My files handed over or deleted; and an item renamed, moved, deleted or restored (what was given on it,
+and on what is in it, hangs on its id, which an older copy would not find where the storage now has it). The index
+counts them itself, in the transaction that makes them (migration `0011`: triggers on its tables), so none is missed,
+whatever makes it: a look at the storage that drops something shared counts too. A burst of them makes one copy: it is
+written once nothing changed for 30 seconds, and no change waits more than five minutes for its copy, however much
+changes meanwhile. Files added, folders made and how often links and invitations were used are not access changes: a
+copy older than them finds the files on the storage, with the access of their folder, and the counts are a night behind
+at most.
 
 **How fresh.** At any moment both copies hold every access change made more than five minutes before (and every one
 made more than 30 seconds before a pause in them), and everything else as it was at the last copy: the last access
@@ -416,7 +423,8 @@ anyone in by itself, and nothing that only one server can honour:
 What is left out is overwritten with zeros in the copy's file (SQLite's `secure_delete`), not only unlisted.
 Everything else is kept: the places, the folder tree, the trash, every grant (to members, to everyone, and guests'
 invitations with their end dates), public links (by their token's SHA-256: the address is in no copy, so a copy opens no
-link by itself, and the same address works again on a new server), guests by address, the switches of sharing outside
+link by itself, and the same address works again on a new server), with their kind and what an upload-only link took in
+(as of the copy: taking files in is no access change), guests by address, the switches of sharing outside
 the project, the record of acts on held My files (and an act under way, which a Drive started from the copy finishes),
 how often links and invitations were used, the storage's id, and what the Drive knows of rollbacks (`rollback`,
 `rollback_walk`, `storage_marked`): a Drive started from the copy knows a rollback it was told about is old news, and
@@ -546,7 +554,7 @@ its siblings. Taking access away, or giving less, counts from the next request, 
 | Open a folder, download a file (or a folder as a zip), see who can see it | yes | yes | yes |
 | Upload into a folder (and replace, or keep both), make folders in it | | yes | yes |
 | Share it: give access to others, change a role, take access away | | yes | yes |
-| Make a [public link](#public-links) to it (not where [sharing outside the project](#sharing-outside-the-project-switched-off) is off), see it (who made it, how often it was used), remove it | | yes | yes |
+| Make a [public link](#public-links) to it, change what a folder's link lets visitors do, let an upload-only link take files again (none of these where [sharing outside the project](#sharing-outside-the-project-switched-off) is off); see it (who made it, how often it was used, what it took in), remove it | | yes | yes |
 | Invite a [guest](#guests) to it, change their role or end date (neither where sharing outside the project is off), take it away | | yes | yes |
 | Rename, move or delete it: also needs editor of the folder it is in | | yes | yes |
 | Restore it from the trash: also needs editor of the folder it goes back to, and either the place's whole trash or having put it there | | yes | yes |
@@ -697,13 +705,16 @@ POST   /api/places/{place}/items/{item}/move    {"to": 42 | null, "place": 7}   
 
 A member who may share a file or folder (an editor, the owner of a My files, a manager of a shared folder, a project
 admin in a shared folder: `access.MakeLink`) makes a public link to it in its details. Anyone with the link's address
-opens it without signing in, on a plain page under `/s/`, and downloads one file, or everything as a zip. A link has no
-password and no end date: it works until it is removed. A viewer cannot make one, see one's details or remove one; they,
-and everyone who can see the item, see in "who can see this" (and in the list's sentence) that anyone with the link can.
+opens it without signing in, on a plain page under `/s/`, and downloads one file, or everything as a zip; or, through an
+upload-only link on a folder, sends files into that folder and sees nothing of what is in it (see [Upload-only
+links](#upload-only-links)). A link has no password and no end date: it works until it is removed. A viewer cannot make
+one, see one's details or remove one; they, and everyone who can see the item, see in "who can see this" (and, for a
+view link, in the list's sentence) that anyone with the link can.
 
 - **One link per item**, on a file or a folder, never on a place's top folder (a My files or a shared folder as a
-  whole). A link on a folder covers everything in it, at any depth, and nothing above it or beside it. It lets visitors
-  see and download, nothing else.
+  whole). A link is a **view link** or, on a folder only, an **upload-only link**; its kind is chosen when it is made,
+  and changed (`PUT …/link`) at the same address. A view link on a folder covers everything in it, at any depth, and
+  nothing above it or beside it, and lets visitors see and download, nothing else.
 - **The address** is `DRIVE_ADDRESS` + `/s/` + a token of 192 random bits from `crypto/rand`, in base64url (32
   characters): it says nothing about the item. The index keeps only the token's SHA-256, so a copy or a backup of the
   index opens no link. The address is therefore given once, in the answer that makes the link: the details panel shows
@@ -713,8 +724,8 @@ and everyone who can see the item, see in "who can see this" (and in the list's 
   status, page and headers, after the same work: the token is hashed and looked up either way). A new link gets a new
   address. Neither the address nor the token is ever written to the log.
 - **It follows its item**, by the item's id: through rename, move (out of a My files into a shared folder too), and
-  replacing a file with an upload. It covers what is in the item where it is now. While the item is in the trash, or in a
-  shared folder in the trash, the link opens nothing; restored, it works again at the same address. While the item is
+  replacing a file with an upload. It covers what is in the item where it is now. While the item is in the trash, or in
+  a shared folder in the trash, the link opens nothing; restored, it works again at the same address. While the item is
   gone from the storage it opens nothing either; dropped from the index (see [Keeping in step with the
   storage](#keeping-in-step-with-the-storage)), or removed for good, the item takes its link with it, and no file put
   under its name later is ever reached through it.
@@ -729,48 +740,63 @@ and everyone who can see the item, see in "who can see this" (and in the list's 
   visitor whose link would open is told so, on a page of its own ("This link is not available", 403); anything the link
   does not cover still answers as a link that does not exist.
 - **Uses.** For each link the Drive keeps how often it was used and when last, and nothing else about visitors. One use
-  is a page opened through it (its own, or a folder's inside it), or a download, a file opened or a zip from its start;
-  not a `HEAD`, not a part of a file after its start (a video seeking, a download resuming), not a refused request. Link
-  previews (chat programs that fetch a page to show it) and search engines' robots count as uses: nothing tells them
-  apart. Uses are counted in memory, so a visitor's request never waits for the index or a lock for it; they are written
-  every 30 seconds and when the Drive stops (a Drive that is killed loses the last half minute's).
+  is a page opened through it (its own, or a folder's inside it), or a download, a file opened or a zip from its start,
+  or a file sent in through an upload-only link; not a `HEAD`, not a part of a file after its start (a video seeking, a
+  download resuming), not a refused request. Link previews (chat programs that fetch a page to show it) and search
+  engines' robots count as uses: nothing tells them apart. Uses are counted in memory, so a visitor's request never
+  waits for the index or a lock for it; they are written every 30 seconds and when the Drive stops (a Drive that is
+  killed loses the last half minute's).
 
 ```
-GET    /api/places/{place}/items/{item}/link     200 {"link": {"kind": "view", "made", "madeBy", "former", "uses", "used", "works"} | null}
-POST   /api/places/{place}/items/{item}/link     {"replace": true} (or no body)
+GET    /api/places/{place}/items/{item}/link     200 {"link": {"kind": "view" | "upload-only", "made", "madeBy",
+                                                 "former", "uses", "used", "works", and for an upload-only link
+                                                 "takenIn", "limit", "full"} | null}
+POST   /api/places/{place}/items/{item}/link     {"replace": true, "kind": "view" | "upload-only"} (all may be left out:
+                                                 a view link, not in place of one)
        201 {"link": {…, "address": "https://files.example.com/s/<token>"}}    the only answer with the address
+       400 {"error"}                             an upload-only link on a file, or a kind there is not
        409 {"error", "exists": true}             it has a link, and replacing it was not asked for
+PUT    /api/places/{place}/items/{item}/link     {"kind": "view" | "upload-only"}    the same link, at the same address
+       200 {"link": {…}}    400 an upload-only link on a file, or a kind there is not    409 it has no link
+POST   /api/places/{place}/items/{item}/link/reset    an upload-only link counts what it takes in from 0 again
+       200 {"link": {…}}    409 it has no link
 DELETE /api/places/{place}/items/{item}/link     204 (also when it has none)
 ```
 
-Listings, search and "Shared with me" say `"seenBy": {…, "link": true}` for an item anyone with a working link can see,
-and "who can see this" has a line `{"link": true, "role": "viewer", "given" | "inherited", "from"}`.
+Making, changing and resetting a link are `access.MakeLink` (not where sharing outside the project is off: 409 with
+`"outside"`); seeing and removing it `access.ManageLink`. Listings, search and "Shared with me" say `"seenBy": {…,
+"link": true}` for an item anyone with a working view link can see, and "who can see this" has a line `{"link": true,
+"linkKind": "view", "role": "viewer", "given" | "inherited", "from"}`, or, for an upload-only link, on its own folder
+only and without a role, `{"link": true, "linkKind": "upload-only", "given": true}`.
 
-**What a visitor reaches**, all under `/s/`, and only with `GET` (or `HEAD`): any other method there is answered 405 with
-`Allow: GET, HEAD` before anything else is looked at.
+**What a visitor reaches**, all under `/s/`, and only with `GET` (or `HEAD`), but for sending a file through an
+upload-only link: any other method there, and `POST` anywhere but that one route, is answered 405 with `Allow: GET,
+HEAD` before anything else is looked at.
 
 ```
-GET    /s/{token}                          the page of what the link is on
+GET    /s/{token}                          the page of what the link is on (an upload-only link's: where to send files)
 GET    /s/{token}/items/{item}             the page of a folder (or a file) inside it
 GET    /s/{token}/items/{item}/download    a file, to be saved (as a member's download)
 GET    /s/{token}/items/{item}/open        a file shown in the browser, by the safe list (as a member's …/open)
 GET    /s/{token}/items/{item}/zip         a folder as one zip (as a member's …/zip, ?item=… too)
+POST   /s/{token}/files?name=…[&turn=…]    a file sent through an upload-only link (below)
 ```
 
-`{item}` must be the link's item or something inside it. A link that does not work, and anything it does not cover (a
+`{item}` must be the link's item or something inside it, through a view link; an upload-only link reaches no item at
+all, its own folder included (only its page and sending). A link that does not work, and anything it does not cover (a
 folder above it, a file beside it, an item of another place or in the trash), gets the one answer: 404 with the page
 "This link does not work". The one exception is a link that would open what is asked for but for sharing outside the
 project being switched off where it is: 403 with the page "This link is not available", which says it is switched off
 for now (only after the token matched, and nothing about what it is on).
 
 **The page** is plain HTML made by the Drive (`internal/server/visitors.go`), in one column on every screen, with no
-script and nothing of the members' interface: it works with JavaScript off. It says who shared it (the maker's display
-name, never an email address or user id; the project's name when the maker has none or has left), the item's name, the
-folders from the link's item down to the one shown (never anything above), "Download all as zip" for a folder, and what
-is in it: folders open their own page, files have Download, and Open when their kind opens in the browser. A folder's
-page lists at most 1,000 items (the zip holds them all). It lists what the index knows: what was put on the storage
-directly shows once a member has opened its folder, or the walk has passed it; the zip looks at the storage. English
-for now.
+script and nothing of the members' interface (but an upload-only link's: below): it works with JavaScript off. It says
+who shared it (the maker's display name, never an email address or user id; the project's name when the maker has none
+or has left), the item's name, the folders from the link's item down to the one shown (never anything above), "Download
+all as zip" for a folder, and what is in it: folders open their own page, files have Download, and Open when their kind
+opens in the browser. A folder's page lists at most 1,000 items (the zip holds them all). It lists what the index knows:
+what was put on the storage directly shows once a member has opened its folder, or the walk has passed it; the zip looks
+at the storage. English for now.
 
 Every answer under `/s/` carries `X-Robots-Tag: noindex, nofollow` (and the page `<meta name="robots">`),
 `Referrer-Policy: no-referrer` (the address is the secret), `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
@@ -779,11 +805,98 @@ Every answer under `/s/` carries `X-Robots-Tag: noindex, nofollow` (and the page
 A file's bytes go out with the same content type and policy as to members (below). No cookie is set or read on a link's
 addresses.
 
-**What visitors can use up, and what bounds it.** Their transfers take at most 8 of the 32 slots, in a line of their
-own (shared with guests), and at most 64 visitors wait in it at once (more are told 503 at once); a transfer that moves
-nothing for two minutes is ended. Besides transfers, at most 16 visitors' requests are worked on at once, and 64 more wait up to 5 seconds; more
-are answered 503 at once. Trying tokens costs a hash and one look in the index, with no lock and no log line. A zip is
-bounded as for members (10,000 entries).
+**What visitors can use up, and what bounds it.** Their transfers (files sent through an upload-only link included) take
+at most 8 of the 32 slots, in a line of their own (shared with guests), and at most 64 visitors wait in it at once, and
+at most 64 outsiders' turns keep a place in it (more are told 503 at once); a transfer that moves nothing for two
+minutes is ended. Besides transfers, at most 16 visitors' requests are worked on at once, and 64 more wait up to 5
+seconds; more are answered 503 at once. Trying tokens costs a hash and one look in the index, with no lock and no log
+line. A zip is bounded as for members (10,000 entries).
+
+#### Upload-only links
+
+A folder's link can be upload-only: anyone with its address sends files into that folder, and sees nothing of what is in
+it, not even the names, nor what anyone else sent; nothing they send replaces anything. It is for collecting files from
+people outside the project (a client's documents, a supplier's invoices), without a guest's sign-in. It counts where a
+view link would (its folder live, its place open, sharing outside the project on there; in a My files while its maker
+may still share the folder) and lets its visitors do two things only, at its own folder (`access.EnterThroughLink`,
+`access.UploadThroughLink`, never the members' `Upload`, which can replace a file, and so delete one): open its page,
+and send a file into that folder itself, never into a folder inside it. A file's link is a view link: an upload-only one
+on a file is refused (400), and counts for nothing in `internal/access` if one were in the index.
+
+**The page** (`GET /s/{token}`) says who shared the folder and its name, "Send files to this folder. What is in it stays
+hidden: you cannot see its files, their names, or what anyone else sent. Nothing you send replaces anything in it.", and
+offers a place to drop files or choose them, and Send. It runs one small script of its own, inline
+(`internal/server/sendin.go`), which sends each file chosen or dropped (files only: a folder dropped is refused with a
+line that says so) as one request, one after another, shows how far each has gone, waits its turn when the Drive is
+busy, and says why a file was not taken. Its policy is the visitors' with that one script, by its hash, and somewhere to
+send to: `… script-src 'sha256-…'; connect-src https://files.example.com/s/; … form-action 'none' …`. Nothing else runs
+or loads, no form goes anywhere, and the script talks only to the public prefix of `DRIVE_ADDRESS`. Without JavaScript
+the page says that sending needs it. A link that has taken in all it may says so instead ("This link has taken in all it
+can for now. Ask whoever sent it to you to make room for more."), with nothing to send and no script.
+
+Why a script, and not a plain form posting the files: a form sends every file chosen in one `multipart/form-data`
+request, in which no file says how long it is until it has all arrived. The Drive could then neither count a file
+against the link's limit before reading it, nor stream it to the storage with its length (the one `PUT` that writes the
+whole file or nothing), and one large file cut off would lose all the others with it. One request per file, its length
+in `Content-Length`, is the shape a member's upload in one request already has, bounded the same way.
+
+**Sending a file.**
+
+```
+POST   /s/{token}/files?name=<its name>[&turn=<word>]    Content-Length: <its size>, and its bytes as the body
+       201 {"size": n}                         taken: the same answer whatever was in the folder
+       400 {"error"}                           a name the Drive does not store, or the file stopped before its end
+       411 {"error"}                           no Content-Length (sent in chunks)
+       413 {"error", "full": true | false}     it would take the link past its limit (full: it has reached it)
+       503 {"error", "busy": true}, Retry-After    not its turn: send it again then, with the same turn
+       404, 403                                the pages of a link that does not work, or is not available now
+```
+
+- **It streams**, as a member's upload in one request does: straight to a file of its own in the hidden uploads folder,
+  with one `PUT` of its length, then moved into the folder (`MOVE`, never replacing anything). Bytes past its
+  `Content-Length` are not read as the file; fewer, and nothing is kept. A file cut off starts again from its start (the
+  page sends it again, with the same turn, for a few minutes): there is no resuming through a link, so no upload in
+  progress, and nothing to keep for a visitor between requests.
+- **A taken name is neither revealed nor replaced.** When something in the folder has the name (a file, a folder, a file
+  sent before, a change on its way), the file is kept beside it, as `Name (2).ext`, `Name (3).ext` and so on, labelled
+  as come through a link. The answer is `201 {"size": n}` either way, to the byte. The free name is found in the index
+  and the Drive's own claims, never by asking the storage, so that the time an answer takes does not say either: a look
+  on the storage costs a round trip per name taken, which a visitor timing small files could count. (A file only the
+  storage has, put there directly and not yet seen by a look, still makes the move fail, and the next name is tried:
+  that much a visitor could time, and only about such a file.)
+- **Names** are as for any file (`drive.CheckName`: one plain name, no `/`, no control character, valid text, at most
+  255 bytes), and, from a stranger, without the characters that turn the direction of text (U+202A to U+202E, U+2066 to
+  U+2069), with which `Invoice` + U+202E + `fdp.exe` would read as `Invoiceexe.pdf` in the list: 400, before anything is
+  read. A name that only looks like a path (`..Notes.txt`, `..\Notes.txt`, `%2e%2e%2f`) is a name, in the link's folder.
+- **Decided on twice.** The link is decided on when the request comes in, and again once the file has all arrived,
+  holding the place, with the link, its place (with its switches, and whether it is held) and its folder read anew. A
+  link removed, made a view link or made anew meanwhile, its folder deleted or gone, its maker no longer allowed to
+  share it or gone from the project, and its My files held or being handed over: nothing is kept, and the visitor is
+  answered as the link now answers (404); sharing outside the project switched off meanwhile: 403. Its folder moved into
+  another place meanwhile: 409, nothing kept (sent again, it goes there).
+
+**10 GB, then a reset.** An upload-only link takes in at most 10 GB (10^9 bytes each, as storage is sold) until whoever
+may share its folder resets it (`POST …/link/reset`, "Make room for more" in its details); what it took stays in the
+folder. Each file's `Content-Length` is held against the limit from before its first byte is read, under one lock for
+all links, so files on their way at once never pass it together, whatever they say about themselves: one that would is
+refused at once (413), one cut off gives its room back, and what is kept is counted only once it is in its folder. A
+full link refuses every file, an empty one too, and its page says so. Changing its kind keeps the count; making a new
+link in its place, or removing it, ends it. The count (`links.taken_in`) is not an access change (no copy of the index
+is made for it); copies carry it as it was when they were made. A test build reads `SUPERIT_DRIVE_TEST_LINK_LIMIT` for a
+smaller limit.
+
+**Labelled.** A file sent through a link carries `"addedBy": {"link": true}` in members' listings, search and "Shared
+with me" (as a guest's carries `{"guest": <their address>}`), and the interface shows "Through a link" under its name
+and "Someone with an upload-only link: from outside the project" in its details. A member's upload over it (replace)
+takes the label off. Guests never see labels.
+
+**What strangers can use up.** A file sent is a transfer in the outsiders' line (8 slots at most, shared with view
+links' downloads and guests): members' 24 are never theirs. A file not let through is answered 503 before any of it is
+read, and its turn keeps its place; at most 64 outsiders' turns are kept at once, so new turns sent as fast as a
+stranger likes cost a fixed amount of memory. Each link takes in at most 10 GB until it is reset. A stranger who sends a
+file slowly holds one of the 8 slots, and the room their file says it needs, for as long as bytes keep coming (a
+transfer is ended only after two minutes without any); members are not slowed by it, and whoever may share the folder
+can remove the link. Measured in the [memory test](#large-transfers-and-the-memory-figure).
 
 ### Guests
 
@@ -841,7 +954,9 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   is removed. From then on it follows their user id, also when their address changes. A member who leaves never
   becomes a guest; their address invited again is a new guest.
 - **Labels and uses.** A file or folder a guest added (uploaded or made) is labelled with their address, for members
-  (`"addedBy": {"guest": …}` in listings, "Added by" in the details): an upload over it by a member takes the label off.
+  (`"addedBy": {"guest": …}` in listings, "From a guest" under its name and "Added by" in the details), as a file sent
+  through an upload-only link is labelled "Through a link" (see [Upload-only links](#upload-only-links)): an upload
+  over it by a member takes the label off.
   For each invitation the Drive keeps how often it was used and when last, and nothing else: a folder or file opened, a
   download, a file opened or a zip from its start, an upload, a new folder, a rename, a move or a delete through it.
   Counted in memory and written every 30 seconds, as links' uses are.
@@ -924,7 +1039,8 @@ off), but sees what leaves the project, and the space each person and each share
 GET    /api/oversight/shared-outside
        200 {"sharingOutside": {…}, "items": [{"kind": "link" | "guest", "item": {"id", "name", "kind"},
             "place": {"id", "kind", "name" (a shared folder's), "owner" | "ownerLeft" (a My files'), "outside"},
-            "sharedBy" | "former", "guest": {"id", "address"}, "role", "since", "until", "uses", "used", "works"}]}
+            "sharedBy" | "former", "guest": {"id", "address"}, "role", "linkKind": "view" | "upload-only" (a link's; an
+            upload-only link has no role), "since", "until", "uses", "used", "works"}]}
 GET    /api/oversight/space
        200 {"used", "capacity", "people": [{"person": {…} | "former" and "folder", "used"}],
             "sharedFolders": [{"id", "name", "deleted", "used"}]}
@@ -1155,14 +1271,13 @@ not; inviting a guest checks again when that has run out.
 
 The Drive is counted at 64 MiB of memory (a hard 96 MiB) on a customer's server, and the kernel's network buffers
 for the transfers in flight are charged to its container too. A transfer is a request that moves a file's bytes: a
-download (of a file or a zip, or a file opened in the browser), an upload in one request, or one part of a resumable
-upload. Three rules hold the
-figure (`internal/transfers`):
+download (of a file or a zip, or a file opened in the browser), an upload in one request (a file sent through an
+upload-only link too), or one part of a resumable upload. Three rules hold the figure (`internal/transfers`):
 
 - **At most 32 transfers are in flight, of which outsiders (visitors with a public link, and guests) hold at most 8.**
   Members can always use the other 24, and all 32 while no outsider needs one; when a slot comes back, a member waiting
-  gets it before an outsider. Outsiders wait in a line of their own, at most 64 of them; more are told at once that the
-  Drive is busy. A
+  gets it before an outsider. Outsiders wait in a line of their own, at most 64 of them, and at most 64 outsiders' turns
+  keep a place in it (an upload's, below); more are told at once that the Drive is busy. A
   download waits its turn in line (holding only its idle connection),
   for up to ten minutes, then gets 503. An upload is answered at once with 503, `{"busy": true}` and `Retry-After`,
   before any of its bytes are read, and keeps its place in line: a resumable upload by its id, an upload in one request
@@ -1180,6 +1295,9 @@ Measured with `make test-memory` (below): the image in a container with `--memor
 stand-in storage, idles at about 4.5 MiB; with 40 downloads (half of them read at 8 MiB/s) and 10 resumable uploads
 of 256 MiB each at once, it peaked at 46 to 49.6 MiB over three runs, of which about 13 to 16 MiB was the Drive's own
 memory and 29 to 31 MiB network buffers, and never reached the limit (Docker Desktop on an Apple Silicon Mac, arm64).
+Then 12 strangers sending files of 256 MiB at once through an [upload-only link](#upload-only-links), each in one
+request (8 in flight, the rest waiting their turn), while members downloaded 10 (half of them slowly), reached 29.5 MiB,
+of which 13.7 MiB the Drive's own memory and 9.9 MiB network buffers.
 Walking a storage of 50,000 files in 402 folders (and one folder of 20,000, more than a look reads) took 3½ minutes and
 its highest was 38 MiB, of which 17.5 MiB the Drive's own memory and 16 MiB page cache (the index's file, which the
 kernel takes back first); eight people then opening the folder of 10,000 files at once reached 59 MiB, of which 35 MiB
@@ -1250,7 +1368,9 @@ in "Shared with me", get a mail when something is shared with them by name (with
 from their own My files into a shared folder after a warning that says who will see them there. Images, PDFs, text,
 video and sound open in the browser (anything else downloads), a search finds files and folders by name across
 everything a member can see, and several items can be selected to move, download as a zip or delete together. Members
-who may share a file or folder make a public link to it, which anyone opens without signing in, or invite someone
+who may share a file or folder make a public link to it, which anyone opens without signing in (or, on a folder, an
+upload-only link, through which anyone sends files in and sees nothing of what is there, up to 10 GB until it is
+reset), or invite someone
 outside the project by email address as a guest (with the mail settings), who signs in with a mailed code; project
 admins see everything shared outside the project and the space each person and shared folder uses, and switch sharing
 outside the project off for the whole project (managers for one shared folder); when someone leaves the member list,
@@ -1429,16 +1549,18 @@ authorisation function. The interface has no tests of its own; check it in a bro
 
 **The memory test** (`test/memory`, build tag `memory`, `make test-memory`) builds the image from the Dockerfile and
 runs it with `--memory=64m --memory-swap=64m` against the stand-in storage. It uploads a 256 MiB file with a part cut
-off and resumed, then sends 40 downloads (half of them read slowly) and 10 resumable uploads of 256 MiB each through
-it at once, then two zips of a folder holding 256 MiB, checks every byte and that the container was not killed, and
-reports the container's memory from its cgroup (the peak, and the highest during each part, split into the Drive's
-own memory, network buffers, page cache and kernel). A second test there puts 70,000 files on the stand-in storage (one
-folder of 10,000, 200 folders of 200, and one folder of 20,000, more than a look reads), lets the released Drive walk
-them all, then has four people open the folder of 10,000 at once, and reports the same. Both take about eight minutes
-and leave only the images `superit-drive:memory-test` and `superit-drive-test-webdav`. A third puts 110,000 files on
-the storage (11 folders of 10,000), lets the Drive walk them all, then, while 16 downloads (half of them read slowly) and
-four people opening a folder of 10,000 go on over and over, has a share make the Drive copy its index into its data
-folder and onto the storage, and reports the same; it takes about three minutes.
+off and resumed, then sends 40 downloads (half of them read slowly) and 10 resumable uploads of 256 MiB each through it
+at once, then two zips of a folder holding 256 MiB, then 12 strangers sending files of 256 MiB through an upload-only
+link (each in one request, at most 8 in flight) while members download 10 (half of them slowly), checks every byte and
+that the container was not killed, and reports the container's memory from its cgroup (the peak, and the highest during
+each part, split into the Drive's own memory, network buffers, page cache and kernel). A second test there puts 70,000
+files on the stand-in storage (one folder of 10,000, 200 folders of 200, and one folder of 20,000, more than a look
+reads), lets the released Drive walk them all, then has four people open the folder of 10,000 at once, and reports the
+same. Both take about eight minutes and leave only the images `superit-drive:memory-test`
+and `superit-drive-test-webdav`. A third puts 110,000 files on the storage (11 folders of 10,000), lets the Drive walk
+them all, then, while 16 downloads (half of them read slowly) and four people opening a folder of 10,000 go on over and
+over, has a share make the Drive copy its index into its data folder and onto the storage, and reports the same; it
+takes about three minutes.
 
 The harness builds the Drive with the build tag `testclock`, which is the only difference from a released Drive: in
 it, `SUPERIT_DRIVE_TEST_CLOCK_SHIFT` (a Go duration such as `744h`) moves the Drive's clock forward, so a test can
@@ -1448,7 +1570,9 @@ its work (`hand-over moved`, `hand-over trash removed`, `delete removed`), so a 
 starts again; and `SUPERIT_DRIVE_TEST_WALK_EVERY` and `SUPERIT_DRIVE_TEST_WALK_PAUSE` (Go durations) make the
 walk through the storage start that soon, run that often and rest that long after each folder; and
 `SUPERIT_DRIVE_TEST_COPY_QUIET`, `SUPERIT_DRIVE_TEST_COPY_LATEST` and `SUPERIT_DRIVE_TEST_COPY_RETRY` (Go durations) make
-the copy of the index follow access changes that soon (see [The copy of the index](#the-copy-of-the-index)). A Drive
+the copy of the index follow access changes that soon (see [The copy of the index](#the-copy-of-the-index)); and
+`SUPERIT_DRIVE_TEST_LINK_LIMIT` (bytes) is how much an upload-only link takes in before it is full, so a test need not
+send 10 GB (see [Upload-only links](#upload-only-links)). A Drive
 built without the tag reads no such variable. Tests change the storage directly with the harness's own WebDAV client
 (`Drive.Storage`), including a `MOVE` that keeps a file's time (a storage that answered wrong for a while), `Fill`,
 which puts thousands of files straight onto the stand-in storage's disk, and `Snapshot` and `RollBack`, which copy the
@@ -1500,13 +1624,15 @@ internal/server/       HTTP: routes.go lists every route; server.go's guard runs
                        link; under /s/guest, the guest's session) → own page (for changes; through a link, only
                        reading) → place → item in it, or in its trash, or the person's upload in progress into it →
                        the access given there → access.Decide; transfers.go has downloads, zips and uploads,
-                       opening.go what opens in the browser and how, search.go the search by name, links.go making
-                       and removing public links, visitors.go the public prefix and the visitor's pages,
+                       opening.go what opens in the browser and how, search.go the search by name, links.go making,
+                       changing and removing public links, visitors.go the public prefix and the visitor's pages,
+                       sendin.go an upload-only link's page and the files sent through it,
                        invitations.go inviting guests, guests.go the guests' sign-in, pages and codes,
                        oversight.go sharing outside the project switched off and what a project admin oversees,
                        held.go the held My files of people who left, handed over or deleted
 internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
-                       shared folders, the access given on them; reread.go and walk.go keep the index in step with
+                       shared folders, the access given on them, sendin.go files sent through an upload-only link
+                       within its limit; reread.go and walk.go keep the index in step with
                        the storage, rollback.go takes in the storage put back to a snapshot, held.go hands
                        over or deletes the held My files of people who left, copies.go writes the copies of the
                        index, and adopt.go makes the index from one when the data folder holds none

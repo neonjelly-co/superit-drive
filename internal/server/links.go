@@ -11,6 +11,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
+	"github.com/neonjelly-co/superit-drive/internal/members"
 )
 
 // Making, seeing and removing the public link on a file or folder, in the details panel. Their routes are in routes.go
@@ -19,7 +20,8 @@ import (
 
 // linkJSON is the public link on an item, as whoever may manage it sees it.
 type linkJSON struct {
-	// Kind is what it lets visitors do: "view" (see and download).
+	// Kind is what it lets visitors do: "view" (see and download), or, on a folder, "upload-only" (send files in, and
+	// see nothing).
 	Kind string `json:"kind"`
 	// Made is when it was made; MadeBy who made it, while they are in the project (Former once they have left it).
 	Made   time.Time   `json:"made"`
@@ -32,6 +34,11 @@ type linkJSON struct {
 	// Works says whether it lets visitors in now. It does not while its maker can no longer share the item in a My
 	// files (it works again if they can again), nor where sharing outside the project is off.
 	Works bool `json:"works"`
+	// For an upload-only link: TakenIn is how many bytes of files it has taken in since it was made or last reset, Limit
+	// the most it takes in before it stops, and Full whether it has: then it takes no file until it is reset.
+	TakenIn *int64 `json:"takenIn,omitempty"`
+	Limit   *int64 `json:"limit,omitempty"`
+	Full    bool   `json:"full,omitempty"`
 	// Address is the link's address: only in the answer that made it. The Drive keeps only a hash of its token, and can
 	// never show it again.
 	Address string `json:"address,omitempty"`
@@ -39,8 +46,11 @@ type linkJSON struct {
 
 func (s *Server) linkJSONOf(l index.Link, where *access.Place, address string) linkJSON {
 	list := s.members.Current()
-	j := linkJSON{Kind: l.Kind, Made: l.Made, Uses: l.Uses, Address: address,
-		Works: access.Decide(visitorOf(l, list), access.SeeThroughLink, where)}
+	j := linkJSON{Kind: l.Kind, Made: l.Made, Uses: l.Uses, Address: address, Works: linkWorks(l, where, list)}
+	if l.Kind == index.UploadLink {
+		taken, limit := l.TakenIn, s.drive.LinkLimit()
+		j.TakenIn, j.Limit, j.Full = &taken, &limit, taken >= limit
+	}
 	if m, ok := list.Lookup(l.MadeBy); ok {
 		j.MadeBy = personJSONOf(m)
 	} else {
@@ -70,24 +80,55 @@ func (s *Server) linkOf(w http.ResponseWriter, r *http.Request, c call) {
 	writeJSON(w, http.StatusOK, map[string]any{"link": s.linkJSONOf(l, c.access, ""), "outside": outsideHere(*c.place)})
 }
 
-// makeLink makes a public link to a file or folder: anyone with its address may see it, and everything inside it, and
-// download them, without signing in, until it is removed. The answer is the only one that holds the address: copy it
-// then. An item has one link at most: when it has one, a new one is made only in its place ("replace": true), and the
-// old address stops working for good.
+// linkWorks says whether a link lets visitors in now: whether its page opens, through a link of either kind.
+func linkWorks(l index.Link, where *access.Place, list *members.List) bool {
+	return access.Decide(visitorOf(l, list), access.EnterThroughLink, where)
+}
+
+// fileLinkKind is the answer to an upload-only link asked for on a file.
+const fileLinkKind = "Only a folder's link can be upload-only. A file's link lets people open and download it."
+
+// linkKindOf reads the kind of link a request asks for: "view" (the default) or "upload-only". ok is false when the
+// person was already answered.
+func (s *Server) linkKindOf(w http.ResponseWriter, r *http.Request, kind string) (string, bool) {
+	switch kind {
+	case "", index.ViewLink:
+		return index.ViewLink, true
+	case index.UploadLink:
+		return kind, true
+	}
+	s.refuse(w, r, http.StatusBadRequest, "A public link is either “view” or “upload-only”.")
+	return "", false
+}
+
+// makeLink makes a public link to a file or folder, until it is removed: a view link (anyone with its address may see
+// it, and everything inside it, and download them, without signing in), or, on a folder, an upload-only link (anyone
+// with its address may send files into it, and sees nothing of what is there). The answer is the only one that holds
+// the address: copy it then. An item has one link at most: when it has one, a new one is made only in its place
+// ("replace": true), and the old address stops working for good.
 //
-//	POST /api/places/{place}/items/{item}/link    {"replace": true}   (the body may be left out)
+//	POST /api/places/{place}/items/{item}/link    {"replace": true, "kind": "view" | "upload-only"}   (all may be left out)
 //	201 {"link": {…, "address": "https://files.example.com/s/<token>"}}
+//	400 an upload-only link on a file, or a kind there is not
 //	409 {"error", "exists": true}    it has a link already, and replacing it was not asked for
 func (s *Server) makeLink(w http.ResponseWriter, r *http.Request, c call) {
 	var body struct {
-		Replace bool `json:"replace"`
+		Replace bool   `json:"replace"`
+		Kind    string `json:"kind"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		s.refuse(w, r, http.StatusBadRequest, "The Drive could not read this request.")
 		return
 	}
-	l, token, err := s.drive.MakeLink(r.Context(), *c.place, *c.item, string(access.ViewLink), c.member.UserID, body.Replace)
+	kind, ok := s.linkKindOf(w, r, body.Kind)
+	if !ok {
+		return
+	}
+	l, token, err := s.drive.MakeLink(r.Context(), *c.place, *c.item, kind, c.member.UserID, body.Replace)
 	switch {
+	case errors.Is(err, index.ErrLinkKind):
+		s.refuse(w, r, http.StatusBadRequest, fileLinkKind)
+		return
 	case errors.Is(err, index.ErrLinkExists):
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":  "This already has a public link. Make a new one in its place to change its address.",
@@ -103,6 +144,61 @@ func (s *Server) makeLink(w http.ResponseWriter, r *http.Request, c call) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"link": s.linkJSONOf(l, c.access, s.linkAddress(token))})
+}
+
+// setLinkKind changes what the public link on a folder lets visitors do, keeping its address: "view" (see and download
+// everything in it) or "upload-only" (send files in, and see nothing). Whoever has the address can then do what the new
+// kind lets them: making an upload-only link a view link shows the folder to everyone it was sent to. A file's link is
+// a view link only. What an upload-only link has taken in is kept through a change of kind.
+//
+//	PUT /api/places/{place}/items/{item}/link    {"kind": "view" | "upload-only"}
+//	200 {"link": {…}}
+//	400 an upload-only link on a file, or a kind there is not
+//	409 {"error"}    it has no link
+func (s *Server) setLinkKind(w http.ResponseWriter, r *http.Request, c call) {
+	var body struct {
+		Kind string `json:"kind"`
+	}
+	if !s.readBody(w, r, &body) {
+		return
+	}
+	if body.Kind == "" {
+		s.refuse(w, r, http.StatusBadRequest, "A public link is either “view” or “upload-only”.")
+		return
+	}
+	kind, ok := s.linkKindOf(w, r, body.Kind)
+	if !ok {
+		return
+	}
+	l, err := s.drive.SetLinkKind(r.Context(), *c.place, *c.item, kind)
+	s.changedLink(w, r, c, l, err)
+}
+
+// resetLink lets an upload-only link that has taken in all it may (drive.LinkLimit) take files again: what it has taken
+// in counts from 0 again. Its address, and the files it took in, stay as they are.
+//
+//	POST /api/places/{place}/items/{item}/link/reset
+//	200 {"link": {…}}
+//	409 {"error"}    it has no link
+func (s *Server) resetLink(w http.ResponseWriter, r *http.Request, c call) {
+	l, err := s.drive.ResetLink(r.Context(), *c.place, *c.item)
+	s.changedLink(w, r, c, l, err)
+}
+
+// changedLink answers a change to the link on c.item.
+func (s *Server) changedLink(w http.ResponseWriter, r *http.Request, c call, l index.Link, err error) {
+	switch {
+	case errors.Is(err, index.ErrLinkKind):
+		s.refuse(w, r, http.StatusBadRequest, fileLinkKind)
+	case errors.Is(err, index.ErrNoLink):
+		s.refuse(w, r, http.StatusConflict, "This has no public link. Make one first.")
+	case errors.Is(err, index.ErrNoItem), errors.Is(err, drive.ErrPlaceGone):
+		s.refuse(w, r, http.StatusNotFound, notHere)
+	case err != nil:
+		s.fail(w, r, err)
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"link": s.linkJSONOf(l, c.access, "")})
+	}
 }
 
 // removeLink removes the public link on a file or folder, if it has one: its address is dead for good, and answers as

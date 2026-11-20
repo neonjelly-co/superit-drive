@@ -86,6 +86,37 @@ func (d *Drive) LinkByToken(ctx context.Context, token string) (index.Link, erro
 	return d.withUses(l), nil
 }
 
+// LinkByID finds a public link by its id, wherever its item is (index.ErrNoLink when there is none).
+func (d *Drive) LinkByID(ctx context.Context, id int64) (index.Link, error) {
+	l, err := d.index.LinkByID(ctx, id)
+	return d.withUses(l), err
+}
+
+// SetLinkKind changes what the public link on a live item of the place lets visitors do, keeping its address
+// (index.ErrNoLink when it has none, index.ErrLinkKind for an upload-only link on a file). It takes the place's lock,
+// as MakeLink does.
+func (d *Drive) SetLinkKind(ctx context.Context, p index.Place, it index.Item, kind string) (index.Link, error) {
+	leave, err := d.inPlace(ctx, p)
+	if err != nil {
+		return index.Link{}, err
+	}
+	defer leave()
+	l, err := d.index.SetLinkKind(ctx, p.ID, it.ID, kind)
+	return d.withUses(l), err
+}
+
+// ResetLink starts the count of what the public link on a live item of the place has taken in again from 0, so that an
+// upload-only link that took in all it may takes files again (index.ErrNoLink when it has none).
+func (d *Drive) ResetLink(ctx context.Context, p index.Place, it index.Item) (index.Link, error) {
+	leave, err := d.inPlace(ctx, p)
+	if err != nil {
+		return index.Link{}, err
+	}
+	defer leave()
+	l, err := d.index.ResetLink(ctx, p.ID, it.ID)
+	return d.withUses(l), err
+}
+
 // LinkOn finds the public link on an item, wherever it is (index.ErrNoLink when it has none).
 func (d *Drive) LinkOn(ctx context.Context, it index.Item) (index.Link, error) {
 	l, err := d.index.LinkOn(ctx, it.ID)

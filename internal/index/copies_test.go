@@ -87,6 +87,30 @@ func TestAccessChangesAreCounted(t *testing.T) {
 		must(err)
 	})
 	counts("a link removed", func() { must(x.RemoveLink(ctx, p.ID, file.ID)) })
+	var upload Link
+	counts("an upload-only link made", func() {
+		var err error
+		upload, err = x.MakeLink(ctx, p.ID, folder.ID, bytes.Repeat([]byte{4}, 32), UploadLink, "u1", now, false)
+		must(err)
+	})
+	doesNotCount("files taken in through it", func() { must(x.TakenIn(ctx, upload.ID, 1000)) })
+	doesNotCount("what it took in reset", func() {
+		_, err := x.ResetLink(ctx, p.ID, folder.ID)
+		must(err)
+	})
+	counts("its kind changed to view", func() {
+		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink)
+		must(err)
+	})
+	doesNotCount("its kind set to what it is", func() {
+		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink)
+		must(err)
+	})
+	counts("its kind changed back to upload-only", func() {
+		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, UploadLink)
+		must(err)
+	})
+	counts("it removed", func() { must(x.RemoveLink(ctx, p.ID, folder.ID)) })
 	var guest Guest
 	counts("a guest invited", func() {
 		var err error
@@ -343,19 +367,47 @@ func TestOnlyACopyTheDriveMadePasses(t *testing.T) {
 	}
 }
 
-// A copy made by an older Drive passes, and opens as an index brought up to date.
+// olderCopy is an index as the migrations up to upTo left it, with what statements put into it, in a file of its own:
+// a copy made by an older Drive.
+func olderCopy(t *testing.T, upTo int, statements ...string) string {
+	t.Helper()
+	ctx := context.Background()
+	file := filepath.Join(t.TempDir(), "older.sqlite")
+	db, err := sql.Open("sqlite", "file:"+file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateConn(ctx, conn, upTo); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range statements {
+		if _, err := conn.ExecContext(ctx, s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+// A copy made by an older Drive passes, and opens as an index brought up to date: as migration 0010 left it (before
+// access changes were counted, and before upload-only links), with a public link made then and one removed since.
 func TestAnOlderCopyIsBroughtUpToDate(t *testing.T) {
 	ctx := context.Background()
-	x := open(t)
-	p := place(t, x, "u1")
-	put(t, x, p, 0, "a.txt", false, 1)
-	file, _ := writeCopy(t, x)
-	// As migration 0010 left it: without what 0011 makes.
-	undo := []string{"DROP TABLE access_changes", "PRAGMA user_version = 10"}
-	for _, name := range triggersOf(t, file, "access_changes_%") {
-		undo = append(undo, "DROP TRIGGER "+name)
-	}
-	alter(t, file, undo...)
+	file := olderCopy(t, 10,
+		"INSERT INTO places (id, kind, owner, folder, created_at) VALUES (1, 'my-files', 'u1', 'My files/u1', 0)",
+		"INSERT INTO items (id, place_id, name, is_folder, size, changed_at) VALUES (1, 1, 'a.txt', 0, 1, 0)",
+		"INSERT INTO items (id, place_id, name, is_folder, size, changed_at) VALUES (2, 1, 'Clients', 1, 0, 0)",
+		"INSERT INTO items (id, place_id, name, is_folder, size, changed_at) VALUES (3, 1, 'Bakery', 1, 0, 0)",
+		"INSERT INTO links (item_id, token_hash, kind, made_at, made_by, uses) VALUES (2, randomblob(32), 'view', 1, 'u1', 4)",
+		"INSERT INTO links (item_id, token_hash, kind, made_at, made_by) VALUES (3, randomblob(32), 'view', 2, 'u1')",
+		"DELETE FROM links WHERE item_id = 3")
 	info, _, err := CheckCopy(ctx, file, anywhere)
 	if err != nil || info.Version != 10 {
 		t.Fatalf("an older copy: %+v %v", info, err)
@@ -371,5 +423,20 @@ func TestAnOlderCopyIsBroughtUpToDate(t *testing.T) {
 	defer y.Close()
 	if n, err := y.AccessChanges(ctx); err != nil || n != 0 {
 		t.Fatalf("the older copy brought up to date counts %d access changes (%v)", n, err)
+	}
+	if items, _ := y.Children(ctx, 1, 0); len(items) != 3 {
+		t.Fatalf("the older copy, brought up to date, holds %d items", len(items))
+	}
+	// Its link is as it was, a view link that has taken in nothing; a new one never gets the id of the one removed.
+	l, err := y.LinkOn(ctx, 2)
+	if err != nil || l.ID != 1 || l.Kind != ViewLink || l.Uses != 4 || l.TakenIn != 0 || !l.Folder {
+		t.Fatalf("the link brought up to date: %+v %v", l, err)
+	}
+	fresh, err := y.MakeLink(ctx, 1, 3, bytes.Repeat([]byte{9}, 32), UploadLink, "u1", time.Now(), false)
+	if err != nil || fresh.ID != 3 || fresh.Kind != UploadLink {
+		t.Fatalf("a link made after the upgrade: %+v %v, want id 3", fresh, err)
+	}
+	if n, _ := y.AccessChanges(ctx); n != 1 {
+		t.Fatalf("a link made after the upgrade counts %d access changes", n)
 	}
 }

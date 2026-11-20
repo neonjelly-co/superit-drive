@@ -127,13 +127,19 @@ export type Guest = { id: number; address: string };
 
 /** One line of "who can see this", for an item or a shared folder as a whole. */
 export type Access = {
-	/** Everyone in the project; `link`, anyone with the public link (as viewer); otherwise one member. */
+	/**
+	 * Everyone in the project; `link`, anyone with the public link: through a view link (`linkKind` "view") as viewer;
+	 * through an upload-only link on the item itself (`linkKind` "upload-only"), without a role: they send files in and
+	 * see nothing. Otherwise one member.
+	 */
 	everyone?: boolean;
 	link?: boolean;
+	linkKind?: LinkKind;
 	userId?: string;
 	email?: string;
 	displayName?: string;
-	role: RoleAt;
+	/** Every line has one but an upload-only link's: its visitors send files in, and see nothing. */
+	role?: RoleAt;
 	/** Whose My files it is, or a project admin (a manager of every shared folder): neither given nor taken away. */
 	owner?: boolean;
 	admin?: boolean;
@@ -176,8 +182,11 @@ export type Item = {
 	seenBy?: SeenBy;
 	/** True for a file of a kind that opens in the browser (an ordinary image, a PDF, plain text, a video, a sound). */
 	opens?: boolean;
-	/** For members: which guest added it (uploaded or made), by their address then. */
-	addedBy?: { guest: string };
+	/**
+	 * For members: who outside the project added it: a guest (uploaded or made), by their address then; or a visitor who
+	 * sent it through an upload-only link (`link`).
+	 */
+	addedBy?: { guest?: string; link?: boolean };
 };
 
 /** A folder in a path, such as the breadcrumb. */
@@ -260,12 +269,23 @@ export type Found = Item & {
 export type MovePreview = { becomesProjects: boolean; access: Access[]; seenBy: SeenBy; outside: Outside };
 
 /**
+ * What a public link lets its visitors do: open and download what it is on ("view"), or, on a folder only, send files
+ * into it and see nothing ("upload-only").
+ */
+export type LinkKind = "view" | "upload-only";
+
+/**
  * The public link on a file or folder, as whoever may share it sees it. `address` is only in the answer that made it:
  * the Drive keeps a fingerprint of it, not the address, and cannot show it again. `works` is false while it lets nobody
- * in (whoever made it can no longer share the item, or sharing outside the project is off there).
+ * in (whoever made it can no longer share the item, or sharing outside the project is off there). An upload-only link
+ * also says how many bytes it has taken in since it was made or reset (`takenIn`), the most it takes (`limit`), and
+ * whether it has (`full`): then it takes no file until it is reset.
  */
 export type PublicLink = {
-	kind: "view";
+	kind: LinkKind;
+	takenIn?: number;
+	limit?: number;
+	full?: boolean;
 	made: string;
 	madeBy?: Person;
 	/** Whoever made it has left the project. */
@@ -291,7 +311,9 @@ export type OutsideShare = {
 	sharedBy?: Person;
 	former?: boolean;
 	guest?: Guest;
-	role: Role;
+	/** What it lets them do; an upload-only link has none (`linkKind`): its visitors send files in and see nothing. */
+	role?: Role;
+	linkKind?: LinkKind;
 	since: string;
 	until?: string;
 	uses: number;
@@ -552,8 +574,14 @@ export const api = {
 	 * Makes a public link on an item; with replace, in place of the one it has, whose address then stops working. The
 	 * answer holds the address, once.
 	 */
-	makeLink: (placeId: number, itemId: number, replace: boolean) =>
-		call<{ link: PublicLink }>("POST", `${base}/places/${placeId}/items/${itemId}/link`, { replace }).then((r) => r.link),
+	makeLink: (placeId: number, itemId: number, replace: boolean, kind: LinkKind = "view") =>
+		call<{ link: PublicLink }>("POST", `${base}/places/${placeId}/items/${itemId}/link`, { replace, kind }).then((r) => r.link),
+	/** Changes what a folder's link lets visitors do, at the same address. */
+	setLinkKind: (placeId: number, itemId: number, kind: LinkKind) =>
+		call<{ link: PublicLink }>("PUT", `${base}/places/${placeId}/items/${itemId}/link`, { kind }).then((r) => r.link),
+	/** Lets an upload-only link take files again: what it has taken in counts from 0. */
+	resetLink: (placeId: number, itemId: number) =>
+		call<{ link: PublicLink }>("POST", `${base}/places/${placeId}/items/${itemId}/link/reset`).then((r) => r.link),
 	/** Removes the public link on an item: its address stops working for good. */
 	removeLink: (placeId: number, itemId: number) => call<null>("DELETE", `${base}/places/${placeId}/items/${itemId}/link`),
 	usage: () => call<Usage>("GET", `${base}/usage`),
