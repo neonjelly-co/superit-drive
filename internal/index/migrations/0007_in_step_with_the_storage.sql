@@ -17,8 +17,10 @@ ALTER TABLE items ADD COLUMN missing_at INTEGER;
 DROP INDEX items_unique_name;
 CREATE UNIQUE INDEX items_unique_name ON items (place_id, IFNULL(parent_id, 0), name) WHERE trashed_at IS NULL AND missing_at IS NULL;
 CREATE INDEX items_missing ON items (place_id, IFNULL(parent_id, 0), name) WHERE missing_at IS NOT NULL;
--- The walk finds a place's next folder by id.
+-- The walk finds a place's next folder by id; a folder's list is read a page at a time, in its order.
 CREATE INDEX items_folders_by_place ON items (place_id, id) WHERE is_folder = 1;
+CREATE INDEX items_in_list_order ON items (place_id, IFNULL(parent_id, 0), is_folder DESC, name)
+    WHERE trashed_at IS NULL AND missing_at IS NULL;
 
 CREATE TABLE drive_state (
     key   TEXT PRIMARY KEY,

@@ -5,6 +5,7 @@
 package test
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -24,11 +25,35 @@ var (
 // notHere is the one answer for a place or an item that is not there, or that the person has no access to.
 const notHere = "This is not in the Drive, or you have no access to it."
 
-// nextSecond waits until the clock is in the next second. The storage keeps the time a file or folder last changed to
-// the second, and the Drive takes an item that went from the storage and came back exactly as it was (the same name,
-// kind, size and time) for the same item: something made anew a second later, as it would be outside a test, is not.
-func nextSecond() {
-	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second + 10*time.Millisecond)))
+// nextSecond waits until the storage's own clock, and this computer's, are past the second they were in. The storage
+// keeps the time a file or folder last changed to the second, and the Drive takes an item that went from the storage and
+// came back exactly as it was (the same name, kind, size and time) for the same item: something made anew a second
+// later, as it would be outside a test, is not. The storage's clock (in its container) can differ from this computer's.
+func nextSecond(t *testing.T, d *harness.Drive) {
+	t.Helper()
+	here := time.Now().Truncate(time.Second)
+	var first time.Time
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		probe := fmt.Sprintf("clock probe %d", time.Now().UnixNano())
+		d.Storage.Put(t, probe, "")
+		var at time.Time
+		entries, _ := d.Storage.List(t, "")
+		for _, e := range entries {
+			if e.Name == probe {
+				at = e.Modified
+			}
+		}
+		d.Storage.Delete(t, probe, false)
+		if first.IsZero() {
+			first = at
+		}
+		if at.After(first) && at.After(here) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the storage's clock did not move past %s", first)
+		}
+	}
 }
 
 // What the API answers.

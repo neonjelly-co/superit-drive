@@ -164,7 +164,7 @@ func TestAnItemGoneFromTheStorageIsHiddenThenDroppedWithItsSharing(t *testing.T)
 	d.Restart(t, map[string]string{harness.TestClockShift: "11m"})
 	b, o, v = d.As(bence), d.As(dora), visitor(d)
 	list(t, b, x.place, 0)
-	nextSecond()
+	nextSecond(t, d)
 	d.Storage.Put(t, top+"/Notes.txt", "a new file of that name")
 	again := named(t, list(t, b, x.place, 0).Items, "Notes.txt")
 	if again.ID == x.notes.ID {
@@ -204,7 +204,7 @@ func TestAFileReplacedOnTheStorage(t *testing.T) {
 
 	d.Storage.Delete(t, rekasTop+"/b.txt", false)
 	list(t, c, placeID, 0)
-	nextSecond()
+	nextSecond(t, d)
 	d.Storage.Put(t, rekasTop+"/b.txt", "first") // even with the same content: it was made anew
 	if got := named(t, list(t, c, placeID, 0).Items, "b.txt"); got.ID == b.ID {
 		t.Fatal("a file that took the name of one the Drive saw gone took over its id")

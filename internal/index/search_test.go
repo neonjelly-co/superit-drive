@@ -163,3 +163,28 @@ func TestSearchLooksOnlyInItsScope(t *testing.T) {
 		t.Fatalf("a long search: %q", got)
 	}
 }
+
+// A page of a folder's list is read through the index in list order: never the whole folder, never sorted.
+func TestAPageOfAListIsReadInOrder(t *testing.T) {
+	x := open(t)
+	for _, first := range []bool{true, false} {
+		rows, err := x.db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+childrenSQL, 1, 2, first, false, false, "a", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan []string
+		for rows.Next() {
+			var id, parent, unused int
+			var step string
+			if err := rows.Scan(&id, &parent, &unused, &step); err != nil {
+				t.Fatal(err)
+			}
+			plan = append(plan, step)
+		}
+		rows.Close()
+		joined := strings.Join(plan, "\n")
+		if strings.Contains(joined, "TEMP B-TREE") || !strings.Contains(joined, "items_in_list_order") {
+			t.Errorf("a page of a list (from the start: %v) is not read through its index in order:\n%s", first, joined)
+		}
+	}
+}

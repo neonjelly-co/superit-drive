@@ -603,7 +603,7 @@ func TestALinkFollowsItsItem(t *testing.T) {
 	d.Storage.Delete(t, "Shared folders/Team/Bakery Ltd", true)
 	list(t, b, team.ID, 0)
 	sameAsNoLink(t, "the link once Bakery is gone", v.Get(t, page), missing)
-	nextSecond()
+	nextSecond(t, d)
 	d.Storage.Put(t, "Shared folders/Team/Bakery Ltd/2026/Offer.pdf", "back on the storage")
 	if l := list(t, b, team.ID, 0); named(t, l.Items, "Bakery Ltd").ID == x.bakery.ID {
 		t.Fatal("a folder made anew on the storage took over the old one's id")

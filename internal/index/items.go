@@ -93,30 +93,28 @@ func (x *Index) Children(ctx context.Context, placeID, folderID int64) ([]Item, 
 // ChildrenAfter is Children, at most limit of them, from the one after the item after (nil: from the first), in the same
 // order; more says there are others. A folder's list is read a page at a time this way, each page a query of its own.
 func (x *Index) ChildrenAfter(ctx context.Context, placeID, folderID int64, after *Item, limit int) (items []Item, more bool, err error) {
-	if after == nil {
-		return x.FirstChildren(ctx, placeID, folderID, limit)
+	from := Item{Folder: true}
+	if after != nil {
+		from = *after
 	}
-	items, err = scanItems(x.db.QueryContext(ctx, `
-		SELECT `+itemColumns+` FROM items
-		WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL AND missing_at IS NULL
-		AND (is_folder < ? OR (is_folder = ? AND name > ?))
-		ORDER BY is_folder DESC, name LIMIT ?`, placeID, folderID, after.Folder, after.Folder, after.Name, limit+1))
+	items, err = scanItems(x.db.QueryContext(ctx, childrenSQL, placeID, folderID, after == nil, from.Folder, from.Folder, from.Name, limit+1))
 	if len(items) > limit {
 		return items[:limit], true, err
 	}
 	return items, false, err
 }
 
+// childrenSQL reads a page of a folder's list in list order, which an index of its own holds (items_in_list_order), so
+// a page costs no more than its own items: a folder of thousands is never read whole, nor sorted, for one page.
+const childrenSQL = `
+	SELECT ` + itemColumns + ` FROM items
+	WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL AND missing_at IS NULL
+	AND (? OR is_folder < ? OR (is_folder = ? AND name > ?))
+	ORDER BY is_folder DESC, name LIMIT ?`
+
 // FirstChildren is Children, at most limit of them, in the same order; more says there are others.
 func (x *Index) FirstChildren(ctx context.Context, placeID, folderID int64, limit int) (items []Item, more bool, err error) {
-	items, err = scanItems(x.db.QueryContext(ctx, `
-		SELECT `+itemColumns+` FROM items
-		WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL AND missing_at IS NULL
-		ORDER BY is_folder DESC, name LIMIT ?`, placeID, folderID, limit+1))
-	if len(items) > limit {
-		return items[:limit], true, err
-	}
-	return items, false, err
+	return x.ChildrenAfter(ctx, placeID, folderID, nil, limit)
 }
 
 // Item finds the item with id in the place, at any depth, with the folders above it in Above. It returns ErrNoItem for
