@@ -124,7 +124,7 @@ func (d *Drive) UsedLink(l index.Link) {
 	}
 	u := d.uses.pending[l.ID]
 	u.Count++
-	u.Last = d.now().UTC()
+	u.Last = d.now().UTC().Truncate(time.Millisecond) // as the index keeps it
 	d.uses.pending[l.ID] = u
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/storage"
+	"github.com/neonjelly-co/superit-drive/internal/transfers"
 )
 
 // Transfers: the routes that move a file's bytes. Each holds one of the transfer slots while its bytes move (package
@@ -40,9 +41,14 @@ const (
 	restartMessage = "The Drive storage cannot continue an upload where it stopped, so this upload starts again from the beginning."
 )
 
-// waitTurn waits in line for a transfer slot. ok is false when the person was answered, or has left.
-func (s *Server) waitTurn(w http.ResponseWriter, r *http.Request) (release func(), ok bool) {
-	release, err := s.slots.Wait(r.Context(), turnWait)
+// waitTurn waits in line for a transfer slot: a visitor in the visitors' own line, for one of the few slots they may
+// hold. ok is false when the person was answered, or has left.
+func (s *Server) waitTurn(w http.ResponseWriter, r *http.Request, c call) (release func(), ok bool) {
+	class := transfers.Members
+	if c.link != nil {
+		class = transfers.Outsiders
+	}
+	release, err := s.slots.Wait(r.Context(), class, turnWait)
 	if err == nil {
 		return release, true
 	}
@@ -55,7 +61,7 @@ func (s *Server) waitTurn(w http.ResponseWriter, r *http.Request) (release func(
 
 // tryTurn takes a transfer slot if it is the upload's turn (key keeps its place in line), or answers 503.
 func (s *Server) tryTurn(w http.ResponseWriter, key string) (release func(), ok bool) {
-	release, ok = s.slots.Try(key)
+	release, ok = s.slots.Try(transfers.Members, key)
 	if !ok {
 		w.Header().Set("Retry-After", busyRetry)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": busyMessage, "busy": true})
@@ -147,7 +153,7 @@ func (s *Server) open(w http.ResponseWriter, r *http.Request, c call) {
 // sendFile sends the file c.item, to be shown in the browser when inline is true and its kind opens there, and as an
 // attachment otherwise. It waits its turn for a transfer slot, as every download does.
 func (s *Server) sendFile(w http.ResponseWriter, r *http.Request, c call, inline bool) {
-	release, ok := s.waitTurn(w, r)
+	release, ok := s.waitTurn(w, r, c)
 	if !ok {
 		return
 	}
@@ -199,6 +205,9 @@ func (s *Server) sendFile(w http.ResponseWriter, r *http.Request, c call, inline
 	w.WriteHeader(status)
 	if r.Method == http.MethodHead {
 		return
+	}
+	if !f.Partial || f.First == 0 {
+		s.usedLink(r, c) // not a part after its start: a video seeking, a download resuming
 	}
 	out, done := sending(w)
 	defer done()
@@ -303,7 +312,7 @@ func (s *Server) zip(w http.ResponseWriter, r *http.Request, c call) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	release, ok := s.waitTurn(w, r)
+	release, ok := s.waitTurn(w, r, c)
 	if !ok {
 		return
 	}
@@ -316,6 +325,7 @@ func (s *Server) zip(w http.ResponseWriter, r *http.Request, c call) {
 		headers()
 		w.WriteHeader(http.StatusOK)
 		started = true
+		s.usedLink(r, c)
 		return out
 	})
 	switch {

@@ -1,14 +1,16 @@
-// Package server is the Drive's HTTP side: the JSON API the interface calls and the interface's own files.
+// Package server is the Drive's HTTP side: the JSON API the interface calls, the interface's own files, and the pages
+// visitors with a public link see under the public prefix.
 //
 // Every route is listed in routes.go and registered in Handler, and nowhere else. Each request passes the same steps
-// in guard before its handler runs: who is asking (identify), whether a change came from the Drive's own pages
-// (fromOwnPage), which place it concerns (if any), which item in that place or in its trash, or which of the person's
-// own uploads in progress into it (if any), the access given on the place and on the way down to the item
-// (accessAt), and whether they may (access.Decide). A handler only ever sees a request that passed them all. A test
-// fails if anything outside this file registers a handler.
+// in guard before its handler runs: who is asking (under the public prefix always a visitor, through the link its
+// address names; anywhere else a member, identify), whether it may change anything (only from the Drive's own pages,
+// fromOwnPage; never under the public prefix), which place it concerns (if any), which item in that place or in its
+// trash, or which of the person's own uploads in progress into it (if any), the access given on the place and on the
+// way down to the item (accessAt), and whether they may (access.Decide). A handler only ever sees a request that
+// passed them all. A test fails if anything outside this file registers a handler.
 //
 // transfers.go has the routes that move a file's bytes (downloads, zips, uploads), which take turns for the transfer
-// slots (package transfers).
+// slots (package transfers); visitors.go the public prefix, links.go making and removing public links.
 package server
 
 import (
@@ -20,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -61,14 +64,18 @@ type Server struct {
 	address  *url.URL // DRIVE_ADDRESS, for the links in mail
 	ui       fs.FS
 	log      *slog.Logger
-	// slots lets at most transfers.Slots transfers be in flight.
+	// slots lets at most transfers.Slots transfers be in flight, of which visitors hold at most transfers.OutsiderSlots.
 	slots *transfers.Gate
+	// visitors bounds how many visitors' requests are worked on at once (visitors.go).
+	visitors *admission
 }
 
 // New makes a server.
 func New(c Config) *Server {
 	s := &Server{project: c.ProjectName, secret: c.HeaderSecret, members: c.Members, drive: c.Drive, capacity: c.Capacity,
-		mail: c.Mail, address: c.Address, ui: c.Interface, log: c.Log, slots: transfers.NewGate(transfers.Slots)}
+		mail: c.Mail, address: c.Address, ui: c.Interface, log: c.Log,
+		slots:    transfers.NewGate(transfers.Slots, transfers.OutsiderSlots),
+		visitors: newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait)}
 	if c.Address != nil {
 		s.origin = originOf(c.Address)
 	}
@@ -94,13 +101,40 @@ type route struct {
 	// place, by the person asking: the request is about the folder it goes into, as an upload into it is. Another
 	// person's upload is not found.
 	upload string
-	serve  func(http.ResponseWriter, *http.Request, call)
+	// link is, for a route under the public prefix (and only there), the name of the path value holding the token of
+	// the public link the visitor came with. The place is the one the link's item is in; item, when given, names an item
+	// in it, and the request is about the link's item itself otherwise. Every route under the public prefix has one.
+	link  string
+	serve func(http.ResponseWriter, *http.Request, call)
+}
+
+// PublicPrefix is where everything a visitor reaches lives: the one part of the Drive's address that the reverse proxy
+// opens without signing in. A request under it is a visitor's, always, whatever it says about who sent it; no other
+// request ever is.
+const PublicPrefix = "/s/"
+
+// underPublicPrefix says whether a request's path is under the public prefix, as routes.go and the mux see it.
+func underPublicPrefix(path string) bool {
+	return strings.HasPrefix(path, PublicPrefix) || path == "/s"
+}
+
+// patternUnderPublicPrefix says whether a route's pattern ("GET /s/{token}", or a path alone) is under the public
+// prefix.
+func patternUnderPublicPrefix(pattern string) bool {
+	if _, path, ok := strings.Cut(pattern, " "); ok {
+		pattern = path
+	}
+	return underPublicPrefix(pattern)
 }
 
 // call is what a handler gets: who is asking, the place the request concerns (nil for no place), the item in it or in
 // its trash (nil for none), and where the request is as the access package saw it. All have already passed guard.
 type call struct {
-	member  members.Member
+	// member is the member asking; for a visitor it is empty, and link is the public link they came with.
+	member members.Member
+	link   *index.Link
+	// person is who is asking, as the access package decided on them.
+	person  access.Person
 	place   *index.Place
 	access  *access.Place
 	item    *index.Item
@@ -116,7 +150,17 @@ type call struct {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	for _, rt := range s.routes() {
-		if (rt.item != "" || rt.trashed != "" || rt.upload != "" || rt.inTrash) && rt.place == "" {
+		if patternUnderPublicPrefix(rt.pattern) != (rt.link != "") {
+			panic("server: route " + rt.pattern + ": every route under the public prefix, and no other, is a visitor's, with a link")
+		}
+		if rt.link != "" && (rt.place != "" || rt.trashed != "" || rt.upload != "" || rt.inTrash || !strings.HasPrefix(rt.pattern, "GET ") ||
+			!slices.Contains(access.ThroughALink, rt.action)) {
+			panic("server: route " + rt.pattern + " is a visitor's: it only reads (GET), through its link, with an action through a link")
+		}
+		if rt.link == "" && slices.Contains(access.ThroughALink, rt.action) {
+			panic("server: route " + rt.pattern + " is a member's, with an action through a link")
+		}
+		if (rt.item != "" || rt.trashed != "" || rt.upload != "" || rt.inTrash) && rt.place == "" && rt.link == "" {
 			panic("server: route " + rt.pattern + " names an item, an upload or a place in the trash, but no place")
 		}
 		if (rt.item != "" && rt.trashed != "") || (rt.upload != "" && (rt.item != "" || rt.trashed != "")) {
@@ -127,15 +171,22 @@ func (s *Server) Handler() http.Handler {
 		}
 		mux.Handle(rt.pattern, s.guard(rt))
 	}
-	// Anything else is still identified first, so an outsider learns nothing from a wrong address.
+	// Anything else is still identified first, so an outsider learns nothing from a wrong address; under the public
+	// prefix, it is answered as a link that does not exist.
 	mux.Handle("/", s.guard(route{pattern: "/", action: access.Enter, serve: s.notFound}))
+	mux.Handle(PublicPrefix, s.guard(route{pattern: PublicPrefix, link: "token", action: access.SeeThroughLink}))
 	return securityHeaders(mux)
 }
 
-// guard is the gate every route passes: identify the person, refuse a change from anywhere but the Drive's own pages,
+// guard is the gate every route passes: identify the person (under the public prefix, always a visitor through the
+// link the address names), refuse a change from anywhere but the Drive's own pages (and any under the public prefix),
 // find the place and the item in it, gather the access given there, ask access.Decide, then serve.
 func (s *Server) guard(rt route) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rt.link != "" {
+			s.guardVisitor(w, r, rt)
+			return
+		}
 		member, refused := s.identify(r)
 		if refused != nil {
 			s.refuse(w, r, refused.status, refused.message)
@@ -148,11 +199,11 @@ func (s *Server) guard(rt route) http.Handler {
 			s.refuse(w, r, http.StatusForbidden, refusedOrigin)
 			return
 		}
-		c := call{member: member}
+		c := call{member: member, person: personOf(member)}
 		if rt.place != "" && !s.findWhere(w, r, rt, &c) {
 			return
 		}
-		if !access.Decide(personOf(member), rt.action, c.access) {
+		if !access.Decide(c.person, rt.action, c.access) {
 			// The same answer as for a place or an item that does not exist.
 			s.refuse(w, r, http.StatusNotFound, notHere)
 			return
@@ -371,8 +422,13 @@ func personOf(m members.Member) access.Person {
 	return access.Person{UserID: m.UserID, Role: m.Role}
 }
 
-// refuse answers with an error the person can read: JSON for the API, plain text otherwise.
+// refuse answers with an error the person can read: JSON for the API, a page under the public prefix (where every
+// "not here" is the one answer for a link that does not work), plain text otherwise.
 func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, message string) {
+	if underPublicPrefix(r.URL.Path) {
+		s.visitorRefusal(w, status, message)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		writeJSON(w, status, map[string]string{"error": message})
 		return
@@ -402,7 +458,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // securityHeaders adds the headers every answer carries: no framing, no guessing of content types, no third-party
 // anything, and no other site loading a file's bytes into its own page (an image or script tag sends the member's
-// cookie along).
+// cookie along). Under the public prefix, where the address is the secret, also: no Referer sent from it, no copy kept
+// by the browser or anything on the way, not listed by search engines, and a policy under which nothing at all runs or
+// loads but the page's own style (visitors.go).
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -410,6 +468,12 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cross-Origin-Resource-Policy", "same-origin")
+		if underPublicPrefix(r.URL.Path) {
+			h.Set("Content-Security-Policy", visitorPolicy)
+			h.Set("Referrer-Policy", "no-referrer")
+			h.Set("X-Robots-Tag", "noindex, nofollow")
+			h.Set("Cache-Control", "no-store")
+		}
 		next.ServeHTTP(w, r)
 	})
 }

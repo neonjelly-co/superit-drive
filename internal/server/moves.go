@@ -182,13 +182,19 @@ func (s *Server) movePreview(w http.ResponseWriter, r *http.Request, c call) {
 			there = append(there, g)
 		}
 	}
+	// So does the public link on it, if it has one, and those on the folders on the way down there reach it.
+	links, err := s.drive.LinksOn(r.Context(), append(idsOf(path), c.item.ID))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	moved := *c.item
 	moved.Above = path
 	path = append(path, moved)
 	who := personOf(c.member)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"becomesProjects": c.place.Kind == index.MyFiles && p.Kind == index.SharedFolder,
-		"access":          s.accessLines(who, p, path, there),
-		"seenBy":          seenBy(s.members.Current(), s.accessPlace(p, idsOf(path), there)),
+		"access":          s.accessLines(who, p, path, there, links),
+		"seenBy":          seenBy(s.members.Current(), s.accessPlace(p, idsOf(path), there).WithLinks(s.accessLinks(links)...)),
 	})
 }

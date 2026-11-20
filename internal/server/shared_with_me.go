@@ -62,8 +62,13 @@ func (s *Server) sharedWithMe(w http.ResponseWriter, r *http.Request, c call) {
 	out := []sharedJSON{}
 	for _, sh := range shares {
 		p, it, grants, where := &sh.place, sh.item, sh.grants, sh.where
+		withLinks, err := s.withLinksOn(r.Context(), where, where.Path)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
 		e := sharedJSON{
-			listedJSON: listedJSON{itemJSON: itemOf(it), Can: can(who, where), SeenBy: seenBy(list, where)},
+			listedJSON: listedJSON{itemJSON: itemOf(it), Can: can(who, where), SeenBy: seenBy(list, withLinks)},
 			Place:      p.ID, PlaceKind: string(p.Kind), Role: access.RoleAt(who, where),
 		}
 		if p.Kind == index.MyFiles {
