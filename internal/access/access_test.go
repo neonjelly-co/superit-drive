@@ -8,15 +8,34 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/members"
 )
 
-// Everyone the table tries. "member" is Réka, a member without the admin role; "admin" holds it. The other two are not
+// Everyone the table tries. "member" is Réka, a member without the admin role; "admin" holds it. The next two are not
 // members: someone the member list does not hold (as a former member, or a stranger with a forged id, would be) and a
-// request without a user id.
+// request without a user id. The rest are visitors, who came with a public link: on Clients or on Offer.pdf, made by
+// Bence, by Réka, or by someone who has left the project since; a link of a kind nobody knows, one on no item; and Réka
+// herself, signed in, opening her own link, who is a visitor there like anyone else.
 var people = map[string]Person{
 	"member":                         {UserID: "u-reka", Role: members.RoleMember},
 	"admin":                          {UserID: "u-admin", Role: members.RoleAdmin},
 	"someone not in the member list": {UserID: "u-stranger"},
 	"no user id":                     {},
+
+	"a visitor, link on Clients by Bence":                   {Link: link(onClients, ViewLink, bence)},
+	"a visitor, link on Clients by Réka":                    {Link: link(onClients, ViewLink, reka)},
+	"a visitor, link on Offer.pdf by Bence":                 {Link: link(onOffer, ViewLink, bence)},
+	"a visitor, link on Clients by someone who left":        {Link: link(onClients, ViewLink, Person{UserID: "u-gone"})},
+	"a visitor, link of an unknown kind on Clients":         {Link: link(onClients, "edit", bence)},
+	"a visitor, link on no item":                            {Link: link(onTop, ViewLink, bence)},
+	"Réka, signed in, with her own link on Clients":         {UserID: "u-reka", Role: members.RoleMember, Link: link(onClients, ViewLink, reka)},
+	"the admin, signed in, with a link on Clients by Bence": {UserID: "u-admin", Role: members.RoleAdmin, Link: link(onClients, ViewLink, bence)},
 }
+
+// The makers of the links the visitors came with, as the member list has them.
+var (
+	reka  = Person{UserID: "u-reka", Role: members.RoleMember}
+	bence = Person{UserID: "u-bence", Role: members.RoleMember}
+)
+
+func link(on int64, kind LinkKind, by Person) *Link { return &Link{Item: on, Kind: kind, By: by} }
 
 // The same tree is in every place the table tries:
 //
@@ -197,11 +216,21 @@ var places = map[string]*Place{
 	"a place of a kind access does not know › Offer.pdf": {Kind: "team-folder", Owner: "u-reka", Path: offer,
 		Grants: grants(to("u-reka", onClients, Editor), toEveryone(onClients, Editor))},
 	"a place of no kind, owned and given all": {Owner: "u-reka", Grants: grants(to("u-reka", onTop, Manager))},
+
+	// Where sharing outside the project is switched off (for the project, or for the shared folder): members work as
+	// before, and may still see and remove a link, but not make one; and no link opens.
+	"Réka's My files › Offer.pdf, no sharing outside": {Kind: MyFiles, Owner: "u-reka", Path: offer, NoSharingOutside: true},
+	"Bence's My files › Offer.pdf, Réka given editor on Clients, no sharing outside": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		NoSharingOutside: true, Grants: grants(to("u-reka", onClients, Editor))},
+	"a shared folder › Offer.pdf, given editor on it as a whole, no sharing outside": {Kind: SharedFolder, Path: offer,
+		NoSharingOutside: true, Grants: grants(to("u-reka", onTop, Editor))},
+	"a shared folder › Clients, no role, no sharing outside": {Kind: SharedFolder, Path: clients, NoSharingOutside: true},
 }
 
 // Every action there is. A test below fails when one is added to the package without being added here.
 var everyAction = []Action{Enter, SeeUsage, MakeSharedFolder, List, Download, Upload, MakeFolder, Rename, Move, MoveOut,
-	MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, ManageAccess, DeleteSharedFolder, RestoreSharedFolder}
+	MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, MakeLink, ManageLink, ManageAccess, DeleteSharedFolder,
+	RestoreSharedFolder, SeeThroughLink, DownloadThroughLink}
 
 // What the spec gives each role, written out here rather than taken from the package.
 var (
@@ -214,9 +243,10 @@ var (
 	managerAtTop = append(slices.Clone(editorAtTop), ManageAccess, DeleteSharedFolder)
 	// At an item, in any place. Owners of a My files and managers of a shared folder are editors of every item in it.
 	viewerAtItem = []Action{List, Download, SeeAccess}
-	// An editor of the item who cannot add to the folder it is in: inside it, and sharing it, but not changing that
-	// folder by renaming it, taking it out, or putting it back.
-	editorAtItem = append(slices.Clone(viewerAtItem), Upload, MakeFolder, Share)
+	// An editor of the item who cannot add to the folder it is in: inside it, and sharing it (with members, and with
+	// anyone through a public link, which they also see and remove), but not changing that folder by renaming it,
+	// taking it out, or putting it back.
+	editorAtItem = append(slices.Clone(viewerAtItem), Upload, MakeFolder, Share, MakeLink, ManageLink)
 	// An editor of the folder it is in, too, who cannot see the place's whole trash and did not delete it.
 	editorInFolder = append(slices.Clone(editorAtItem), Rename, Move, Delete)
 	// And who may restore it: they see the place's whole trash, or deleted it themselves.
@@ -227,7 +257,14 @@ var (
 	sharedEditorAtItem   = append(slices.Clone(editorAtItem), MoveIn)
 	sharedEditorInFolder = append(slices.Clone(editorInFolder), MoveIn)
 	sharedAllAtItem      = append(slices.Clone(allAtItem), MoveIn)
+	// What a visitor may do through a link that counts where they are: see and download, nothing else.
+	throughALink = []Action{SeeThroughLink, DownloadThroughLink}
 )
+
+// without is actions without the ones given.
+func without(actions []Action, not ...Action) []Action {
+	return slices.DeleteFunc(slices.Clone(actions), func(a Action) bool { return slices.Contains(not, a) })
+}
 
 // The table grows with every kind of person, place, role and action: add each new one to the lists above, and every
 // combination is tried. Only the combinations in allowed may pass; everything else must be refused.
@@ -300,9 +337,64 @@ func TestDecide(t *testing.T) {
 		if place != nil && place.Kind == SharedFolder && !place.Deleted {
 			if len(place.Path) == 0 {
 				allow("admin", name, managerAtTop...)
+			} else if place.NoSharingOutside {
+				allow("admin", name, without(sharedAllAtItem, MakeLink)...)
 			} else {
 				allow("admin", name, sharedAllAtItem...)
 			}
+		}
+	}
+	// Where sharing outside the project is off, nothing changes for members but that no link can be made: whoever may
+	// share an item still sees its link and removes it.
+	allow("member", "Réka's My files › Offer.pdf, no sharing outside", without(ownerAtItem, MakeLink)...)
+	allow("member", "Bence's My files › Offer.pdf, Réka given editor on Clients, no sharing outside", without(editorInFolder, MakeLink)...)
+	allow("member", "a shared folder › Offer.pdf, given editor on it as a whole, no sharing outside", without(sharedAllAtItem, MakeLink)...)
+
+	// Visitors see and download, through a link that counts there, its item and everything inside it, and nothing else:
+	// nothing beside it or above it, and none of what members do, whoever they are. A link on Clients covers Clients,
+	// Bakery, 2026, Offer.pdf and Ledger.xlsx; one on Offer.pdf covers Offer.pdf alone. A link counts in a live place
+	// where sharing outside the project is on: in a shared folder, whoever made it (it is the project's); in a My files
+	// whose owner is in the member list, while its maker may share its item there (Bence in his own My files, Réka in
+	// hers). A link of a kind nobody knows, or on no item, counts nowhere.
+	byBence := []string{"a visitor, link on Clients by Bence", "the admin, signed in, with a link on Clients by Bence"}
+	byReka := []string{"a visitor, link on Clients by Réka", "Réka, signed in, with her own link on Clients"}
+	for name, place := range places {
+		if place == nil || place.Deleted || place.NoSharingOutside {
+			continue
+		}
+		var onClientsBy []string
+		switch {
+		case place.Kind == SharedFolder:
+			onClientsBy = append(append(slices.Clone(byBence), byReka...), "a visitor, link on Clients by someone who left")
+			if slices.Contains(place.Path, onOffer) {
+				allow("a visitor, link on Offer.pdf by Bence", name, throughALink...)
+			}
+		case place.Kind == MyFiles && place.Owner == "u-bence" && !place.OwnerLeft:
+			onClientsBy = byBence
+			if slices.Contains(place.Path, onOffer) {
+				allow("a visitor, link on Offer.pdf by Bence", name, throughALink...)
+			}
+		case place.Kind == MyFiles && place.Owner == "u-reka" && !place.OwnerLeft:
+			onClientsBy = byReka
+		}
+		if slices.Contains(place.Path, onClients) {
+			for _, v := range onClientsBy {
+				allow(v, name, throughALink...)
+			}
+		}
+	}
+	// Réka's links in Bence's My files count where she may share Clients: where she was given editor on it. Not where she
+	// was given less there, or only something below it, or a grant that counts for nothing, or once his My files is held.
+	for _, place := range []string{
+		"Bence's My files › Offer.pdf, Réka given editor on Clients",
+		"Bence's My files › Clients, Réka given editor on Clients",
+		"Bence's My files › Offer.pdf, Réka given editor on Clients and viewer on Offer.pdf",
+		// (Items in the trash are never asked about for visitors: no route through a link finds them.)
+		"Bence's My files › Offer.pdf in the trash, deleted by Réka, Réka given editor on Clients",
+		"Bence's My files › Offer.pdf in the trash, deleted by Bence, Réka given editor on Clients",
+	} {
+		for _, v := range byReka {
+			allow(v, place, throughALink...)
 		}
 	}
 	// A shared folder in the trash can only be restored, as a whole, by its managers and the project admins.
@@ -375,6 +467,8 @@ func TestRoleAt(t *testing.T) {
 		{"a role on an item of a shared folder does not reach its top", member, shared(nil, to("u-reka", onBakery, Editor)), NoRole},
 		{"a place of a kind access does not know", member, &Place{Kind: "team-folder", Grants: grants(to("u-reka", onTop, Manager))}, NoRole},
 		{"no place", member, nil, NoRole},
+		{"a visitor has no role, even with a link on the item", people["a visitor, link on Clients by Bence"], bences(offer), NoRole},
+		{"nor a member who came with a link", people["Réka, signed in, with her own link on Clients"], &Place{Kind: MyFiles, Owner: "u-reka", Path: offer}, NoRole},
 	}
 	for _, c := range cases {
 		if got := RoleAt(c.person, c.place); got != c.want {
@@ -481,7 +575,7 @@ func TestTheRulesHangTogether(t *testing.T) {
 				if may(SeeTrash) && (!Decide(p, Delete, child) || !Decide(p, Restore, child)) {
 					t.Errorf("%s may see the trash but not delete and restore what is in the top folder", where)
 				}
-				for _, a := range []Action{Rename, Move, MoveOut, Delete, Restore, Share} {
+				for _, a := range []Action{Rename, Move, MoveOut, Delete, Restore, Share, MakeLink, ManageLink, SeeThroughLink, DownloadThroughLink} {
 					if may(a) {
 						t.Errorf("%s may %s, which concerns an item, in a top folder", where, a)
 					}
@@ -507,10 +601,31 @@ func TestTheRulesHangTogether(t *testing.T) {
 					}
 				}
 			}
+			// A public link is sharing: whoever may make one may share the item, and whoever may share it sees its link and
+			// removes it, also where sharing outside the project is off.
+			if may(MakeLink) && (!may(Share) || l.NoSharingOutside) {
+				t.Errorf("%s may make a link, but may share it %v, sharing outside off %v", where, may(Share), l.NoSharingOutside)
+			}
+			if may(ManageLink) != (may(Share) && len(l.Path) > 0) {
+				t.Errorf("%s: may see and remove its link %v, may share it %v", where, may(ManageLink), may(Share))
+			}
+			// A visitor does only what a link lets them, and only at its item or inside it; a member never does.
+			for _, a := range everyAction {
+				if !may(a) {
+					continue
+				}
+				if visitor := p.Link != nil; visitor != slices.Contains(ThroughALink, a) {
+					t.Errorf("%s may %s: a visitor %v", where, a, visitor)
+				}
+				if p.Link != nil && !slices.Contains(l.Path, p.Link.Item) {
+					t.Errorf("%s may %s, which is not at or inside the item of their link", where, a)
+				}
+			}
 			// Access on a folder applies to everything inside it: what the person may do at the top folder or at a folder
-			// they may also do at anything in it. (Restoring depends on who deleted each item.)
-			for _, a := range []Action{List, Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeAccess, Share} {
-				if len(l.Path) == 0 && (a == Rename || a == Move || a == MoveOut || a == Delete || a == Share) {
+			// they may also do at anything in it. (Restoring depends on who deleted each item.) So does a link.
+			for _, a := range []Action{List, Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeAccess, Share,
+				MakeLink, ManageLink, SeeThroughLink, DownloadThroughLink} {
+				if len(l.Path) == 0 && (a == Rename || a == Move || a == MoveOut || a == Delete || a == Share || a == MakeLink || a == ManageLink) {
 					continue
 				}
 				if may(a) && !Decide(p, a, child) {
@@ -534,11 +649,11 @@ func TestTheRulesHangTogether(t *testing.T) {
 				}
 			}
 			// Nobody but the owner may do anything in a My files, unless something on the way to the item was shared
-			// with them or with everyone.
-			if l.Kind == MyFiles && l.Owner != p.UserID {
-				shared := false
+			// with them or with everyone, or they came with a link on the way to it.
+			if l.Kind == MyFiles && (l.Owner != p.UserID || p.Link != nil) {
+				shared := p.Link != nil && slices.Contains(l.Path, p.Link.Item)
 				for _, g := range l.Grants {
-					shared = shared || (g.On != 0 && (g.Everyone || g.Member == p.UserID) && slices.Contains(l.Path, g.On))
+					shared = shared || (p.Link == nil && g.On != 0 && (g.Everyone || g.Member == p.UserID) && slices.Contains(l.Path, g.On))
 				}
 				for _, a := range everyAction {
 					if may(a) && !shared {
@@ -631,6 +746,10 @@ func TestFinds(t *testing.T) {
 		"a shared folder › Offer.pdf, everyone given viewer on it as a whole",
 		"a shared folder › Offer.pdf in the trash, deleted by Bence, given editor on it as a whole",
 		"a shared folder › Offer.pdf in the trash, deleted by Réka, given editor on Bakery",
+		// Sharing outside the project switched off changes nothing for members.
+		"Réka's My files › Offer.pdf, no sharing outside",
+		"Bence's My files › Offer.pdf, Réka given editor on Clients, no sharing outside",
+		"a shared folder › Offer.pdf, given editor on it as a whole, no sharing outside",
 	} {
 		found["member "+place] = true
 	}
@@ -728,13 +847,49 @@ func TestBelowAndUp(t *testing.T) {
 }
 
 func TestEveryActionIsInTheTable(t *testing.T) {
-	for _, a := range InAPlace {
+	for _, a := range append(slices.Clone(InAPlace), ThroughALink...) {
 		if !slices.Contains(everyAction, a) {
-			t.Errorf("%q is an action in a place that the table does not try", a)
+			t.Errorf("%q is an action that the table does not try", a)
+		}
+		if slices.Contains(InAPlace, a) && slices.Contains(ThroughALink, a) {
+			t.Errorf("%q is both a member's action and a visitor's", a)
 		}
 	}
-	if len(everyAction) != len(InAPlace)+3 {
-		t.Errorf("the table tries %d actions; the package has %d in a place and 3 in none", len(everyAction), len(InAPlace))
+	if len(everyAction) != len(InAPlace)+3+len(ThroughALink) {
+		t.Errorf("the table tries %d actions; the package has %d in a place, 3 in none and %d through a link", len(everyAction),
+			len(InAPlace), len(ThroughALink))
+	}
+}
+
+// Whether anyone with a link can see an item, for "who can see this": a link on it or on a folder above it that lets
+// its visitors in there now, decided as a visitor with it would be.
+func TestByLink(t *testing.T) {
+	onClients := *link(onClients, ViewLink, bence)
+	cases := []struct {
+		name  string
+		place *Place
+		want  bool
+	}{
+		{"a link on a folder above, in Bence's My files", &Place{Kind: MyFiles, Owner: "u-bence", Path: offer, Links: []Link{onClients}}, true},
+		{"a link on the item itself", &Place{Kind: SharedFolder, Path: offer, Links: []Link{*link(onOffer, ViewLink, bence)}}, true},
+		{"a link on its sibling", &Place{Kind: SharedFolder, Path: ledger, Links: []Link{*link(onOffer, ViewLink, bence)}}, false},
+		{"a link on something inside it", &Place{Kind: SharedFolder, Path: clients, Links: []Link{*link(onOffer, ViewLink, bence)}}, false},
+		{"a link whose maker may no longer share it", &Place{Kind: MyFiles, Owner: "u-bence", Path: offer, Links: []Link{*link(onClients.Item, ViewLink, reka)}}, false},
+		{"a link in a held My files", &Place{Kind: MyFiles, Owner: "u-bence", OwnerLeft: true, Path: offer, Links: []Link{onClients}}, false},
+		{"a link where sharing outside is off", &Place{Kind: SharedFolder, Path: offer, NoSharingOutside: true, Links: []Link{onClients}}, false},
+		{"no link", &Place{Kind: SharedFolder, Path: offer}, false},
+		{"no place", nil, false},
+	}
+	for _, c := range cases {
+		if got := ByLink(c.place); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+	// A listing adds the links on each item to the folder's: the folder's own stay as they were.
+	folder := &Place{Kind: SharedFolder, Path: bakery, Links: []Link{onClients}}
+	child := folder.Below(12, nil).WithLinks(*link(12, ViewLink, bence))
+	if len(child.Links) != 2 || len(folder.Links) != 1 {
+		t.Fatalf("WithLinks: %d links below, %d in the folder", len(child.Links), len(folder.Links))
 	}
 }
 

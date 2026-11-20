@@ -39,26 +39,61 @@
 //   - "Shared with me" lists what someone may open without being able to open the folder it is in (SharedWithMe): the
 //     highest point of a place their access reaches, given on it to them or to everyone in the project.
 //   - A search by name finds every live item someone may open, and nothing else (Finds).
+//   - Whoever may share a file or folder may make a public link to it (MakeLink), see it and remove it (ManageLink):
+//     not a viewer. A link is on a file or folder, never on a place's top folder, one per item.
+//   - A visitor is someone who opened a public link: a person of their own kind, never a member, whatever else is
+//     known about them. They may see the link's item and everything inside it, and download them (SeeThroughLink,
+//     DownloadThroughLink), and nothing else: nothing beside it or above it, and none of what members do. A link
+//     counts while its item is live and its place open (not a held My files, not a shared folder in the trash), and
+//     while sharing outside the project is on there. In a My files a link is its maker's share: it counts only while
+//     they may still share its item. A shared folder's links are the project's, like everything in it, and do not
+//     depend on their maker.
 //
-// Guests and public links add their rules here.
+// Guests add their rules here.
 package access
 
-import "github.com/neonjelly-co/superit-drive/internal/members"
+import (
+	"slices"
 
-// A Person is who is asking. Only members exist so far.
+	"github.com/neonjelly-co/superit-drive/internal/members"
+)
+
+// A Person is who is asking: a member, or a visitor who came with a public link.
 type Person struct {
 	// UserID is the member's stable user id from the member list.
 	UserID string
 	// Role is the member's role on the project, from the member list: admin or member. Anything else means the person
 	// is not in the member list, and may do nothing.
 	Role members.Role
+	// Link is, for a visitor, the public link they came with. Someone with a link is a visitor and nothing else:
+	// whatever UserID and Role say, they are not a member, and may do only what the link lets them (see Link).
+	Link *Link
 }
 
-// isMember says whether the person is in the member list: only members may do anything, and only they are "everyone
-// in the project".
+// isMember says whether the person is in the member list: only members may do anything in the Drive itself, and only
+// they are "everyone in the project". A visitor never is.
 func (p Person) isMember() bool {
-	return p.UserID != "" && (p.Role == members.RoleAdmin || p.Role == members.RoleMember)
+	return p.Link == nil && p.UserID != "" && (p.Role == members.RoleAdmin || p.Role == members.RoleMember)
 }
+
+// A Link is a public link: anyone with its address may see the file or folder it is on, and everything inside it, and
+// download them, without signing in.
+type Link struct {
+	// Item is the id of the item the link is on: the top of what its visitors may see. It is never a place's top
+	// folder.
+	Item int64
+	// Kind is what the link lets its visitors do.
+	Kind LinkKind
+	// By is the member who made it, as the member list has them now (without a role once they have left it). In a My
+	// files the link counts only while they may still share its item there.
+	By Person
+}
+
+// LinkKind is what a public link lets its visitors do.
+type LinkKind string
+
+// ViewLink lets visitors see and download what it is on. (Upload-only links come with their own ticket.)
+const ViewLink LinkKind = "view"
 
 // PlaceKind is the kind of a place.
 type PlaceKind string
@@ -150,6 +185,14 @@ type Place struct {
 	// Grants is the access given in this place. Only what was given on its top folder (On 0) or on an item of Path
 	// counts: access given on one item never reaches its parent or its siblings. A caller may pass more.
 	Grants []Grant
+	// NoSharingOutside is true where sharing outside the project (public links, and later guests) is switched off: for
+	// the whole project, or for this shared folder. Then no link opens and none can be made; links already made stay,
+	// and work again when it is switched back on. (The switches themselves come with their own ticket.)
+	NoSharingOutside bool
+	// Links are the public links on the item the request is about and on the folders above it, given when the caller
+	// asks whether anyone with a link can see it (ByLink). Decide never reads them: a visitor is decided by the link
+	// they came with.
+	Links []Link
 }
 
 // Below is the same place, about the item id directly inside the item p is about (or inside its top folder), with
@@ -159,6 +202,13 @@ func (p *Place) Below(id int64, given []Grant) *Place {
 	q.DeletedBy = ""
 	q.Path = append(append(make([]int64, 0, len(p.Path)+1), p.Path...), id)
 	q.Grants = append(append(make([]Grant, 0, len(p.Grants)+len(given)), p.Grants...), given...)
+	return &q
+}
+
+// WithLinks is the same place with the public links given added to Links.
+func (p *Place) WithLinks(links ...Link) *Place {
+	q := *p
+	q.Links = append(append(make([]Link, 0, len(p.Links)+len(links)), p.Links...), links...)
 	return &q
 }
 
@@ -238,15 +288,35 @@ const (
 	DeleteSharedFolder Action = "delete-shared-folder"
 	// RestoreSharedFolder is bringing a shared folder back out of the trash. Whoever could have deleted it may.
 	RestoreSharedFolder Action = "restore-shared-folder"
+
+	// MakeLink is making a public link to a file or folder, or a new one in place of the one it has (whose address then
+	// stops working): whoever may share it, while sharing outside the project is on there. It concerns an item.
+	MakeLink Action = "make-link"
+	// ManageLink is seeing the public link on a file or folder (who made it, when, and how often it was used) and
+	// removing it: whoever may share it, also while sharing outside the project is off. It concerns an item.
+	ManageLink Action = "manage-link"
+
+	// SeeThroughLink is, for a visitor, seeing an item through the public link they came with: a file's name and size,
+	// or a folder's name and what is in it. It concerns the link's item or anything inside it.
+	SeeThroughLink Action = "see-through-link"
+	// DownloadThroughLink is, for a visitor, reading content through their link: downloading a file or opening it in
+	// the browser, or downloading a folder as one zip.
+	DownloadThroughLink Action = "download-through-link"
 )
 
-// InAPlace is every action that happens in a place, in the order an interface lists them.
+// InAPlace is every action a member may do in a place, in the order an interface lists them.
 var InAPlace = []Action{List, Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeTrash, Restore,
-	SeeAccess, Share, ManageAccess, DeleteSharedFolder, RestoreSharedFolder}
+	SeeAccess, Share, MakeLink, ManageLink, ManageAccess, DeleteSharedFolder, RestoreSharedFolder}
+
+// ThroughALink is every action a visitor may do through a public link, and only a visitor.
+var ThroughALink = []Action{SeeThroughLink, DownloadThroughLink}
 
 // Decide says whether person may do action at place: in its top folder when place.Path is empty, and at the last item
 // of the path otherwise. place is nil for actions that concern no place. Anything not explicitly allowed is refused.
 func Decide(person Person, action Action, place *Place) bool {
+	if person.Link != nil {
+		return throughLink(*person.Link, action, place)
+	}
 	if !person.isMember() {
 		return false
 	}
@@ -264,6 +334,12 @@ func Decide(person Person, action Action, place *Place) bool {
 	case MoveOut:
 		// Only out of one's own My files, by whoever may move it there: its owner.
 		return len(place.Path) > 0 && role == Owner && Decide(person, Move, place)
+	case MakeLink:
+		// A link is sharing with anyone who has it: for whoever may share the item, and not where sharing outside the
+		// project is off.
+		return !place.NoSharingOutside && Decide(person, ManageLink, place)
+	case ManageLink:
+		return len(place.Path) > 0 && Decide(person, Share, place)
 	}
 	if len(place.Path) == 0 {
 		return atTop[role][action]
@@ -311,6 +387,54 @@ func Finds(person Person, place *Place) bool {
 		return false
 	}
 	return Decide(person, List, place)
+}
+
+// throughLink decides for a visitor who came with link: only what the link lets them do, at its item and anything
+// inside it, while it counts there. Nothing else, and none of what members do, whoever they are otherwise.
+func throughLink(link Link, action Action, place *Place) bool {
+	if place == nil || place.Deleted || place.NoSharingOutside || link.Item <= 0 {
+		return false
+	}
+	switch place.Kind {
+	case MyFiles:
+		if place.Owner == "" || place.OwnerLeft {
+			return false // a held My files: nothing shared from it opens
+		}
+	case SharedFolder:
+	default:
+		return false
+	}
+	// The link's item is the top of what its visitors see: it must be on the way down to what they ask for. Path is
+	// from the place's top folder down, so whatever comes after it is inside it, and nothing beside or above it has it.
+	at := slices.Index(place.Path, link.Item)
+	if at < 0 {
+		return false
+	}
+	// In a My files the link is its maker's share, made from their access there: it counts while they may still share
+	// the item, and stops when that is taken away from them or they leave the project. A shared folder belongs to the
+	// project, and so do the links made in it.
+	if place.Kind == MyFiles && !Decide(link.By, Share, place.Up(at+1)) {
+		return false
+	}
+	switch link.Kind {
+	case ViewLink:
+		return action == SeeThroughLink || action == DownloadThroughLink
+	}
+	return false
+}
+
+// ByLink says whether anyone with a public link can see what place is about: a link on it, or on a folder above it,
+// among place.Links, that lets its visitors in there now.
+func ByLink(place *Place) bool {
+	if place == nil {
+		return false
+	}
+	for i := range place.Links {
+		if Decide(Person{Link: &place.Links[i]}, SeeThroughLink, place) {
+			return true
+		}
+	}
+	return false
 }
 
 // What each role may do in a place's top folder. The owner of a "My files" has nothing to manage and nobody to show
