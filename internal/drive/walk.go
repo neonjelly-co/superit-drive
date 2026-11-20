@@ -76,9 +76,7 @@ func (d *Drive) Walk(ctx context.Context, w Walking) {
 		}
 		wait = w.Every
 		r, rolling := d.rollingBack(ctx)
-		if rolling {
-			d.afterRollback(ctx)
-		}
+		first := rolling && d.afterRollback(ctx)
 		got, err := d.walk(ctx, w.Pause)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -86,7 +84,7 @@ func (d *Drive) Walk(ctx context.Context, w Walking) {
 			}
 			continue
 		}
-		if rolling && got.untrusted == 0 {
+		if first && got.untrusted == 0 {
 			if err := d.rolledBack(ctx, r.At); err != nil && ctx.Err() == nil {
 				d.log.Error("the end of the walk after the rollback could not be recorded; the next walk takes it in again", "error", err)
 			}

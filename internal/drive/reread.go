@@ -609,7 +609,15 @@ func (d *Drive) checkMark(ctx context.Context) (ok bool, why string, err error) 
 	case haveKept:
 		return false, "the file holds the id of another Drive's index (id " + kept + ")", nil
 	case there != "":
+		// An index made anew against a storage that holds a mark takes it, and when it was written, as the storage says.
 		kept, err = d.index.AddStorageID(ctx, there)
+		if err == nil && kept == there {
+			sctx, cancel := context.WithTimeout(ctx, storageTimeout)
+			if e, serr := d.storage.Stat(sctx, StorageIDFile); serr == nil && !e.Changed.IsZero() {
+				_ = d.index.SetState(ctx, storageMarked, strconv.FormatInt(e.Changed.UnixMilli(), 10))
+			}
+			cancel()
+		}
 		return err == nil && kept == there, "", err
 	}
 	// The first time: this storage is the one the index is being built from.

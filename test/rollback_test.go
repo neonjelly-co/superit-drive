@@ -3,6 +3,7 @@ package test
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -454,6 +455,38 @@ func TestARollbackToBeforeTheDriveMarkedItsStorage(t *testing.T) {
 	}
 	if _, ok := d.Storage.Get(t, ".superit-drive/storage-id"); ok {
 		t.Fatal("the Drive wrote its mark on a storage put back to after it marked it")
+	}
+}
+
+// A Drive whose index is made anew (a new server: its data folder is empty) against the storage it marked takes the
+// mark, and when it was written, from the storage: a rollback to a snapshot from before then is explained too.
+func TestARollbackToBeforeTheMarkAfterTheIndexWasMadeAnew(t *testing.T) {
+	t.Parallel()
+	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka}, Env: fastWalk("1h")})
+	d.Storage.MakeFolder(t, "")
+	before := d.Storage.Snapshot(t)
+	nextSecond(t, d)
+	placeID, _ := myFiles(t, d, reka)
+	uploaded(t, d.As(reka), placeID, "a.txt", []byte("a"))
+	mark, _ := d.Storage.Get(t, ".superit-drive/storage-id")
+
+	d.Stop(t)
+	if err := os.RemoveAll(d.DataDir); err != nil {
+		t.Fatal(err)
+	}
+	d.Restart(t, nil)
+	placeID, items := myFiles(t, d, reka)
+	if got := names(list(t, d.As(reka), placeID, 0).Items); !slices.Equal(got, []string{"a.txt"}) {
+		t.Fatalf("Réka's My files in an index made anew: %q (first %q)", got, names(items))
+	}
+
+	rolledBack(t, d, before)
+	harness.Eventually(t, "the mark is back on the storage", func() bool {
+		got, ok := d.Storage.Get(t, ".superit-drive/storage-id")
+		return ok && string(got) == string(mark)
+	})
+	if got := names(list(t, d.As(reka), placeID, 0).Items); len(got) != 0 {
+		t.Fatalf("Réka's My files after a rollback to before it was made: %q", got)
 	}
 }
 

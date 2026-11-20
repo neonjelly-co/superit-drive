@@ -173,22 +173,29 @@ func (d *Drive) beforeTheMark(ctx context.Context) (Rollback, bool) {
 
 // afterRollback is the first part of the walk after a rollback: every shared folder in the trash, then every place's
 // trash, before any folder, so that what the rollback put back into a trash, or took out of one, is found before a look
-// at a folder hides it.
-func (d *Drive) afterRollback(ctx context.Context) {
+// at a folder hides it. done is false when the storage did not hold the Drive's mark (nothing changed), or a shared folder
+// in the trash could not be looked at: then the rollback stays to be taken in, and the next walk begins with this again.
+func (d *Drive) afterRollback(ctx context.Context) (done bool) {
 	if !d.ours(ctx) {
-		return // nothing changes without the mark; the walk counts it, and the rollback stays to be taken in
+		return false
 	}
+	done = true
 	back := 0
-	if deleted, err := d.index.DeletedSharedFolders(ctx); err == nil {
-		for _, p := range deleted {
-			ok, err := d.backFromTheTrash(ctx, p)
-			if err != nil && ctx.Err() == nil {
+	deleted, err := d.index.DeletedSharedFolders(ctx)
+	if err != nil {
+		return false
+	}
+	for _, p := range deleted {
+		ok, err := d.backFromTheTrash(ctx, p)
+		if err != nil {
+			done = false
+			if ctx.Err() == nil {
 				d.log.Warn("a shared folder in the trash could not be looked at after the rollback; it is looked at again on the next walk",
 					"place", p.ID, "error", err)
 			}
-			if ok {
-				back++
-			}
+		}
+		if ok {
+			back++
 		}
 	}
 	var o index.Outcome
@@ -204,6 +211,7 @@ func (d *Drive) afterRollback(ctx context.Context) {
 	}
 	d.log.Info("after the rollback, the Drive looked at every trash on the storage", "sharedFoldersBack", back,
 		"backInTheTrash", o.Back, "added", o.Added, "hidden", o.Hidden)
+	return done
 }
 
 // backFromTheTrash takes a shared folder out of the trash, as it is, when the storage shows its top folder at its own

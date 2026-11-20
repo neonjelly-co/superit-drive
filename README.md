@@ -287,8 +287,9 @@ again, only once the storage is back, with these environment variables:
 **What the Drive does with a new one.** It logs `the storage was put back to a snapshot`, with the three times, and walks
 through the storage at once, from the top (a walk the stop cut short is begun again): first every shared folder in the
 trash and every place's trash, then every folder. The looks then do what they always do ([Keeping in step with the
-storage](#keeping-in-step-with-the-storage)), with three more rules until that walk has ended with the mark there
-throughout (a restart before then goes on with them):
+storage](#keeping-in-step-with-the-storage)), with the rules below on shared folders, the trash and the mark until that
+walk has ended with the mark there throughout and every shared folder in the trash looked at (a restart before then goes
+on with them; a walk that could not, the next one, six hours later, begins with them again):
 
 - **Added since the snapshot**: gone. Hidden at the first look, so its sharing and its link stop at once; dropped with
   them when a look at least ten minutes later confirms it. The walk after the one that takes the rollback in comes eleven
@@ -309,9 +310,10 @@ throughout (a restart before then goes on with them):
   which work again when it is restored. Any other entry that is back (an item removed for good since, or changed after it
   was restored) shows in the Trash as an entry put there directly.
 - **The mark**: a snapshot taken after the Drive first marked the storage holds the mark, so looks go on. One taken
-  before that does not, and the rollback says why: when the snapshot was taken before the Drive last wrote its mark and
-  the storage holds none, the Drive writes it back with the id its index keeps, logs it, and looks go on (what the
-  Drive had made since is then gone, as the admin was told). A mark with another id is never replaced, and a mark
+  before that does not, and the rollback says why: when the snapshot was taken before the Drive last wrote its mark (or,
+  for an index made anew against a storage that held the mark, before the time the storage gives the mark) and the
+  storage holds none, the Drive writes it back with the id its index keeps, logs it, and looks go on (what the Drive had
+  made since is then gone, as the admin was told). A mark with another id is never replaced, and a mark
   missing from a snapshot taken after the Drive wrote it still stops every look, as without a rollback.
 - **Places made since** (a shared folder, a member's first My files) stay, emptied: a place is never removed for want of
   its top folder. A shared folder's managers can delete it.
