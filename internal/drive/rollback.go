@@ -143,6 +143,34 @@ func (d *Drive) rollingBack(ctx context.Context) (Rollback, bool) {
 	return r, ok && err == nil
 }
 
+// adopting says whether the index was made from a copy (adopt.go) and the walk that brings it in step with the storage
+// has not ended.
+func (d *Drive) adopting(ctx context.Context) bool {
+	_, ok, err := d.index.State(ctx, adoptionWalk)
+	return ok && err == nil
+}
+
+// catchingUp says whether the index is older than the storage it is walked through: a rollback taken in, or an index
+// made from a copy, before the walk that brings it in step has ended. Until then the walk starts at once, looks at every
+// trash first (afterRollback), and an entry of a trash holding exactly an item the place has elsewhere is that item
+// (restoredSince).
+func (d *Drive) catchingUp(ctx context.Context) bool {
+	if _, rolling := d.rollingBack(ctx); rolling {
+		return true
+	}
+	return d.adopting(ctx)
+}
+
+// adoptedInStep records that a walk through the whole storage ended after the index was made from a copy, with the
+// Drive's mark there for every look.
+func (d *Drive) adoptedInStep(ctx context.Context) error {
+	if err := d.index.SetState(ctx, adoptionWalk, ""); err != nil {
+		return err
+	}
+	d.log.Info("the index made from a copy is in step with the storage")
+	return nil
+}
+
 // rolledBack records that a walk through the whole storage ended after the rollback at, with the Drive's mark there
 // for every look: the rollback is taken in.
 func (d *Drive) rolledBack(ctx context.Context, at time.Time) error {
@@ -171,9 +199,9 @@ func (d *Drive) beforeTheMark(ctx context.Context) (Rollback, bool) {
 	return r, err == nil && r.To.Before(time.UnixMilli(ms))
 }
 
-// afterRollback is the first part of the walk after a rollback: every shared folder in the trash, then every place's
-// trash, before any folder, so that what the rollback put back into a trash, or took out of one, is found before a look
-// at a folder hides it. done is false when the storage did not hold the Drive's mark (nothing changed), or a shared folder
+// afterRollback is the first part of the walk after a rollback, or with an index made from a copy: every shared folder
+// in the trash, then every place's trash, before any folder, so that what the rollback put back into a trash, or took
+// out of one (or what was deleted or restored since the copy was made), is found before a look at a folder hides it. done is false when the storage did not hold the Drive's mark (nothing changed), or a shared folder
 // in the trash could not be looked at: then the rollback stays to be taken in, and the next walk begins with this again.
 func (d *Drive) afterRollback(ctx context.Context) (done bool) {
 	if !d.ours(ctx) {
@@ -209,7 +237,7 @@ func (d *Drive) afterRollback(ctx context.Context) (done bool) {
 			d.lookFailed(p, trashFolder, err)
 		}
 	}
-	d.log.Info("after the rollback, the Drive looked at every trash on the storage", "sharedFoldersBack", back,
+	d.log.Info("the Drive looked at every trash on the storage first, its index being older than the storage (a rollback, or an index made from a copy)", "sharedFoldersBack", back,
 		"backInTheTrash", o.Back, "added", o.Added, "hidden", o.Hidden)
 	return done
 }

@@ -8,8 +8,9 @@
 // SUPERIT_DRIVE_TEST_WALK_EVERY and SUPERIT_DRIVE_TEST_WALK_PAUSE (Go durations) make the walk through the storage start
 // that soon after the Drive starts, run that often and rest that long after each folder; and
 // SUPERIT_DRIVE_TEST_STOP_AT names a point in the Drive's work (StopAt) where it stops at once, as if it were killed, so a
-// test can see what the Drive does when it starts again. A Drive built any other way, such as the released image, reads
-// no such variable.
+// test can see what the Drive does when it starts again; and SUPERIT_DRIVE_TEST_COPY_QUIET, SUPERIT_DRIVE_TEST_COPY_LATEST
+// and SUPERIT_DRIVE_TEST_COPY_RETRY (Go durations) make the copy of the index follow access changes that soon. A Drive
+// built any other way, such as the released image, reads no such variable.
 package clock
 
 import "time"
@@ -23,6 +24,11 @@ func Shift() time.Duration { return 0 }
 // Walk is the timing of the walk through the storage that a test build sets (SUPERIT_DRIVE_TEST_WALK_EVERY and
 // SUPERIT_DRIVE_TEST_WALK_PAUSE): ok is always false here, and the Drive walks at its own pace.
 func Walk() (every, pause time.Duration, ok bool) { return 0, 0, false }
+
+// Copying is the timing of the copies of the index that a test build sets (SUPERIT_DRIVE_TEST_COPY_QUIET,
+// SUPERIT_DRIVE_TEST_COPY_LATEST and SUPERIT_DRIVE_TEST_COPY_RETRY): ok is always false here, and the Drive copies at
+// its own pace.
+func Copying() (quiet, latest, retry time.Duration, ok bool) { return 0, 0, 0, false }
 
 // StopAt is a point in the Drive's work where a test build may stop (SUPERIT_DRIVE_TEST_STOP_AT): here it does nothing.
 func StopAt(point string) {}

@@ -23,16 +23,16 @@
 //	    uploads/
 //	        3f9c0b…e1                           one file per upload while its bytes arrive, named after a random id;
 //	                                            moved into its folder when whole
+//	    index/<storage id>/copy-…42.sqlite     the latest copy of the index (copies.go)
 //	    storage-id                              the Drive's mark: says the storage is the one its index belongs to
-//
-// The hidden folder for the index copy is added by the ticket that brings it.
 //
 // Every change is two steps, the storage and then the index. files.go has uploads in one request, downloads and the
 // name rules, uploads.go resumable uploads and moving any upload into place, zip.go folders downloaded as one zip,
 // folders.go new folders, renames and moves, trash.go the trash, shared.go shared folders, sharing.go the access given
 // on places and items, links.go public links, reread.go keeping the index in step with changes made on the storage
 // directly (a folder re-read when it is opened), walk.go the slow walk through the whole storage, rollback.go the
-// storage put back to a snapshot, held.go handing over or deleting the My files of a member who left, and this file the
+// storage put back to a snapshot, held.go handing over or deleting the My files of a member who left, copies.go the
+// copies of the index in the data folder and on the storage, adopt.go making the index from one, and this file the
 // places, paths and listings.
 package drive
 

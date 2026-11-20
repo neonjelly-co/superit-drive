@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -178,6 +179,15 @@ func (s *Storage) Get(t *testing.T, p string) (content []byte, ok bool) {
 	}
 	t.Fatalf("GET %s: %d %s", p, status, body)
 	return nil, false
+}
+
+// Replace writes content to the file at p, replacing whatever file is there, as anyone with the storage login can.
+func (s *Storage) Replace(t *testing.T, p string, content []byte) {
+	t.Helper()
+	status, body := s.do(t, http.MethodPut, s.address(p, false), bytes.NewReader(content), nil)
+	if status != http.StatusCreated && status != http.StatusNoContent {
+		t.Fatalf("PUT %s: %d %s", p, status, body)
+	}
 }
 
 // Delete removes the file or folder at p.

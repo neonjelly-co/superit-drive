@@ -36,13 +36,25 @@ func TestTheDriveDoesNotStartWithoutAMemberList(t *testing.T) {
 	}
 }
 
+// The storage login comes from the settings. With an index, a Drive whose login the storage refuses starts, and says so
+// when it needs the storage; without one (a new install, or a new server), it does not start: it cannot find out whether
+// the storage holds a copy of its index to make it from (the container is started again until it can).
 func TestTheStorageLoginComesFromTheSettings(t *testing.T) {
 	t.Parallel()
-	d := harness.StartWith(t, harness.Options{
+	out := harness.StartFailing(t, harness.Options{
 		Members: []harness.Member{reka},
 		Env:     map[string]string{"DRIVE_STORAGE_PASSWORD": "not-the-password"},
 	})
-	res := d.As(reka).Get(t, "/api/places")
+	if !strings.Contains(out, "the storage could not be read") || !strings.Contains(out, "refused the Drive's login") {
+		t.Fatalf("a new Drive with a wrong storage password did not say the storage refused its login:\n%s", out)
+	}
+
+	d := harness.Start(t, reka, bence)
+	if res := d.As(reka).Get(t, "/api/places"); res.Status != http.StatusOK {
+		t.Fatalf("places with the right password: %d %s", res.Status, res.Body)
+	}
+	d.Restart(t, map[string]string{"DRIVE_STORAGE_PASSWORD": "not-the-password"})
+	res := d.As(bence).Get(t, "/api/places") // his first time: his My files is made on the storage
 	if res.Status != http.StatusBadGateway || !strings.Contains(string(res.Body), "refused the Drive's login") {
 		t.Fatalf("got %d %s, want 502 saying the storage refused the login", res.Status, res.Body)
 	}
