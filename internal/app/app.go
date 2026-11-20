@@ -55,6 +55,13 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	d := drive.New(x, store, drive.Options{Now: clock.Now, Log: log})
 	defer d.Stop() // the looks at folders under way in the background end, before the index closes
 
+	// A rollback of the storage the settings declare is taken in once (rollback.go): the walk below then starts at once.
+	if rb := s.Rollback; rb != nil {
+		if _, err := d.TakeIn(ctx, &drive.Rollback{At: rb.At, To: rb.To, By: rb.By}); err != nil {
+			return err
+		}
+	}
+
 	// Sends the Drive's own mail in the background, so a request never waits for the mail server; none without one.
 	mailer := mail.New(s.Mail, s.Address.Hostname(), log)
 	mailCtx, stopMail := context.WithCancel(ctx)

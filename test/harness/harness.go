@@ -330,6 +330,12 @@ func (d *Drive) run(t *testing.T) {
 	go func() { _ = cmd.Wait(); close(exited) }()
 }
 
+// Stop stops the Drive, as the daemon does before it puts the storage back to a snapshot; Restart starts it again.
+func (d *Drive) Stop(t *testing.T) {
+	t.Helper()
+	d.stop()
+}
+
 func (d *Drive) stop() {
 	select {
 	case <-d.exited:

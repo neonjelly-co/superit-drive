@@ -22,6 +22,7 @@ import { MoveDialog } from "./components/move-dialog";
 import { keyOf, SharedList } from "./components/shared-list";
 import { NameDialog } from "./components/name-dialog";
 import { type Notice, NoticeBar } from "./components/notice";
+import { RollbackNotice } from "./components/rollback-notice";
 import { SearchField } from "./components/search-field";
 import { keyOfFound, locationOf, SearchList } from "./components/search-list";
 import { SharedFolderPanel } from "./components/shared-folder-panel";
@@ -566,6 +567,7 @@ export function App() {
 				}}
 			>
 				<main className="h-full overflow-auto p-6 pb-24">
+					{me.data?.rollback && <RollbackNotice key={me.data.rollback.at} rollback={me.data.rollback} />}
 					<div className="mb-5">
 						<SearchField query={query} onSearch={onSearch} onClear={endSearch} />
 					</div>

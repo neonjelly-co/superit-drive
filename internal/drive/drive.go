@@ -31,8 +31,8 @@
 // name rules, uploads.go resumable uploads and moving any upload into place, zip.go folders downloaded as one zip,
 // folders.go new folders, renames and moves, trash.go the trash, shared.go shared folders, sharing.go the access given
 // on places and items, links.go public links, reread.go keeping the index in step with changes made on the storage
-// directly (a folder re-read when it is opened), walk.go the slow walk through the whole storage, and this file the
-// places, paths and listings.
+// directly (a folder re-read when it is opened), walk.go the slow walk through the whole storage, rollback.go the
+// storage put back to a snapshot, and this file the places, paths and listings.
 package drive
 
 import (

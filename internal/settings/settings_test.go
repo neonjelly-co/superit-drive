@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func complete() map[string]string {
@@ -140,6 +141,80 @@ func TestMailSettings(t *testing.T) {
 	}
 	if _, err := read(map[string]string{"DRIVE_SMTP_HOST": "::1", "DRIVE_MAIL_FROM": "drive@localhost"}); err != nil {
 		t.Errorf("an IPv6 address as the mail server: %v", err)
+	}
+}
+
+// The last rollback of the storage: three settings that go together, two times in order and a name, which is cleaned
+// rather than refused.
+func TestRollbackSettings(t *testing.T) {
+	read := func(set map[string]string) (Settings, error) {
+		env := complete()
+		for k, v := range set {
+			env[k] = v
+		}
+		return FromEnv(func(k string) string { return env[k] })
+	}
+	if s, err := read(nil); err != nil || s.Rollback != nil {
+		t.Fatalf("no rollback: %+v, %v", s.Rollback, err)
+	}
+	good := map[string]string{
+		"DRIVE_ROLLBACK_AT": "2026-11-20T10:41:00+01:00",
+		"DRIVE_ROLLBACK_TO": "2026-11-19T03:00:00Z",
+		"DRIVE_ROLLBACK_BY": "Réka Kovács",
+	}
+	s, err := read(good)
+	if err != nil || s.Rollback == nil || !s.Rollback.At.Equal(time.Date(2026, 11, 20, 9, 41, 0, 0, time.UTC)) ||
+		!s.Rollback.To.Equal(time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)) || s.Rollback.By != "Réka Kovács" {
+		t.Fatalf("a rollback: %+v, %v", s.Rollback, err)
+	}
+
+	names := map[string]string{
+		"  Réka \t Kovács \n":                "Réka Kovács",
+		"Réka\r\nBcc: x@example.com":         "Réka Bcc: x@example.com",
+		"<b>Réka</b>":                        "<b>Réka</b>", // text: the interface shows it as it is
+		"Réka \u202eskcah\u202c":             "Réka skcah",
+		"R\xffeka":                           "R\uFFFDeka",
+		strings.Repeat("é", 150):             strings.Repeat("é", MaxRollbackByLength-1) + "…",
+		strings.Repeat("a", 99) + " b c d e": strings.Repeat("a", 99) + "…",
+	}
+	for in, want := range names {
+		set := map[string]string{"DRIVE_ROLLBACK_BY": in}
+		for k, v := range good {
+			if _, ok := set[k]; !ok {
+				set[k] = v
+			}
+		}
+		if s, err := read(set); err != nil || s.Rollback.By != want {
+			t.Errorf("DRIVE_ROLLBACK_BY=%q: got %+v, %v; want %q", in, s.Rollback, err, want)
+		}
+	}
+
+	cases := []struct {
+		set  map[string]string
+		name string // the variable the error must name
+	}{
+		{map[string]string{"DRIVE_ROLLBACK_TO": ""}, "DRIVE_ROLLBACK_TO"},
+		{map[string]string{"DRIVE_ROLLBACK_AT": ""}, "DRIVE_ROLLBACK_AT"},
+		{map[string]string{"DRIVE_ROLLBACK_BY": ""}, "DRIVE_ROLLBACK_BY"},
+		{map[string]string{"DRIVE_ROLLBACK_BY": "\x01\x02"}, "DRIVE_ROLLBACK_BY"},
+		{map[string]string{"DRIVE_ROLLBACK_AT": "2026-11-20"}, "DRIVE_ROLLBACK_AT"},
+		{map[string]string{"DRIVE_ROLLBACK_AT": "2026-11-20T09:41:00"}, "DRIVE_ROLLBACK_AT"},
+		{map[string]string{"DRIVE_ROLLBACK_AT": "yesterday"}, "DRIVE_ROLLBACK_AT"},
+		{map[string]string{"DRIVE_ROLLBACK_TO": "1763535600"}, "DRIVE_ROLLBACK_TO"},
+		{map[string]string{"DRIVE_ROLLBACK_TO": "2026-11-20T09:41:00Z"}, "DRIVE_ROLLBACK_TO"},
+		{map[string]string{"DRIVE_ROLLBACK_TO": "2026-11-21T00:00:00Z"}, "DRIVE_ROLLBACK_TO"},
+	}
+	for _, c := range cases {
+		set := map[string]string{}
+		for k, v := range good {
+			set[k] = v
+		}
+		for k, v := range c.set {
+			set[k] = v
+		}
+		if _, err := read(set); err == nil || !strings.Contains(err.Error(), c.name) {
+			t.Errorf("%q: expected an error naming %s, got %v", c.set, c.name, err)
+		}
 	}
 }
 

@@ -6,6 +6,19 @@ export type Me = {
 	displayName: string;
 	role: "admin" | "member";
 	project: string;
+	/** There for seven days after the Drive storage was put back to a snapshot. */
+	rollback?: Rollback;
+};
+
+/** The Drive storage put back to a snapshot: who did it (text from the platform), and when (ISO 8601). */
+export type Rollback = {
+	by: string;
+	/** When the snapshot was taken: the files are as they were then. */
+	to: string;
+	/** When it was put back; it also tells one rollback from another. */
+	at: string;
+	/** When the notice ends. */
+	until: string;
 };
 
 /**

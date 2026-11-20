@@ -111,15 +111,36 @@ func (s *Server) routes() []route {
 	}
 }
 
-// me says who is signed in and which project this Drive belongs to.
-func (s *Server) me(w http.ResponseWriter, _ *http.Request, c call) {
-	writeJSON(w, http.StatusOK, map[string]string{
+// rollbackJSON is the notice members see for seven days after the storage was put back to a snapshot.
+type rollbackJSON struct {
+	// By is who put it back, as the settings name them: text, never markup.
+	By string `json:"by"`
+	// To is when the snapshot was taken: the files are as they were then. At is when it was put back; Until is when the
+	// notice ends.
+	To    time.Time `json:"to"`
+	At    time.Time `json:"at"`
+	Until time.Time `json:"until"`
+}
+
+// me says who is signed in and which project this Drive belongs to and, for seven days after the storage was put back
+// to a snapshot, that it was (rollback): who did it, and to when. Only members are told; visitors never ask here.
+func (s *Server) me(w http.ResponseWriter, r *http.Request, c call) {
+	out := map[string]any{
 		"userId":      c.member.UserID,
 		"email":       c.member.Email,
 		"displayName": c.member.DisplayName,
 		"role":        string(c.member.Role),
 		"project":     s.project,
-	})
+	}
+	rb, ok, err := s.drive.Notice(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if ok {
+		out["rollback"] = rollbackJSON{By: rb.By, To: rb.To, At: rb.At, Until: rb.Until}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type placeJSON struct {
