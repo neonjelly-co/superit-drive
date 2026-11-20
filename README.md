@@ -99,6 +99,9 @@ a test keeps the two equal.)
 | `DRIVE_SMTP_USER` | no | Login name for the mail server. Empty when it needs none. |
 | `DRIVE_SMTP_PASSWORD` | no | Password for the mail server, with `DRIVE_SMTP_USER`. |
 | `DRIVE_MAIL_FROM` | no | Address the Drive's mail comes from, such as `drive@files.example.com` or `Drive <drive@files.example.com>`. Needed with `DRIVE_SMTP_HOST`. |
+| `DRIVE_ROLLBACK_AT` | no | When the storage was last put back to a snapshot, as a time with its offset (RFC 3339), such as `2026-11-20T09:41:00Z`. It tells one rollback from another. Set with the next two, or none of the three; see [After a rollback](#after-a-rollback). |
+| `DRIVE_ROLLBACK_TO` | no | When the snapshot it was put back to was taken (RFC 3339), before `DRIVE_ROLLBACK_AT`. |
+| `DRIVE_ROLLBACK_BY` | no | Who put it back, as members should read it: their name. Shown as plain text; control characters are taken out, and it is cut to 100 characters. |
 
 ### Layout on the storage
 

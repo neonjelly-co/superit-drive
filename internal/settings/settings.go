@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -36,7 +37,27 @@ type Settings struct {
 	// Mail is the mail server the Drive sends its own mail through, such as "shared with you". Its Host is empty when
 	// the Drive sends no mail.
 	Mail Mail
+	// Rollback is the last time the storage was put back to a snapshot, as whoever runs the Drive declares it; nil when
+	// none is declared.
+	Rollback *Rollback
 }
+
+// A Rollback is the storage put back to a snapshot: by a project admin, through Superit's dashboard, on Superit's Drive
+// storage. The Drive is stopped meanwhile and started again with these settings, which say what happened; it keeps being
+// started with the same ones until the next rollback.
+type Rollback struct {
+	// At is when the storage was put back. It tells one rollback from another: a Drive started again with the same At
+	// has taken that rollback in already.
+	At time.Time
+	// To is when the snapshot it was put back to was taken: the files are as they were then.
+	To time.Time
+	// By is who put it back, as members read it: their name, with control characters taken out and cut to
+	// MaxRollbackByLength characters. It is shown as text, never as markup.
+	By string
+}
+
+// MaxRollbackByLength is how many characters of DRIVE_ROLLBACK_BY the Drive keeps; a longer name is cut, ending in "…".
+const MaxRollbackByLength = 100
 
 // Mail is the mail server the Drive sends mail through, over SMTP.
 type Mail struct {
@@ -103,6 +124,9 @@ var Variables = []Variable{
 	{Name: "DRIVE_SMTP_USER", Meaning: "Login name for the mail server. Empty when it needs none."},
 	{Name: "DRIVE_SMTP_PASSWORD", Meaning: "Password for the mail server, with DRIVE_SMTP_USER."},
 	{Name: "DRIVE_MAIL_FROM", Meaning: "Address the Drive's mail comes from, such as drive@files.example.com or Drive <drive@files.example.com>. Needed with DRIVE_SMTP_HOST."},
+	{Name: "DRIVE_ROLLBACK_AT", Meaning: "When the storage was last put back to a snapshot, as a time with its offset (RFC 3339), such as 2026-11-20T09:41:00Z. With DRIVE_ROLLBACK_TO and DRIVE_ROLLBACK_BY; empty when it never was."},
+	{Name: "DRIVE_ROLLBACK_TO", Meaning: "When the snapshot it was put back to was taken (RFC 3339), before DRIVE_ROLLBACK_AT."},
+	{Name: "DRIVE_ROLLBACK_BY", Meaning: "Who put it back, as members should read it: their name. Control characters are taken out, and it is cut to 100 characters."},
 }
 
 // MinSecretLength is the shortest header secret the Drive accepts.
@@ -142,6 +166,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		r.problem("DRIVE_HEADER_SECRET must be printable ASCII, so it can travel in a header")
 	}
 	s.Mail = r.mail()
+	s.Rollback = r.rollback()
 
 	if err := r.err("the Drive cannot start: "); err != nil {
 		return Settings{}, err
@@ -245,6 +270,55 @@ func (r *reader) mail() Mail {
 		m.From = a
 	}
 	return m
+}
+
+// rollback reads the last rollback of the storage. All three settings go together: some without the others are refused,
+// so a mistake never passes for "no rollback".
+func (r *reader) rollback() *Rollback {
+	at, to, by := r.value("DRIVE_ROLLBACK_AT"), r.value("DRIVE_ROLLBACK_TO"), r.value("DRIVE_ROLLBACK_BY")
+	if at == "" && to == "" && by == "" {
+		return nil
+	}
+	if at == "" || to == "" || by == "" {
+		r.problem("DRIVE_ROLLBACK_AT, DRIVE_ROLLBACK_TO and DRIVE_ROLLBACK_BY go together: set all three, or none")
+		return nil
+	}
+	rb := &Rollback{By: CleanName(by, MaxRollbackByLength)}
+	var err error
+	if rb.At, err = time.Parse(time.RFC3339, at); err != nil {
+		r.problem("DRIVE_ROLLBACK_AT must be a time with its offset, such as 2026-11-20T09:41:00Z (RFC 3339)")
+	}
+	if rb.To, err = time.Parse(time.RFC3339, to); err != nil {
+		r.problem("DRIVE_ROLLBACK_TO must be a time with its offset, such as 2026-11-19T03:00:00Z (RFC 3339)")
+	}
+	if !rb.At.IsZero() && !rb.To.IsZero() && !rb.To.Before(rb.At) {
+		r.problem("DRIVE_ROLLBACK_TO must be before DRIVE_ROLLBACK_AT: the storage goes back to a snapshot taken before it was put back")
+	}
+	if rb.By == "" {
+		r.problem("DRIVE_ROLLBACK_BY must say who put the storage back")
+	}
+	return rb
+}
+
+// CleanName makes a name from outside (such as who put the storage back) fit to show as one line of text: what is not
+// UTF-8 becomes U+FFFD, control characters become spaces, the characters that change the direction of text are taken
+// out, runs of spaces become one, and it is cut to at most max characters, the last of them "…".
+func CleanName(s string, max int) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	s = strings.Map(func(c rune) rune {
+		switch {
+		case unicode.IsControl(c), c == '\u2028', c == '\u2029':
+			return ' '
+		case c == '\u061c', c == '\u200e', c == '\u200f', c >= '\u202a' && c <= '\u202e', c >= '\u2066' && c <= '\u2069':
+			return -1
+		}
+		return c
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	if runes := []rune(s); len(runes) > max {
+		s = strings.TrimSpace(string(runes[:max-1])) + "…"
+	}
+	return s
 }
 
 func (r *reader) storage() Storage {

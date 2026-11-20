@@ -147,7 +147,9 @@ func (d *Drive) DeleteSharedFolder(ctx context.Context, p index.Place) (DeletedS
 
 // RestoreSharedFolder brings a shared folder out of the trash, back to its own top folder, with everything in it, its
 // own trash and the roles given on it as they were. Its folder is held for it while it is in the trash, so only
-// something put there directly on the storage can be in the way; that is never replaced (a *Taken error).
+// something put there directly on the storage can be in the way; that is never replaced (a *Taken error), unless its
+// entry in the trash no longer holds its top folder: then what is there is its top folder, put back by a rollback, and
+// it is restored as it is.
 func (d *Drive) RestoreSharedFolder(ctx context.Context, p index.Place) (index.Place, error) {
 	release, err := d.wholePlace(ctx, p.ID)
 	if err != nil {
@@ -165,6 +167,17 @@ func (d *Drive) RestoreSharedFolder(ctx context.Context, p index.Place) (index.P
 	}
 	base := path.Base(p.Folder)
 	from, _ := pathIn(dir, base)
+
+	// Its top folder may be back at its own path already, and its entry no longer hold it: a rollback to before it was
+	// deleted put it there. Then it is restored as it is, without a move.
+	if back, err := d.topFolderBack(ctx, p); err != nil {
+		return index.Place{}, err
+	} else if back {
+		if err := d.index.RestoreSharedFolder(ctx, p.ID); err != nil {
+			return index.Place{}, err
+		}
+		return d.index.PlaceByID(ctx, p.ID)
+	}
 
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
 	defer cancel()

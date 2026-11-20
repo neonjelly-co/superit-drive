@@ -64,6 +64,14 @@ type (
 		DisplayName string `json:"displayName"`
 		Role        string `json:"role"`
 		Project     string `json:"project"`
+		// Rollback is there for seven days after the storage was put back to a snapshot.
+		Rollback *rollbackJSON `json:"rollback"`
+	}
+	rollbackJSON struct {
+		By    string    `json:"by"`
+		To    time.Time `json:"to"`
+		At    time.Time `json:"at"`
+		Until time.Time `json:"until"`
 	}
 	placesJSON struct {
 		Places []placeJSON `json:"places"`

@@ -9,6 +9,7 @@ import (
 	"io"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -325,6 +326,17 @@ func (d *Drive) rereadTrash(ctx context.Context, p index.Place) (index.Outcome, 
 		adopt = append(adopt, index.Adopted{Entry: entry, Deleted: day,
 			Item: index.Seen{Name: e.Name, Folder: e.Folder, Size: e.Size, Changed: e.Changed}})
 	}
+	// After a rollback, an entry holding exactly an item the place has outside the trash, which is no longer where the
+	// index has it, is that item, restored since the snapshot: it goes back into the trash as itself (rollback.go).
+	if len(adopt) > 0 {
+		if _, rolling := d.rollingBack(ctx); rolling {
+			for i := range adopt {
+				if id, from, ok := d.restoredSince(ctx, p, adopt[i].Item); ok {
+					adopt[i].Same, adopt[i].From = id, from
+				}
+			}
+		}
+	}
 
 	leave, err := d.inPlace(ctx, p)
 	if err != nil {
@@ -583,6 +595,16 @@ func (d *Drive) checkMark(ctx context.Context) (ok bool, why string, err error) 
 	case haveKept && there == kept:
 		return true, "", nil
 	case haveKept && there == "":
+		if r, ok := d.beforeTheMark(ctx); ok {
+			// Put back to a snapshot taken before the Drive marked the storage, as the settings say: that is why the mark is
+			// gone, and the storage is still the Drive's own. The mark goes back, with the same id.
+			if err := d.writeMark(ctx, kept); err != nil {
+				return false, "", err
+			}
+			d.log.Warn("the storage was put back to a snapshot taken before the Drive marked it as its own; the Drive wrote its mark back",
+				"file", StorageIDFile, "id", kept, "to", r.To.Format(time.RFC3339))
+			return true, "", nil
+		}
 		return false, "the file is not there (id " + kept + ")", nil
 	case haveKept:
 		return false, "the file holds the id of another Drive's index (id " + kept + ")", nil
@@ -592,16 +614,7 @@ func (d *Drive) checkMark(ctx context.Context) (ok bool, why string, err error) 
 	}
 	// The first time: this storage is the one the index is being built from.
 	id := newStorageID()
-	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
-	defer cancel()
-	if err := d.storage.MakeFolder(sctx, HiddenFolder); err != nil {
-		return false, "", err
-	}
-	err = d.storage.Put(sctx, StorageIDFile, strings.NewReader(id+"\n"), int64(len(id)+1))
-	if errors.Is(err, storage.ErrExists) {
-		return false, "", errors.New("another mark was written meanwhile; it is read next time")
-	}
-	if err != nil {
+	if err := d.writeMark(ctx, id); err != nil {
 		return false, "", err
 	}
 	kept, err = d.index.AddStorageID(ctx, id)
@@ -609,6 +622,24 @@ func (d *Drive) checkMark(ctx context.Context) (ok bool, why string, err error) 
 		d.log.Info("the Drive marked the storage as its own", "file", StorageIDFile, "id", id)
 	}
 	return err == nil && kept == id, "", err
+}
+
+// writeMark writes the Drive's mark, holding id, where there is none, and keeps when (storageMarked): a rollback to a
+// snapshot taken before then explains a mark that is gone. It never replaces a mark that is there.
+func (d *Drive) writeMark(ctx context.Context, id string) error {
+	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
+	defer cancel()
+	if err := d.storage.MakeFolder(sctx, HiddenFolder); err != nil {
+		return err
+	}
+	err := d.storage.Put(sctx, StorageIDFile, strings.NewReader(id+"\n"), int64(len(id)+1))
+	if errors.Is(err, storage.ErrExists) {
+		return errors.New("another mark was written meanwhile; it is read next time")
+	}
+	if err != nil {
+		return err
+	}
+	return d.index.SetState(ctx, storageMarked, strconv.FormatInt(d.now().UnixMilli(), 10))
 }
 
 // readMark reads the id in the Drive's mark on the storage: "" when there is none.

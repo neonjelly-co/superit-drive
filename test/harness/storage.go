@@ -242,7 +242,7 @@ func (s *Storage) Move(t *testing.T, from, to string, folder bool) {
 // the stand-in storage's own disk: thousands in a second, where one request each would take minutes.
 func (s *Storage) Fill(t *testing.T, dir string, n int, prefix string) {
 	t.Helper()
-	root := "/var/storage/files" + strings.TrimPrefix(s.root, shared.storage.url) // this Drive's folder
+	root := s.disk() // this Drive's folder
 	folder := root
 	for _, seg := range strings.Split(dir, "/") {
 		if seg != "" {
@@ -255,6 +255,42 @@ func (s *Storage) Fill(t *testing.T, dir string, n int, prefix string) {
 		folder, strconv.Itoa(n), prefix, root).CombinedOutput()
 	if err != nil {
 		t.Fatalf("filling %s with %d files: %v: %s", dir, n, err, out)
+	}
+}
+
+// A Snapshot is a copy of a Drive's folder on the stand-in storage as it was when the copy was taken, kept on the
+// storage's own disk outside what WebDAV serves, as a Storage Box keeps its snapshots.
+type Snapshot struct {
+	dir string
+	// Taken is when it was taken, by this computer's clock: a rollback to it declares this time.
+	Taken time.Time
+}
+
+// disk is the Drive's folder on the stand-in storage's own disk.
+func (s *Storage) disk() string {
+	return "/var/storage/files" + strings.TrimPrefix(s.root, shared.storage.url)
+}
+
+// Snapshot copies the Drive's folder (made first, empty, when there is none) with everything in it, keeping every
+// file's and folder's time of last change, as a snapshot of a Storage Box keeps them.
+func (s *Storage) Snapshot(t *testing.T) Snapshot {
+	t.Helper()
+	snap := Snapshot{dir: "/var/storage/snapshots/" + randomHex(8), Taken: time.Now()}
+	script := `set -e; mkdir -p "$1" /var/storage/snapshots; chown www-data:www-data "$1"; cp -a "$1" "$2"`
+	if out, err := exec.Command("docker", "exec", shared.storage.id, "sh", "-c", script, "snapshot", s.disk(), snap.dir).CombinedOutput(); err != nil {
+		t.Fatalf("taking a snapshot of %s: %v: %s", s.disk(), err, out)
+	}
+	return snap
+}
+
+// RollBack puts the Drive's folder back to the snapshot, as rolling a Storage Box back does: everything written since
+// is gone, and everything there then is back as it was, with its times. The snapshot can be rolled back to again. Stop
+// the Drive first, as the daemon does.
+func (s *Storage) RollBack(t *testing.T, snap Snapshot) {
+	t.Helper()
+	script := `set -e; rm -rf "$1"; cp -a "$2" "$1"`
+	if out, err := exec.Command("docker", "exec", shared.storage.id, "sh", "-c", script, "rollback", s.disk(), snap.dir).CombinedOutput(); err != nil {
+		t.Fatalf("rolling %s back: %v: %s", s.disk(), err, out)
 	}
 }
 

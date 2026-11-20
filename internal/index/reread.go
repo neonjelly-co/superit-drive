@@ -377,6 +377,11 @@ type Adopted struct {
 	Entry   string
 	Item    Seen
 	Deleted time.Time
+	// Same is, when not 0, the item of the place outside the trash that this is (after a rollback, one restored since
+	// the snapshot is back in its entry), directly in the folder From (0: the top folder). It goes into the trash as
+	// itself, keeping its id and what was given on it, as deleting it would, if it is still in From exactly as Item;
+	// otherwise the entry is added as a new item.
+	Same, From int64
 }
 
 // TrashMissing returns the items of the place's trash that have been missing since before the time given, at most limit
@@ -464,6 +469,23 @@ func (x *Index) ReconcileTrash(ctx context.Context, placeID int64, r TrashReread
 			if entries[a.Entry] || (deletedEntry.Valid && deletedEntry.String == a.Entry) || r.Leave(a.Entry) || !r.Present(a.Entry) {
 				continue
 			}
+			if a.Same != 0 {
+				res, err := tx.ExecContext(ctx, `
+					UPDATE items
+					SET trashed_at = ?, trash_folder = ?, trashed_why = 'deleted', trashed_by = NULL, restore_to = parent_id,
+						parent_id = NULL, missing_at = NULL
+					WHERE id = ? AND place_id = ? AND trashed_at IS NULL AND IFNULL(parent_id, 0) = ? AND name = ? AND is_folder = ?
+						AND size = ? AND changed_at = ?`,
+					a.Deleted.UnixMilli(), a.Entry, a.Same, placeID, a.From, a.Item.Name, a.Item.Folder, a.Item.Size, a.Item.Changed.Unix())
+				if err != nil {
+					return err
+				}
+				if n, _ := res.RowsAffected(); n == 1 {
+					entries[a.Entry] = true
+					o.Back++
+					continue
+				}
+			}
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO items (place_id, parent_id, name, is_folder, size, changed_at, trashed_at, trash_folder, trashed_why)
 				VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 'deleted')`,
@@ -496,6 +518,55 @@ func (x *Index) SetState(ctx context.Context, key, value string) error {
 	_, err := x.db.ExecContext(ctx, `
 		INSERT INTO drive_state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
+}
+
+// SetStates keeps each value under its key, in one change; an empty value keeps nothing there.
+func (x *Index) SetStates(ctx context.Context, values map[string]string) error {
+	return x.write(ctx, func(tx *sql.Tx) error {
+		for key, value := range values {
+			var err error
+			if value == "" {
+				_, err = tx.ExecContext(ctx, "DELETE FROM drive_state WHERE key = ?", key)
+			} else {
+				_, err = tx.ExecContext(ctx, `
+					INSERT INTO drive_state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// A Twin is an item of a place outside the trash that is exactly as the storage showed something (ExactlyAs).
+type Twin struct {
+	Item
+	// Missing is true when a look at its folder found it gone from there.
+	Missing bool
+}
+
+// ExactlyAs returns the items of the place that are not in the trash, live or missing, with the name, kind, size and
+// time of last change the storage showed in s, at most limit of them. An item inside a folder in the trash is among
+// them: its own row is not marked as in the trash (the caller tells by the folders above it).
+func (x *Index) ExactlyAs(ctx context.Context, placeID int64, s Seen, limit int) ([]Twin, error) {
+	rows, err := x.db.QueryContext(ctx, `
+		SELECT `+itemColumns+`, missing_at IS NOT NULL FROM items
+		WHERE place_id = ? AND trashed_at IS NULL AND name = ? AND is_folder = ? AND size = ? AND changed_at = ?
+		ORDER BY id LIMIT ?`, placeID, s.Name, s.Folder, s.Size, s.Changed.Unix(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Twin
+	for rows.Next() {
+		var t Twin
+		if t.Item, err = scanItem(rows, &t.Missing); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // AddStorageID keeps id as the id of the storage the index belongs to, unless it keeps one already, and returns the one

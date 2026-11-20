@@ -51,7 +51,9 @@ const (
 	walkFinished = "walk_finished" // when the last walk ended (the same)
 )
 
-// Walk walks the storage now and then, as w says, until ctx ends.
+// Walk walks the storage now and then, as w says, until ctx ends. After a rollback (rollback.go) it walks at once, every
+// trash first, and once that walk has ended, the next one comes ConfirmAfter (and a minute) later rather than after
+// w.Every, so what the rollback took away is dropped with its sharing soon, and the space used is right again.
 func (d *Drive) Walk(ctx context.Context, w Walking) {
 	wait := w.First
 	if _, under, _ := d.index.State(ctx, walkCursor); !under {
@@ -61,6 +63,9 @@ func (d *Drive) Walk(ctx context.Context, w Walking) {
 			}
 		}
 	}
+	if _, rolling := d.rollingBack(ctx); rolling {
+		wait = 0
+	}
 	for {
 		t := time.NewTimer(wait)
 		select {
@@ -69,10 +74,24 @@ func (d *Drive) Walk(ctx context.Context, w Walking) {
 			return
 		case <-t.C:
 		}
-		if err := d.walk(ctx, w.Pause); err != nil && ctx.Err() == nil {
-			d.log.Error("the walk through the storage stopped; it goes on from where it was next time", "error", err)
-		}
 		wait = w.Every
+		r, rolling := d.rollingBack(ctx)
+		if rolling {
+			d.afterRollback(ctx)
+		}
+		got, err := d.walk(ctx, w.Pause)
+		if err != nil {
+			if ctx.Err() == nil {
+				d.log.Error("the walk through the storage stopped; it goes on from where it was next time", "error", err)
+			}
+			continue
+		}
+		if rolling && got.untrusted == 0 {
+			if err := d.rolledBack(ctx, r.At); err != nil && ctx.Err() == nil {
+				d.log.Error("the end of the walk after the rollback could not be recorded; the next walk takes it in again", "error", err)
+			}
+			wait = min(w.Every, ConfirmAfter+time.Minute)
+		}
 	}
 }
 
@@ -82,13 +101,14 @@ type walked struct {
 	index.Outcome
 }
 
-// walk walks every place on the storage once, from where an interrupted walk stopped, or from the start.
-func (d *Drive) walk(ctx context.Context, pause time.Duration) error {
+// walk walks every place on the storage once, from where an interrupted walk stopped, or from the start, and says what
+// it did.
+func (d *Drive) walk(ctx context.Context, pause time.Duration) (w walked, err error) {
 	var step index.WalkStep
 	began := time.Now()
 	v, resuming, err := d.index.State(ctx, walkCursor)
 	if err != nil {
-		return err
+		return w, err
 	}
 	if resuming {
 		var ok bool
@@ -100,19 +120,18 @@ func (d *Drive) walk(ctx context.Context, pause time.Duration) error {
 		d.log.Info("the walk through the storage goes on from where it was", "after", step.String())
 	} else {
 		if err := d.index.SetState(ctx, walkStarted, strconv.FormatInt(time.Now().UnixMilli(), 10)); err != nil {
-			return err
+			return w, err
 		}
 		if err := d.index.SetState(ctx, walkCursor, step.String()); err != nil {
-			return err
+			return w, err
 		}
 		d.log.Info("the walk through the storage started")
 	}
 
-	var w walked
 	for {
 		next, ok, err := d.index.NextWalkStep(ctx, step)
 		if err != nil {
-			return err
+			return w, err
 		}
 		if !ok {
 			break
@@ -120,7 +139,7 @@ func (d *Drive) walk(ctx context.Context, pause time.Duration) error {
 		started := time.Now()
 		d.walkStep(ctx, next, &w)
 		if err := ctx.Err(); err != nil {
-			return err
+			return w, err
 		}
 		if n := w.folders + w.trashes; n%walkProgress == 0 {
 			d.log.Info("the walk through the storage goes on", "folders", w.folders, "trashes", w.trashes, "at", next.String(),
@@ -128,29 +147,29 @@ func (d *Drive) walk(ctx context.Context, pause time.Duration) error {
 		}
 		step = next
 		if err := d.index.SetState(ctx, walkCursor, step.String()); err != nil {
-			return err
+			return w, err
 		}
 		rest := min(max(pause, 3*time.Since(started)), maxRest)
 		t := time.NewTimer(rest)
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			return ctx.Err()
+			return w, ctx.Err()
 		case <-t.C:
 		}
 	}
 	d.unknownTopFolders(ctx)
 
 	if err := d.index.SetState(ctx, walkFinished, strconv.FormatInt(time.Now().UnixMilli(), 10)); err != nil {
-		return err
+		return w, err
 	}
 	if err := d.index.SetState(ctx, walkCursor, ""); err != nil {
-		return err
+		return w, err
 	}
 	d.log.Info("the walk through the storage ended", "resumed", resuming, "took", time.Since(began).Round(time.Second).String(),
 		"folders", w.folders, "trashes", w.trashes, "added", w.Added, "changed", w.Changed, "back", w.Back,
 		"hidden", w.Hidden, "dropped", w.Dropped, "unread", w.unread, "tooLarge", w.tooLarge, "untrusted", w.untrusted)
-	return nil
+	return w, nil
 }
 
 // walkStep looks at one folder, or one trash, for the walk.
