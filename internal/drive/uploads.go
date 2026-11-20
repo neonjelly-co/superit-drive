@@ -491,7 +491,19 @@ func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, d
 		}
 	}
 
-	err = d.moveWithin(ctx, moveIntoPlace, false, partial, file)
+	it, err := d.putInPlace(ctx, p, folder, partial, file, name, by)
+	if err != nil {
+		return Upload{}, err
+	}
+	out.Item = it
+	return out, nil
+}
+
+// putInPlace moves the whole file at partial, in the uploads folder, to file, called name, in a folder of the place
+// (nil: its top folder), never over anything there (a *Taken error when something is: put there directly since the Drive
+// looked), and records it in the index as added by by. The caller holds the place (inPlace) and the claim on file.
+func (d *Drive) putInPlace(ctx context.Context, p index.Place, folder *index.Item, partial, file, name string, by By) (index.Item, error) {
+	err := d.moveWithin(ctx, moveIntoPlace, false, partial, file)
 	if errors.Is(err, storage.ErrNotFound) && folder == nil {
 		// The place's top folder is gone from the storage (someone removed it): it is made again.
 		if err = d.ensureTop(ctx, p, nil); err == nil {
@@ -500,22 +512,22 @@ func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, d
 	}
 	switch {
 	case errors.Is(err, storage.ErrExists):
-		return Upload{}, &Taken{Name: name} // put there directly since the Drive looked
+		return index.Item{}, &Taken{Name: name} // put there directly since the Drive looked
 	case errors.Is(err, storage.ErrNotFound):
 		if _, there, serr := d.length(ctx, partial); serr == nil && !there {
-			return Upload{}, fmt.Errorf("%w: the upload's file is gone from the uploads folder", ErrStorage)
+			return index.Item{}, fmt.Errorf("%w: the upload's file is gone from the uploads folder", ErrStorage)
 		}
-		return Upload{}, ErrGone
+		return index.Item{}, ErrGone
 	case errors.Is(err, storage.ErrFull):
-		return Upload{}, ErrFull
+		return index.Item{}, ErrFull
 	case err != nil:
-		return Upload{}, storageError(err)
+		return index.Item{}, storageError(err)
 	}
 
 	// Size and time as the storage records them. If it cannot say right now, the file is there all the same: use what
 	// the Drive knows, and the next look at the folder corrects it.
 	seen := index.Seen{Name: name, Changed: d.now().UTC()}
-	sctx, cancel = context.WithTimeout(ctx, storageTimeout)
+	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
 	if e, err := d.storage.Stat(sctx, file); err == nil && !e.Folder {
 		seen.Size, seen.Changed = e.Size, e.Changed
 	}
@@ -525,13 +537,9 @@ func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, d
 	if errors.Is(err, index.ErrNoFolder) {
 		// Its folder moved to another place, or went, after the upload was decided on it; the file is where the folder
 		// was, and a look at it finds it there.
-		return Upload{}, ErrGone
+		return index.Item{}, ErrGone
 	}
-	if err != nil {
-		return Upload{}, err
-	}
-	out.Item = it
-	return out, nil
+	return it, err
 }
 
 // removeAbandoned removes the uploads no part of which arrived for AbandonedAfter, with their files; and the files in

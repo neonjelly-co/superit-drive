@@ -56,7 +56,8 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 		return err
 	}
 	defer x.Close()
-	d := drive.New(x, store, drive.Options{Now: clock.Now, Log: log, StopAt: clock.StopAt})
+	linkLimit, _ := clock.LinkLimit()
+	d := drive.New(x, store, drive.Options{Now: clock.Now, Log: log, StopAt: clock.StopAt, LinkLimit: linkLimit})
 	defer d.Stop() // the looks at folders under way in the background end, before the index closes
 
 	// A hand-over or deletion of a removed member's files that a stop cut short holds what it changes on the storage, before
