@@ -691,6 +691,8 @@ func TestASharerCanGiveAGuestsAccessAnEndDate(t *testing.T) {
 	if l := guestLine(invited(t, b, x.place, x.clients.ID, bob, "viewer", nil).Access, bob); l == nil || l.Until != nil {
 		t.Fatalf("Bob's line, without one: %+v", l)
 	}
+	// The invitation is mailed after the answer.
+	harness.Eventually(t, "Anna's invitation arrives", func() bool { return len(mailsTo(t, smtp, anna)) > 0 })
 	if !strings.Contains(mailsTo(t, smtp, anna)[0].body, "You have access until "+ends.UTC().Format("2 January 2006, 15:04 UTC")+".") {
 		t.Fatalf("Anna's invitation does not say until when: %s", mailsTo(t, smtp, anna)[0].body)
 	}
