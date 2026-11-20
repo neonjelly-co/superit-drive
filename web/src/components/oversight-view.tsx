@@ -4,6 +4,8 @@ import { useState } from "react";
 import { nameOf } from "../access";
 import { api, type Held, type HeldAct, type OutsideShare, type OutsideSwitch, type SpaceUsed } from "../api";
 import { formatChanged, formatChangedFull, formatSize } from "../format";
+import { fill, t } from "../i18n";
+import { useNarrow } from "../narrow";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
 import { FileIcon } from "./file-icon";
@@ -26,46 +28,37 @@ export function OversightView() {
 	});
 	return (
 		<>
-			<h1 className="text-xl font-semibold">Sharing and space</h1>
-			<p className="mt-1 text-sm text-muted-foreground">
-				What leaves the project and how much space each person and shared folder uses. You see names and sizes, never what
-				is inside, and My files stay closed to you.
-			</p>
+			<h1 className="text-xl font-semibold">{t.app.sharingAndSpace}</h1>
+			<p className="mt-1 text-sm text-muted-foreground">{t.oversight.intro}</p>
 			<ProjectSwitch current={outside.data?.sharingOutside} />
 			<section aria-labelledby="shared-outside" className="mt-8">
 				<h2 id="shared-outside" className="text-lg font-semibold">
-					Shared outside the project
+					{t.oversight.sharedOutside}
 				</h2>
-				<p className="mt-1 text-sm text-muted-foreground">
-					Every public link and every guest, on what is in the Drive now. Whoever shared it can remove it in its details.
-				</p>
+				<p className="mt-1 text-sm text-muted-foreground">{t.oversight.sharedOutsideNote}</p>
 				{outside.error ? (
 					<Problem error={outside.error} onRetry={() => void outside.refetch()} />
 				) : !outside.data ? (
-					<p className="mt-4 text-sm text-muted-foreground">Loading…</p>
+					<p className="mt-4 text-sm text-muted-foreground">{t.common.loading}</p>
 				) : outside.data.items.length === 0 ? (
-					<p className="mt-4 text-sm text-muted-foreground">Nothing is shared outside the project.</p>
+					<p className="mt-4 text-sm text-muted-foreground">{t.oversight.nothingOutside}</p>
 				) : (
 					<SharedOutsideList items={outside.data.items} />
 				)}
 			</section>
 			<section aria-labelledby="held" className="mt-8">
 				<h2 id="held" className="text-lg font-semibold">
-					People who left
+					{t.oversight.peopleWhoLeft}
 				</h2>
-				<p className="mt-1 text-sm text-muted-foreground">
-					When someone leaves the project, their My files is kept, closed to everyone, you included, and nothing they shared
-					from it works. If they come back, it is theirs again. You can hand it to another member or delete it; either is
-					recorded with your name.
-				</p>
+				<p className="mt-1 text-sm text-muted-foreground">{t.oversight.peopleWhoLeftNote}</p>
 				{held.error ? (
 					<Problem error={held.error} onRetry={() => void held.refetch()} />
 				) : !held.data ? (
-					<p className="mt-4 text-sm text-muted-foreground">Loading…</p>
+					<p className="mt-4 text-sm text-muted-foreground">{t.common.loading}</p>
 				) : (
 					<>
 						{held.data.held.length === 0 ? (
-							<p className="mt-4 text-sm text-muted-foreground">Nobody who left has files in the Drive.</p>
+							<p className="mt-4 text-sm text-muted-foreground">{t.oversight.nobodyLeft}</p>
 						) : (
 							<HeldList rows={held.data.held} />
 						)}
@@ -75,19 +68,22 @@ export function OversightView() {
 			</section>
 			<section aria-labelledby="space" className="mt-8">
 				<h2 id="space" className="text-lg font-semibold">
-					Space used
+					{t.oversight.spaceUsed}
 				</h2>
-				<p className="mt-1 text-sm text-muted-foreground">
-					About how much each person’s My files and each shared folder takes, its trash included.
-				</p>
+				<p className="mt-1 text-sm text-muted-foreground">{t.oversight.spaceNote}</p>
 				{space.error ? (
 					<Problem error={space.error} onRetry={() => void space.refetch()} />
 				) : !space.data ? (
-					<p className="mt-4 text-sm text-muted-foreground">Loading…</p>
+					<p className="mt-4 text-sm text-muted-foreground">{t.common.loading}</p>
 				) : (
 					<div className="mt-4 grid gap-6 lg:grid-cols-2">
-						<SpaceList title="People" rows={space.data.people} whole={space.data.used} />
-						<SpaceList title="Shared folders" rows={space.data.sharedFolders} whole={space.data.used} empty="No shared folders yet." />
+						<SpaceList title={t.oversight.people} rows={space.data.people} whole={space.data.used} />
+						<SpaceList
+							title={t.common.sharedFolders}
+							rows={space.data.sharedFolders}
+							whole={space.data.used}
+							empty={t.oversight.noSharedFolders}
+						/>
 					</div>
 				)}
 			</section>
@@ -102,7 +98,7 @@ function Problem({ error, onRetry }: { error: Error; onRetry: () => void }) {
 				{error.message}
 			</p>
 			<Button small onClick={onRetry}>
-				Try again
+				{t.common.tryAgain}
 			</Button>
 		</div>
 	);
@@ -110,9 +106,12 @@ function Problem({ error, onRetry }: { error: Error; onRetry: () => void }) {
 
 /** Who switched sharing outside off and when, as a sentence: "Switched off by Réka Kovács on 20 November 2026 at 09:41." */
 export function switchedOffBy(s: OutsideSwitch): string {
-	const who = s.by ? nameOf(s.by) : s.former ? "someone no longer in the project" : "";
-	const when = s.at ? ` on ${formatChangedFull(s.at)}` : "";
-	return `Switched off${who ? ` by ${who}` : ""}${when}.`;
+	const who = s.by ? nameOf(s.by) : s.former ? t.common.someoneWhoLeftLower : "";
+	const when = s.at ? formatChangedFull(s.at) : "";
+	if (who && when) return t.oversight.switchedOffByAt(who, when);
+	if (who) return t.oversight.switchedOffBy(who);
+	if (when) return t.oversight.switchedOffAt(when);
+	return t.oversight.switchedOff;
 }
 
 /** The project's switch of sharing outside the project, with what switching it does, asked before it is switched off. */
@@ -137,29 +136,25 @@ function ProjectSwitch({ current }: { current?: OutsideSwitch }) {
 	return (
 		<section aria-labelledby="outside-switch" className="mt-6 rounded-xl border border-border bg-card p-5">
 			<h2 id="outside-switch" className="text-lg font-semibold">
-				Sharing outside the project
+				{t.oversight.outsideTitle}
 			</h2>
 			{!current ? (
-				<p className="mt-1 text-sm text-muted-foreground">Loading…</p>
+				<p className="mt-1 text-sm text-muted-foreground">{t.common.loading}</p>
 			) : current.on ? (
 				<>
-					<p className="mt-1 text-sm">
-						On. Members can make public links and invite guests by email address. Managers can switch it off for one shared
-						folder.
-					</p>
+					<p className="mt-1 text-sm">{t.oversight.outsideOn}</p>
 					<Button className="mt-3" onClick={() => setAsking(true)} disabled={busy}>
-						Switch it off for the whole project
+						{t.oversight.switchOffProject}
 					</Button>
 				</>
 			) : (
 				<>
-					<p className="mt-1 text-sm text-attention">Off for the whole project. {switchedOffBy(current)}</p>
-					<p className="mt-1 text-sm text-muted-foreground">
-						No public link opens and no guest gets in. Links and guests stay as they are, and work again once it is
-						switched back on.
+					<p className="mt-1 text-sm text-attention">
+						{t.oversight.offForProject} {switchedOffBy(current)}
 					</p>
+					<p className="mt-1 text-sm text-muted-foreground">{t.oversight.offNote}</p>
 					<Button className="mt-3" onClick={() => void change(true)} disabled={busy}>
-						Switch it back on
+						{t.oversight.switchBackOn}
 					</Button>
 				</>
 			)}
@@ -170,17 +165,17 @@ function ProjectSwitch({ current }: { current?: OutsideSwitch }) {
 			)}
 			{asking && (
 				<Dialog
-					title="Switch off sharing outside the project?"
-					description="No public link opens and no guest gets in, anywhere in the Drive, until it is switched back on. Nobody can make a link or invite a guest. Links and guests are not removed: they work again once it is switched back on."
+					title={t.oversight.switchOffTitle}
+					description={t.oversight.switchOffNote}
 					onClose={() => setAsking(false)}
 					onSubmit={() => void change(false)}
 					footer={
 						<>
 							<Button variant="ghost" onClick={() => setAsking(false)}>
-								Cancel
+								{t.common.cancel}
 							</Button>
 							<Button variant="primary" type="submit" disabled={busy}>
-								Switch it off
+								{t.oversight.switchOff}
 							</Button>
 						</>
 					}
@@ -192,89 +187,140 @@ function ProjectSwitch({ current }: { current?: OutsideSwitch }) {
 
 /** Where something shared outside is, as an admin reads it: a shared folder by name, or whose My files. */
 function whereOf(s: OutsideShare): string {
-	if (s.place.kind === "shared-folder") return s.place.name ?? "A shared folder";
-	if (s.place.owner) return `${nameOf(s.place.owner)}’s My files`;
-	return "My files of someone no longer in the project";
+	if (s.place.kind === "shared-folder") return s.place.name ?? t.oversight.aSharedFolder;
+	if (s.place.owner) return t.oversight.myFilesOf(nameOf(s.place.owner));
+	return t.oversight.myFilesOfFormer;
 }
 
 /** Everything shared outside the project, the most recently used first, then the most recently shared. */
 function SharedOutsideList({ items }: { items: OutsideShare[] }) {
+	const narrow = useNarrow();
 	const rows = [...items].sort(
 		(a, b) => (b.used ?? "").localeCompare(a.used ?? "") || b.since.localeCompare(a.since) || a.item.name.localeCompare(b.item.name),
 	);
+	const keyOf = (s: OutsideShare) => `${s.kind}-${s.item.id}-${s.guest?.id ?? 0}`;
+	if (narrow) {
+		// On a phone, one card per share, its parts stacked: nothing scrolls sideways.
+		return (
+			<ul className="mt-4 divide-y divide-border rounded-xl border border-border bg-card text-sm">
+				{rows.map((s) => (
+					<li key={keyOf(s)} className="px-4 py-3">
+						<div className="flex min-w-0 items-start gap-2">
+							<FileIcon item={{ ...s.item }} className="mt-0.5" />
+							<div className="min-w-0">
+								<p className="font-medium break-words">{s.item.name}</p>
+								<NotWorking s={s} />
+							</div>
+						</div>
+						<dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+							<dt className="text-muted-foreground">{t.oversight.in}</dt>
+							<dd className="min-w-0 break-words">{whereOf(s)}</dd>
+							<dt className="text-muted-foreground">{t.shared.sharedBy}</dt>
+							<dd className="min-w-0 break-words">{sharedByOf(s)}</dd>
+							<dt className="text-muted-foreground">{t.oversight.with}</dt>
+							<dd className="min-w-0">
+								<With s={s} />
+							</dd>
+							<dt className="text-muted-foreground">{t.oversight.lastUsed}</dt>
+							<dd>
+								<LastUsed s={s} />
+							</dd>
+						</dl>
+					</li>
+				))}
+			</ul>
+		);
+	}
 	return (
 		<div className="mt-4 overflow-x-auto rounded-xl border border-border bg-card">
 			<table className="w-full min-w-[48rem] table-fixed text-sm">
 				<thead>
 					<tr className="h-11 border-b border-border text-left text-muted-foreground">
 						<th scope="col" className="px-4 font-normal">
-							Name
+							{t.common.name}
 						</th>
 						<th scope="col" className="w-44 px-4 font-normal">
-							In
+							{t.oversight.in}
 						</th>
 						<th scope="col" className="w-36 px-4 font-normal">
-							Shared by
+							{t.shared.sharedBy}
 						</th>
 						<th scope="col" className="w-52 px-4 font-normal">
-							With
+							{t.oversight.with}
 						</th>
 						<th scope="col" className="w-36 px-4 font-normal">
-							Last used
+							{t.oversight.lastUsed}
 						</th>
 					</tr>
 				</thead>
 				<tbody>
 					{rows.map((s) => (
-						<tr key={`${s.kind}-${s.item.id}-${s.guest?.id ?? 0}`} className="border-b border-border last:border-0 align-top">
+						<tr key={keyOf(s)} className="border-b border-border last:border-0 align-top">
 							<td className="px-4 py-3">
 								<div className="flex min-w-0 items-start gap-2">
 									<FileIcon item={{ ...s.item }} className="mt-0.5" />
 									<div className="min-w-0">
 										<p className="font-medium break-words">{s.item.name}</p>
-										{!s.works && (
-											<p className="text-attention">
-												{s.place.outside !== "on" ? "Not working: sharing outside is switched off there" : "Not working now"}
-											</p>
-										)}
+										<NotWorking s={s} />
 									</div>
 								</div>
 							</td>
 							<td className="px-4 py-3 break-words">{whereOf(s)}</td>
-							<td className="px-4 py-3 break-words">{s.sharedBy ? nameOf(s.sharedBy) : "Someone no longer in the project"}</td>
+							<td className="px-4 py-3 break-words">{sharedByOf(s)}</td>
 							<td className="px-4 py-3">
-								<p className="flex min-w-0 items-start gap-1.5">
-									{s.kind === "link" ? (
-										<>
-											<Link2 aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-											{s.linkKind === "upload-only" ? "Anyone with the upload-only link" : "Anyone with the link"}
-										</>
-									) : (
-										<>
-											<UserRound aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-											<span className="min-w-0 font-mono text-xs leading-5 break-all">{s.guest?.address}</span>
-										</>
-									)}
-								</p>
-								<p className="text-muted-foreground">
-									{s.linkKind === "upload-only" ? "Can only send files in" : s.role === "editor" ? "Editor" : "Viewer"}
-									{s.until ? `, until ${formatChanged(s.until)}` : ""}
-								</p>
+								<With s={s} />
 							</td>
 							<td className="px-4 py-3">
-								{s.used ? (
-									<span title={formatChangedFull(s.used)}>
-										{formatChanged(s.used)}, {s.uses === 1 ? "once" : `${s.uses} times`}
-									</span>
-								) : (
-									<span className="text-muted-foreground">Not yet</span>
-								)}
+								<LastUsed s={s} />
 							</td>
 						</tr>
 					))}
 				</tbody>
 			</table>
 		</div>
+	);
+}
+
+const sharedByOf = (s: OutsideShare) => (s.sharedBy ? nameOf(s.sharedBy) : t.common.someoneWhoLeft);
+
+function NotWorking({ s }: { s: OutsideShare }) {
+	if (s.works) return null;
+	return <p className="text-attention">{s.place.outside !== "on" ? t.oversight.notWorkingOff : t.oversight.notWorking}</p>;
+}
+
+/** With whom it is shared: anyone with the link, or a guest by address; and what they may do, until when. */
+function With({ s }: { s: OutsideShare }) {
+	return (
+		<>
+			<p className="flex min-w-0 items-start gap-1.5">
+				{s.kind === "link" ? (
+					<>
+						<Link2 aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+						{s.linkKind === "upload-only" ? t.who.anyoneWithUploadLink : t.who.anyoneWithLink}
+					</>
+				) : (
+					<>
+						<UserRound aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+						<span className="min-w-0 font-mono text-xs leading-5 break-all">{s.guest?.address}</span>
+					</>
+				)}
+			</p>
+			<p className="text-muted-foreground">
+				{[
+					s.linkKind === "upload-only" ? t.who.canOnlySendIn : s.role === "editor" ? t.common.editor : t.common.viewer,
+					...(s.until ? [t.oversight.until(formatChanged(s.until))] : []),
+				].join(", ")}
+			</p>
+		</>
+	);
+}
+
+function LastUsed({ s }: { s: OutsideShare }) {
+	if (!s.used) return <span className="text-muted-foreground">{t.oversight.notYet}</span>;
+	return (
+		<span title={formatChangedFull(s.used)}>
+			{s.uses === 1 ? t.oversight.usedOnce(formatChanged(s.used)) : t.oversight.usedTimes(formatChanged(s.used), s.uses)}
+		</span>
 	);
 }
 
@@ -288,15 +334,17 @@ function SpaceList({ title, rows, whole, empty }: { title: string; rows: SpaceUs
 			) : (
 				<ul className="mt-2 divide-y divide-border">
 					{rows.map((r) => {
-						const name = r.person ? nameOf(r.person) : r.former ? `${r.folder} (no longer in the project)` : (r.name ?? "");
+						const name = r.person ? nameOf(r.person) : r.former ? t.oversight.noLongerInProject(r.folder ?? "") : (r.name ?? "");
 						return (
 							<li key={r.person?.userId ?? `${r.id ?? r.folder}`} className="py-2 text-sm">
 								<div className="flex items-baseline gap-3">
 									<span className="min-w-0 flex-1 break-words">
 										{name}
-										{r.deleted && <span className="text-muted-foreground"> (in the trash)</span>}
+										{r.deleted && <span className="text-muted-foreground"> {t.oversight.inTheTrash}</span>}
 									</span>
-									<span className="shrink-0 tabular-nums text-muted-foreground">{r.used === 0 ? "Nothing" : formatSize(r.used)}</span>
+									<span className="shrink-0 tabular-nums text-muted-foreground">
+										{r.used === 0 ? t.oversight.nothing : formatSize(r.used)}
+									</span>
 								</div>
 								{whole > 0 && r.used > 0 && (
 									<div aria-hidden className="mt-1 h-1 overflow-hidden rounded-full bg-muted">
@@ -312,10 +360,10 @@ function SpaceList({ title, rows, whole, empty }: { title: string; rows: SpaceUs
 	);
 }
 
-/** How much a held My files holds, as a sentence: "4 files, 22 B", "Empty". */
+/** How much a held My files holds, as a few words: "4 files, 22 B", "No files". */
 function holds(files: number, size: number): string {
-	if (files === 0) return "No files";
-	return `${files === 1 ? "1 file" : `${files} files`}, ${formatSize(size)}`;
+	if (files === 0) return t.oversight.noFiles;
+	return t.oversight.files(files, formatSize(size));
 }
 
 /** Whose files they were, as a project admin reads it: their address when they first opened the Drive. */
@@ -335,23 +383,26 @@ function HeldList({ rows }: { rows: Held[] }) {
 						<div className="min-w-0 flex-1">
 							<p>{whose(h.folder)}</p>
 							<p className="text-muted-foreground">
-								{holds(h.files, h.size)}
-								{h.used > h.size && `, and ${formatSize(h.used - h.size)} in their trash`}
+								{[holds(h.files, h.size), ...(h.used > h.size ? [t.oversight.inTheirTrash(formatSize(h.used - h.size))] : [])].join(
+									", ",
+								)}
 							</p>
 						</div>
 						{h.act ? (
 							<p className="text-attention">
 								{h.act.kind === "hand-over"
-									? `Being handed over to ${h.act.to ? nameOf(h.act.to) : "someone who has left"}…`
-									: "Being deleted…"}
+									? h.act.to
+										? t.oversight.handingOver(nameOf(h.act.to))
+										: t.oversight.handingOverToFormer
+									: t.oversight.deleting}
 							</p>
 						) : (
 							<div className="flex gap-2">
 								<Button small onClick={() => setHanding(h)}>
-									Hand over…
+									{t.oversight.handOverButton}
 								</Button>
 								<Button small variant="danger" onClick={() => setDeleting(h)}>
-									Delete…
+									{t.oversight.deleteButton}
 								</Button>
 							</div>
 						)}
@@ -392,35 +443,29 @@ function HandOverDialog({ held, onClose }: { held: Held; onClose: () => void }) 
 	const { busy, problem, run } = useAct(onClose);
 	return (
 		<Dialog
-			title="Hand these files to another member?"
-			description={
-				<>
-					The files of {whose(held.folder)} ({holds(held.files, held.size)}) become a folder of their own in the My files of
-					the member you choose. Nothing that was shared from them comes along: their links, guests and shares stay ended.
-					What they had deleted is removed. It is recorded with your name, and cannot be undone.
-				</>
-			}
+			title={t.oversight.handOverTitle}
+			description={fill(t.oversight.handOverNote, { whose: whose(held.folder), holds: holds(held.files, held.size) })}
 			onClose={onClose}
 			onSubmit={() => to && void run(() => api.handOver(held.place, to))}
 			footer={
 				<>
 					<Button variant="ghost" onClick={onClose}>
-						Cancel
+						{t.common.cancel}
 					</Button>
 					<Button variant="primary" type="submit" disabled={busy || !to}>
-						Hand over
+						{t.oversight.handOver}
 					</Button>
 				</>
 			}
 		>
 			<label className="block text-sm">
-				<span className="font-medium">To</span>
+				<span className="font-medium">{t.oversight.to}</span>
 				<select
 					value={to}
 					onChange={(e) => setTo(e.target.value)}
-					className="mt-1 h-9 w-full rounded-md border border-input bg-card px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+					className="mt-1 h-9 w-full rounded-md border border-input bg-card px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 max-md:h-11 max-md:text-base"
 				>
-					<option value="">Choose a member</option>
+					<option value="">{t.oversight.chooseMember}</option>
 					{members.data?.map((m) => (
 						<option key={m.userId} value={m.userId}>
 							{m.displayName ? `${m.displayName} (${m.email})` : m.email}
@@ -442,22 +487,17 @@ function DeleteHeldDialog({ held, onClose }: { held: Held; onClose: () => void }
 	const { busy, problem, run } = useAct(onClose);
 	return (
 		<Dialog
-			title="Delete these files for good?"
-			description={
-				<>
-					The files of {whose(held.folder)} ({holds(held.files, held.size)}), and what they had deleted, are removed from the
-					Drive storage. They do not go to a trash: this cannot be undone. It is recorded with your name.
-				</>
-			}
+			title={t.oversight.deleteTitle}
+			description={fill(t.oversight.deleteNote, { whose: whose(held.folder), holds: holds(held.files, held.size) })}
 			onClose={onClose}
 			onSubmit={() => void run(() => api.deleteHeld(held.place))}
 			footer={
 				<>
 					<Button variant="ghost" onClick={onClose}>
-						Cancel
+						{t.common.cancel}
 					</Button>
 					<Button variant="danger" type="submit" disabled={busy}>
-						Delete for good
+						{t.oversight.deleteForGood}
 					</Button>
 				</>
 			}
@@ -474,23 +514,21 @@ function DeleteHeldDialog({ held, onClose }: { held: Held; onClose: () => void }
 /** The record of hand-overs and deletions, the most recent first: who did it, when, and what. */
 function ActRecord({ acts }: { acts: HeldAct[] }) {
 	const who = (p: { userId: string; email: string; displayName: string } | undefined, former?: boolean) =>
-		p ? nameOf(p) : former ? "someone no longer in the project" : "";
+		p ? nameOf(p) : former ? t.common.someoneWhoLeftLower : "";
 	return (
 		<div className="mt-4">
-			<h3 className="text-sm font-semibold">Handed over and deleted</h3>
+			<h3 className="text-sm font-semibold">{t.oversight.record}</h3>
 			<ul className="mt-2 divide-y divide-border rounded-xl border border-border bg-card">
 				{acts.map((a) => (
 					<li key={a.id} className="px-4 py-3 text-sm">
 						<p>
-							The files of {whose(a.folder)} ({holds(a.files, a.size)}){" "}
-							{a.kind === "hand-over" ? (
-								<>
-									were handed to {who(a.to, a.toFormer)}, as the folder “{a.into}” in their My files,
-								</>
-							) : (
-								"were deleted"
-							)}{" "}
-							by {who(a.by, a.byFormer)}.
+							{fill(a.kind === "hand-over" ? t.oversight.recordHandedOver : t.oversight.recordDeleted, {
+								whose: whose(a.folder),
+								holds: holds(a.files, a.size),
+								to: who(a.to, a.toFormer),
+								into: a.into ?? "",
+								by: who(a.by, a.byFormer),
+							})}
 						</p>
 						<p className="text-muted-foreground" title={formatChangedFull(a.at)}>
 							{formatChangedFull(a.at)}

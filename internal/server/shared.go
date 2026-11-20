@@ -40,7 +40,7 @@ func (s *Server) newSharedFolder(w http.ResponseWriter, r *http.Request, c call)
 	who := personOf(c.member)
 	for _, p := range shared {
 		if p.Name == body.Name && access.Decide(who, access.List, s.accessPlace(p, nil, given[p.ID])) {
-			s.refuseTaken(w, r, &drive.Taken{Name: body.Name, Folder: true}, "There is already a shared folder called “"+body.Name+"”. Choose another name.")
+			s.refuseTaken(w, r, &drive.Taken{Name: body.Name, Folder: true}, sharedFolderTaken)
 			return
 		}
 	}
@@ -82,7 +82,7 @@ func (s *Server) deleteSharedFolder(w http.ResponseWriter, r *http.Request, c ca
 	case err == nil:
 		writeJSON(w, http.StatusOK, deletedPlaceOf(e))
 	case errors.Is(err, drive.ErrBusy):
-		s.refuse(w, r, http.StatusConflict, "Something in “"+c.place.Name+"” is being uploaded or changed right now. Try again when that is done.")
+		s.refuse(w, r, http.StatusConflict, sharedFolderBusy, c.place.Name)
 	default:
 		s.failed(w, r, err)
 	}
@@ -126,10 +126,9 @@ func (s *Server) restoreSharedFolder(w http.ResponseWriter, r *http.Request, c c
 		where.Deleted = false
 		writeJSON(w, http.StatusOK, s.placeOf(personOf(c.member), p, &where))
 	case errors.As(err, &taken):
-		s.refuseTaken(w, r, taken, "Something called “"+taken.Name+"” was put where this shared folder goes back to on the Drive storage, "+
-			"so it cannot go back. Move that away on the storage first.")
+		s.refuseTaken(w, r, taken, sharedFolderBlocked)
 	case errors.Is(err, drive.ErrBusy):
-		s.refuse(w, r, http.StatusConflict, "“"+c.place.Name+"” is being changed right now. Try again in a moment.")
+		s.refuse(w, r, http.StatusConflict, sharedFolderChanging, c.place.Name)
 	default:
 		s.failed(w, r, err)
 	}

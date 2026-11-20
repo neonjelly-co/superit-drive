@@ -42,7 +42,7 @@ func (d *Drive) NewSharedFolder(ctx context.Context, name, creator string) (inde
 		}
 		folder, ok := pathIn(SharedFoldersFolder, base)
 		if !ok {
-			return index.Place{}, &BadName{"This name cannot be used. Choose another name."} // CheckName refuses these first
+			return index.Place{}, &BadName{nameUnusable} // CheckName refuses these first
 		}
 		if taken, err := d.index.FolderTaken(ctx, folder); err != nil {
 			return index.Place{}, err

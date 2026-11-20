@@ -145,7 +145,7 @@ func (s *Server) handOver(w http.ResponseWriter, r *http.Request, c call) {
 	list := s.members.Current()
 	to, ok := list.Lookup(body.To)
 	if !ok {
-		s.refuse(w, r, http.StatusBadRequest, "Choose a member of the project to hand the files to.")
+		s.refuse(w, r, http.StatusBadRequest, chooseWhom)
 		return
 	}
 	a, err := s.drive.HandOver(r.Context(), *c.place, to, c.member.UserID, s.stillHeld(*c.place), actWait)
@@ -167,15 +167,15 @@ func (s *Server) acted(w http.ResponseWriter, r *http.Request, a index.Act, err 
 	list := s.members.Current()
 	switch {
 	case errors.Is(err, drive.ErrNotHeld):
-		s.refuse(w, r, http.StatusConflict, "The person these files belong to is a member of the project again: the files are theirs, as they were.")
+		s.refuse(w, r, http.StatusConflict, theirsAgain)
 	case errors.Is(err, drive.ErrActing):
-		out := map[string]any{"error": "These files, or the My files they were to go to, are being handed over or deleted already. Try again once that is done."}
+		more := map[string]any{}
 		if a.ID != 0 {
-			out["act"] = actJSONOf(a, list)
+			more["act"] = actJSONOf(a, list)
 		}
-		writeJSON(w, http.StatusConflict, out)
+		refuseWith(w, r, http.StatusConflict, more, actedAlready)
 	case errors.Is(err, drive.ErrBusy):
-		s.refuse(w, r, http.StatusConflict, "Something in these files is still being changed. Try again in a moment.")
+		s.refuse(w, r, http.StatusConflict, stillChanging)
 	case errors.Is(err, drive.ErrPlaceGone), errors.Is(err, index.ErrNoPlace):
 		s.refuse(w, r, http.StatusNotFound, notHere)
 	case err != nil && a.ID != 0:

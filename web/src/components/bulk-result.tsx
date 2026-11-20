@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
 
@@ -66,12 +67,12 @@ export function BulkResultDialog({ title, done, stayed, failed, undo, onClose }:
 						</Button>
 					)}
 					<Button variant="primary" type="submit">
-						Close
+						{t.common.close}
 					</Button>
 				</>
 			}
 		>
-			<ul aria-label="Not done" className="max-h-72 overflow-auto rounded-lg border border-border px-3 text-sm">
+			<ul aria-label={t.bulk.notDone} className="max-h-72 overflow-auto rounded-lg border border-border px-3 text-sm">
 				{failed.map((f, i) => (
 					// The same name can fail twice (two files of one name from different folders): the place in the list is the key.
 					<li key={i} className="border-b border-border py-2 last:border-0">

@@ -33,7 +33,7 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 	}
 	made, ok := pathIn(dir, name)
 	if !ok {
-		return index.Item{}, &BadName{"This name cannot be used. Choose another name."}
+		return index.Item{}, &BadName{nameUnusable}
 	}
 	leave, err := d.inPlace(ctx, p)
 	if err != nil {
@@ -238,7 +238,7 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 	}
 	dest, ok := pathIn(dir, name)
 	if !ok {
-		return index.Item{}, &BadName{"This name cannot be used. Choose another name."}
+		return index.Item{}, &BadName{nameUnusable}
 	}
 	leave, err := d.inPlace(ctx, p)
 	if err != nil {

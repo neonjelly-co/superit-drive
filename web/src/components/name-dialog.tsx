@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { t } from "../i18n";
 import { composed, nameProblem } from "../names";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
@@ -60,7 +61,7 @@ export function NameDialog({ title, description, initial, selectStem, submitLabe
 			footer={
 				<>
 					<Button variant="ghost" onClick={onClose}>
-						Cancel
+						{t.common.cancel}
 					</Button>
 					<Button variant="primary" type="submit" disabled={busy}>
 						{submitLabel}
@@ -69,7 +70,7 @@ export function NameDialog({ title, description, initial, selectStem, submitLabe
 			}
 		>
 			<label htmlFor={fieldId} className="text-sm font-medium">
-				Name
+				{t.common.name}
 			</label>
 			<input
 				ref={input}
@@ -83,7 +84,7 @@ export function NameDialog({ title, description, initial, selectStem, submitLabe
 				aria-describedby={problem ? problemId : undefined}
 				autoComplete="off"
 				spellCheck={false}
-				className="mt-1.5 h-9 w-full rounded-md border border-input bg-card px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 aria-invalid:border-destructive"
+				className="mt-1.5 h-9 w-full rounded-md border border-input bg-card px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 aria-invalid:border-destructive max-md:h-11 max-md:text-base"
 			/>
 			{problem && (
 				<p id={problemId} role="alert" className="mt-2 text-sm text-destructive">

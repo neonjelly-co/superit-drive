@@ -17,11 +17,6 @@ import (
 // person. Their routes are in routes.go with all the others; guard has decided Move at the item before any of these
 // runs, and they decide again where it goes.
 
-const noSuchDestination = "The folder to move it into is not in the Drive, or you cannot add to it. Reload the page and try again."
-
-const notBetweenPlaces = "Only what is in your own My files can be moved to another place, and only into a shared folder, " +
-	"where it becomes the project's. Anything else is moved within its own place."
-
 // destination finds where a move goes and decides there: the place (the item's own when placeID is 0) and the folder
 // in it (nil, for folderID 0: its top folder). The person must be allowed to put things into that folder
 // (access.Upload), and, in another place, to move the item out of its own (access.MoveOut, only from their own My
@@ -111,7 +106,7 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, c call) {
 	folderID, okTo := anId(string(body.To))
 	placeID, okPlace := anId(string(body.Place))
 	if body.To == nil || !okTo || !okPlace {
-		s.refuse(w, r, http.StatusBadRequest, "The Drive could not read this request.")
+		s.refuse(w, r, http.StatusBadRequest, unreadable)
 		return
 	}
 	p, into, _, ok := s.destination(w, r, c, placeID, folderID)
@@ -130,7 +125,7 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, c call) {
 	case err == nil:
 		writeJSON(w, http.StatusOK, movedJSON{itemJSON: itemOf(it), Place: p.ID})
 	case errors.As(err, &taken):
-		s.refuseTaken(w, r, taken, "There is already something called “"+taken.Name+"” in that folder. Rename one of them first.")
+		s.refuseTaken(w, r, taken, takenThere)
 	default:
 		s.changeFailed(w, r, err, c.item.Name)
 	}
@@ -151,7 +146,7 @@ func (s *Server) movePreview(w http.ResponseWriter, r *http.Request, c call) {
 	folderID, okTo := anId(r.URL.Query().Get("to"))
 	placeID, okPlace := anId(r.URL.Query().Get("place"))
 	if !okTo || !okPlace {
-		s.refuse(w, r, http.StatusBadRequest, "The Drive could not read this request.")
+		s.refuse(w, r, http.StatusBadRequest, unreadable)
 		return
 	}
 	p, into, _, ok := s.destination(w, r, c, placeID, folderID)

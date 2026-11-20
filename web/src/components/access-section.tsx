@@ -1,8 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link2, Mail, User, Users, X } from "lucide-react";
 import { useId, useState } from "react";
-import { GUEST_ROLE_MEANS, moreOf, nameOf, ROLE_MEANS, ROLE_NAME, roleOf, whoOf, whyOf } from "../access";
+import { guestRoleMeans, isMe, moreOf, nameOf, roleMeans, roleName, roleOf, whoOf, whyOf } from "../access";
 import { type Access, api, type Grantee, type Member, type Role } from "../api";
+import { t } from "../i18n";
 import { Button } from "./button";
 
 type Props = {
@@ -22,8 +23,6 @@ type Props = {
 	/** Called after a change, so the list and the places follow it. */
 	onChanged: () => void;
 };
-
-const EVERYONE = "Everyone in the project";
 
 const granteeOf = (a: Access): Grantee => (a.everyone ? { everyone: true } : { userId: a.userId ?? "" });
 
@@ -56,7 +55,7 @@ function dayOf(iso: string | undefined): string {
 const today = () => dayOf(new Date(Date.now() + 1).toISOString());
 
 const field =
-	"h-9 w-full min-w-0 rounded-md border border-input bg-card px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50";
+	"h-9 w-full min-w-0 rounded-md border border-input bg-card px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 max-md:h-11 max-md:text-base";
 
 /**
  * "Who can see this" and "Give access", in the details panel: everyone with access to an item (or to a shared folder
@@ -105,7 +104,7 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 	const owner = access.data?.find((a) => a.owner)?.userId;
 	// Not the owner, who has it already, and not the person asking: they change their own line instead.
 	const choices = members.data?.filter((m) => m.userId !== owner && m.userId !== me) ?? [];
-	const everyone = who.trim().toLowerCase() === EVERYONE.toLowerCase();
+	const everyone = who.trim().toLowerCase() === t.who.everyone.toLowerCase();
 	const member = everyone ? undefined : memberOf(who, members.data);
 	// An address that is no member's: a guest, on a file or folder only.
 	const guest = !everyone && !member && looksLikeAddress(who);
@@ -113,8 +112,8 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 	const chosenRole = offered.includes(role) ? role : "viewer";
 	const mail = meQuery.data?.guests;
 	let guestWhy: string | undefined;
-	if (guest && itemId === null) guestWhy = "Guests are given a file or a folder in it, not a shared folder as a whole.";
-	else if (guest && !canInvite) guestWhy = "Sharing outside the project is switched off here, so no guest can be invited.";
+	if (guest && itemId === null) guestWhy = t.access.guestsNotOnSharedFolder;
+	else if (guest && !canInvite) guestWhy = t.access.guestsSwitchedOff;
 	else if (guest && mail && !mail.invite) guestWhy = mail.why;
 
 	const give = () => {
@@ -123,38 +122,32 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 			return change(() => lines(api.giveAccess(placeId, itemId, { userId: member.userId }, chosenRole)));
 		}
 		if (itemId === null || (!member && !guest)) {
-			setProblem("Choose a member of the project or everyone in it, or type an email address.");
+			setProblem(t.access.chooseSomeone);
 			return;
 		}
 		// By address: the Drive decides whether it is a member's or a guest's, and says which.
 		return change(
 			() => api.invite(placeId, itemId, who.trim(), chosenRole, guest ? endOfDay(until) : undefined),
 			(r) => {
-				if (r.member) {
-					return `${nameOf(r.member)} is a member of the project, so it is shared with them as a member${until ? ", without an end date" : ""}.`;
-				}
-				if (r.guest && r.invited) {
-					return `${r.guest.address} is invited as a guest. They get a mail with a link to it, and sign in with a code mailed to them.`;
-				}
-				return r.guest ? `${r.guest.address} was invited already.` : undefined;
+				if (r.member) return (until ? t.access.sharedAsMemberNoEnd : t.access.sharedAsMember)(nameOf(r.member));
+				if (r.guest && r.invited) return t.access.invitedGuest(r.guest.address);
+				return r.guest ? t.access.invitedAlready(r.guest.address) : undefined;
 			},
 		);
 	};
 
 	return (
 		<>
-			<h3 className="mt-6 text-sm font-semibold">Who can see this</h3>
+			<h3 className="mt-6 text-sm font-semibold">{t.access.whoCanSeeThis}</h3>
 			{what !== "file" && (
 				<p className="mt-0.5 text-sm text-muted-foreground">
-					{what === "shared folder"
-						? "Its managers decide who has access to it. Project admins are managers of every shared folder. Access on it reaches everything in it."
-						: "Access on a folder reaches everything in it."}
+					{what === "shared folder" ? t.access.sharedFolderNote : t.access.folderNote}
 				</p>
 			)}
 			{access.error ? (
 				<p className="mt-2 text-sm text-destructive">{access.error.message}</p>
 			) : !access.data ? (
-				<p className="mt-2 text-sm text-muted-foreground">Loading…</p>
+				<p className="mt-2 text-sm text-muted-foreground">{t.common.loading}</p>
 			) : (
 				<ul className="mt-2 text-sm">
 					{access.data.map((a, i) => {
@@ -171,16 +164,17 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 						const said = [...(roleChangeable ? [] : [roleOf(a)]), ...(why ? [why] : []), ...moreOf(a)].filter(Boolean);
 						return (
 							// One person can have several lines, from several folders: the place in the list is the key.
-							<li key={i} className="flex items-center gap-2.5 border-b border-border py-2 last:border-0">
+							// A guest's line holds their end date as well: on a phone its role and its X go on a line of their own.
+							<li key={i} className="flex flex-wrap items-center gap-x-2.5 border-b border-border py-2 last:border-0">
 								<Icon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-								<div className="min-w-0 flex-1">
+								<div className={`min-w-0 flex-1 ${roleChangeable && guestId !== undefined ? "max-md:basis-[calc(100%-1.625rem)]" : ""}`}>
 									<p className={`truncate ${a.guest ? "font-mono" : ""}`} title={a.email ?? a.guest?.address}>
 										{name}
 									</p>
-									{said.length > 0 && <p className="truncate text-muted-foreground">{said.join(" · ")}</p>}
+									{said.length > 0 && <p className="truncate text-muted-foreground max-md:whitespace-normal">{said.join(" · ")}</p>}
 									{roleChangeable && guestId !== undefined && itemId !== null && (
 										<label className="mt-1 flex items-center gap-2 text-muted-foreground">
-											Until
+											{t.access.until}
 											<input
 												type="date"
 												min={today()}
@@ -191,15 +185,15 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 														lines(api.changeInvitation(placeId, itemId, guestId, a.role as Role, endOfDay(e.target.value))),
 													)
 												}
-												className="h-8 rounded-md border border-input bg-card px-1.5 text-sm"
-												aria-label={`End date of ${name}’s access`}
+												className="h-8 rounded-md border border-input bg-card px-1.5 text-sm max-md:h-11 max-md:text-base"
+												aria-label={t.access.endDateOf(name)}
 											/>
 										</label>
 									)}
 								</div>
 								{roleChangeable && (
 									<select
-										aria-label={`Role of ${name}`}
+										aria-label={t.access.roleOf(name)}
 										value={a.role}
 										disabled={busy}
 										onChange={(e) =>
@@ -211,11 +205,11 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 												),
 											)
 										}
-										className="h-8 rounded-md border border-input bg-card px-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+										className={`h-8 rounded-md border border-input bg-card px-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 max-md:h-11 max-md:text-base ${guestId !== undefined ? "max-md:mt-1 max-md:ml-[1.625rem]" : ""}`}
 									>
 										{(a.everyone || a.guest ? roles.filter((r) => r !== "manager") : roles).map((r) => (
 											<option key={r} value={r}>
-												{ROLE_NAME[r]}
+												{roleName(r)}
 											</option>
 										))}
 									</select>
@@ -224,8 +218,8 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 									<Button
 										small
 										variant="ghost"
-										aria-label={`Take away ${name === "You" ? "your" : `${name}’s`} access`}
-										title="Take away"
+										aria-label={isMe(a, me) ? t.access.takeAwayYours : t.access.takeAwayTheirs(name)}
+										title={t.access.takeAway}
 										disabled={busy}
 										onClick={() =>
 											void change(() =>
@@ -255,7 +249,7 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 					}}
 				>
 					<label htmlFor={pickerId} className="text-sm font-semibold">
-						Give access
+						{t.access.giveAccess}
 					</label>
 					<input
 						id={pickerId}
@@ -266,35 +260,30 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 							setProblem(undefined);
 							setNotice(undefined);
 						}}
-						placeholder={itemId === null ? "A member’s name or email address" : "Name or email address"}
+						placeholder={itemId === null ? t.access.placeholderMember : t.access.placeholder}
 						autoComplete="off"
 						spellCheck={false}
 						className={`mt-2 ${field}`}
 					/>
 					<datalist id={listId}>
-						<option value={EVERYONE} />
+						<option value={t.who.everyone} />
 						{choices.map((m) => (
 							<option key={m.userId} value={m.email}>
 								{m.displayName || m.email}
 							</option>
 						))}
 					</datalist>
-					{member && <p className="mt-1.5 text-sm text-muted-foreground">{nameOf(member)}, a member of the project.</p>}
-					{guest && !guestWhy && (
-						<p className="mt-1.5 text-sm text-muted-foreground">
-							Not a member of the project: they are invited as a guest. They get a mail with a link, sign in with a code
-							mailed to them, and see only this.
-						</p>
-					)}
+					{member && <p className="mt-1.5 text-sm text-muted-foreground">{t.access.aMember(nameOf(member))}</p>}
+					{guest && !guestWhy && <p className="mt-1.5 text-sm text-muted-foreground">{t.access.guestNote}</p>}
 					{guestWhy && (
 						<p role="status" className="mt-1.5 text-sm text-attention">
 							{guestWhy}
 						</p>
 					)}
 					<fieldset className="mt-3" aria-describedby={rolesId}>
-						<legend className="sr-only">Role</legend>
+						<legend className="sr-only">{t.access.role}</legend>
 						{offered.map((r) => (
-							<label key={r} className="flex cursor-pointer gap-2.5 rounded-md py-1.5 text-sm">
+							<label key={r} className="flex cursor-pointer gap-2.5 rounded-md py-1.5 text-sm max-md:py-3">
 								<input
 									type="radio"
 									name={`${pickerId}-role`}
@@ -304,21 +293,19 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 									className="mt-0.5 size-4 shrink-0 accent-foreground"
 								/>
 								<span>
-									<span className="font-medium">{ROLE_NAME[r]}</span>
-									<span className="block text-muted-foreground">
-										{guest && r !== "manager" ? GUEST_ROLE_MEANS[r] : ROLE_MEANS[r]}
-									</span>
+									<span className="font-medium">{roleName(r)}</span>
+									<span className="block text-muted-foreground">{guest && r !== "manager" ? guestRoleMeans(r) : roleMeans(r)}</span>
 								</span>
 							</label>
 						))}
 					</fieldset>
 					<p id={rolesId} className="sr-only">
-						Choose what they may do.
+						{t.access.chooseRole}
 					</p>
 					{guest && !guestWhy && (
 						<div className="mt-2 text-sm">
 							<label htmlFor={untilId} className="font-medium">
-								Until <span className="font-normal text-muted-foreground">(if you like)</span>
+								{t.access.until} <span className="font-normal text-muted-foreground">{t.access.ifYouLike}</span>
 							</label>
 							<input
 								id={untilId}
@@ -328,20 +315,16 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 								onChange={(e) => setUntil(e.target.value)}
 								className={`mt-1 ${field}`}
 							/>
-							<p className="mt-1 text-muted-foreground">
-								Their access ends when this day ends. Without a day, it lasts until you take it away.
-							</p>
+							<p className="mt-1 text-muted-foreground">{t.access.untilNote}</p>
 						</div>
 					)}
 					<Button type="submit" className="mt-3" disabled={busy || !who.trim() || guestWhy !== undefined}>
-						{guest ? "Invite" : "Give access"}
+						{guest ? t.access.invite : t.access.giveAccess}
 					</Button>
 				</form>
 			) : (
 				<p className="mt-4 text-sm text-muted-foreground">
-					{what === "shared folder"
-						? "Only its managers can change who has access to it."
-						: "You can open it but not share it: only its editors can share it further."}
+					{what === "shared folder" ? t.access.onlyManagersChange : t.access.cannotShare}
 				</p>
 			)}
 			{notice && (

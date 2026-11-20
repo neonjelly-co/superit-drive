@@ -1,5 +1,5 @@
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Download, FolderInput, Trash2, Upload, Users, X } from "lucide-react";
+import { CheckSquare, ChevronRight, Download, FolderInput, Menu, Trash2, Upload, Users, X } from "lucide-react";
 import { type DragEvent, type MouseEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
 	ApiError,
@@ -19,19 +19,22 @@ import { ConflictDialog } from "./components/conflict-dialog";
 import { DetailsPanel, link, whereOf } from "./components/details-panel";
 import { ItemList } from "./components/item-list";
 import { MoveDialog } from "./components/move-dialog";
-import { keyOf, SharedList } from "./components/shared-list";
 import { NameDialog } from "./components/name-dialog";
-import { OversightView } from "./components/oversight-view";
 import { type Notice, NoticeBar } from "./components/notice";
+import { OversightView } from "./components/oversight-view";
 import { RollbackNotice } from "./components/rollback-notice";
 import { SearchField } from "./components/search-field";
 import { keyOfFound, locationOf, SearchList } from "./components/search-list";
 import { SharedFolderPanel } from "./components/shared-folder-panel";
+import { keyOf, SharedList } from "./components/shared-list";
 import { Sidebar } from "./components/sidebar";
 import { TrashList, type TrashRow } from "./components/trash-list";
 import { UploadsPanel } from "./components/uploads-panel";
+import { Wordmark } from "./components/wordmark";
+import { t } from "./i18n";
 import { hrefOf, useWhere, type Where } from "./location";
 import { freeName } from "./names";
+import { useNarrow } from "./narrow";
 import { droppedFiles, useUploads } from "./uploads";
 
 const carriesFiles = (e: { dataTransfer: DataTransfer | null }) => e.dataTransfer?.types.includes("Files") ?? false;
@@ -40,22 +43,17 @@ type SharedFolder = Extract<Place, { kind: "shared-folder" }>;
 const isShared = (p: Place): p is SharedFolder => p.kind === "shared-folder";
 
 /** A place's name as people see it. */
-const nameOfPlace = (p: Place) => (p.kind === "my-files" ? "My files" : p.name);
+const nameOfPlace = (p: Place) => (p.kind === "my-files" ? t.app.myFiles : p.name);
 
-const ROLE_SENTENCE: Record<string, string> = {
-	viewer: "You can open and download.",
-	editor: "You are an editor: you can also upload, rename, move, delete and share.",
-	manager: "You are a manager.",
-};
+/** What the person may do in a folder, by their role there, in one sentence. */
+const roleSentence = (role: string) =>
+	role === "viewer" ? t.note.viewer : role === "editor" ? t.note.editor : role === "manager" ? t.note.manager : "";
 
 let nextNotice = 1;
 
 /** Whether two lists of a folder show the same: the same items, as they are, and the same path and rights. */
 const sameList = (a: Listing, b: Listing) =>
 	JSON.stringify({ ...a, checking: false }) === JSON.stringify({ ...b, checking: false });
-
-/** "1 item", "3 items". */
-const itemsCount = (n: number) => (n === 1 ? "1 item" : `${n} items`);
 
 /** What the bulk result dialog says: a change asked of several items that did not happen to all of them. */
 type BulkResult = { title: string; done: string; stayed: string; failed: Failure[]; undo?: { label: string; run: () => void } };
@@ -76,9 +74,14 @@ type BulkResult = { title: string; done: string; stayed: string; failed: Failure
  * folder's list, tick boxes select several items; with two or more selected, the list's header becomes a bar to move,
  * download as one zip or delete them together. Each is changed by its own request, and when some are not, a dialog says
  * which and why.
+ *
+ * On a phone the same page folds: the sidebar is behind a menu button, each row is a name with one line under it, the
+ * details are a sheet from the bottom, and tick boxes show only after "Select" or a press and hold on a row, with what
+ * can be done with the items selected in a bar at the bottom.
  */
 export function App() {
 	const queryClient = useQueryClient();
+	const narrow = useNarrow();
 	const me = useQuery({ queryKey: ["me"], queryFn: api.me });
 	const places = useQuery({ queryKey: ["places"], queryFn: api.places });
 	const members = useQuery({ queryKey: ["members"], queryFn: api.members });
@@ -91,7 +94,7 @@ export function App() {
 	const inPart =
 		where.view === "files" && where.place !== null && where.folder !== null && places.data !== undefined && !place;
 	const placeId = place?.id ?? (inPart && where.view === "files" ? (where.place ?? undefined) : undefined);
-	const placeName = place ? nameOfPlace(place) : "My files";
+	const placeName = place ? nameOfPlace(place) : t.app.myFiles;
 	const folderId = where.view === "files" ? where.folder : null;
 
 	const listing = useQuery({
@@ -171,11 +174,15 @@ export function App() {
 	const beforeSearch = useRef<Where>({ view: "files", place: null, folder: null });
 
 	// The items selected in the list, by id: one shows its details; two or more, the bulk bar. Only those still in the
-	// list count.
+	// list count. On a phone, ticking is a mode of its own (selecting): the details of one item ticked are not shown
+	// then, and the bar is at the bottom.
 	const [ticked, setTicked] = useState<ReadonlySet<number>>(new Set());
+	const [selecting, setSelecting] = useState(false);
+	const choosing = narrow && selecting;
 	const tickedItems = items?.filter((i) => ticked.has(i.id)) ?? [];
-	const selected = tickedItems.length === 1 ? tickedItems[0] : undefined;
+	const selected = tickedItems.length === 1 && !choosing ? tickedItems[0] : undefined;
 	const [placePanel, setPlacePanel] = useState(false);
+	const [menuOpen, setMenuOpen] = useState(false);
 	const [dialog, setDialog] = useState<"new-folder" | "new-shared-folder" | "rename" | null>(null);
 	// What the Move dialog moves: the selected item, or every item selected.
 	const [moving, setMoving] = useState<Item[]>();
@@ -189,7 +196,7 @@ export function App() {
 	const waiting = changedList?.key === listKey ? changedList.listing : undefined;
 	const differs = waiting !== undefined && listing.data !== undefined && !sameList(waiting, listing.data);
 	const acting =
-		ticked.size > 0 || dialog !== null || moving !== undefined || busy || progress !== undefined || bulkResult !== undefined || uploads.question !== undefined;
+		ticked.size > 0 || choosing || dialog !== null || moving !== undefined || busy || progress !== undefined || bulkResult !== undefined || uploads.question !== undefined;
 	const showChanges = useCallback(() => {
 		if (!waiting || placeId === undefined) return;
 		queryClient.setQueryData(["items", placeId, folderId], waiting);
@@ -201,13 +208,20 @@ export function App() {
 	const [dragging, setDragging] = useState(false);
 	const say = useCallback((n: Omit<Notice, "key">) => setNotice({ ...n, key: nextNotice++ }), []);
 	const closeNotice = useCallback(() => setNotice(null), []);
+	const closeMenu = useCallback(() => setMenuOpen(false), []);
+	const clearSelection = useCallback(() => {
+		setTicked(new Set());
+		setSelecting(false);
+	}, []);
 
 	const goTo = useCallback(
 		(w: Where, how?: { replace?: boolean }) => {
 			setTicked(new Set());
+			setSelecting(false);
 			setSharedKey(undefined);
 			setFoundKey(undefined);
 			setPlacePanel(false);
+			setMenuOpen(false);
 			go(w, how);
 		},
 		[go],
@@ -252,6 +266,12 @@ export function App() {
 		setPlacePanel(false);
 		setTicked(on ? new Set(items?.map((i) => i.id)) : new Set());
 	};
+	/** On a phone: "Select", or a press and hold on a row (which ticks it), starts choosing several. */
+	const startSelecting = (item?: Item) => {
+		setPlacePanel(false);
+		setSelecting(true);
+		setTicked(item ? new Set([item.id]) : new Set());
+	};
 
 	const current = path.at(-1);
 	const here = current?.name ?? placeName;
@@ -259,30 +279,30 @@ export function App() {
 	useEffect(() => {
 		const name =
 			where.view === "trash"
-				? "Trash"
+				? t.app.trash
 				: where.view === "shared"
-					? "Shared with me"
+					? t.app.sharedWithMe
 					: where.view === "search"
-						? "Search"
+						? t.app.search
 						: where.view === "oversight"
-							? "Sharing and space"
+							? t.app.sharingAndSpace
 							: here;
 		document.title = project ? `${name} · ${project}` : name;
 	}, [where.view, here, project]);
 
 	// Escape clears the selection, unless something else (a dialog, a field) takes it.
-	const anyTicked = tickedItems.length > 0;
+	const anyTicked = tickedItems.length > 0 || choosing;
 	useEffect(() => {
 		if (!anyTicked) return;
 		const clear = (e: KeyboardEvent) => {
 			const target = e.target as HTMLElement | null;
 			if (e.key !== "Escape" || e.defaultPrevented || document.querySelector("dialog[open]")) return;
 			if (target?.closest("input:not([type=checkbox]), textarea, select")) return;
-			setTicked(new Set());
+			clearSelection();
 		};
 		window.addEventListener("keydown", clear);
 		return () => window.removeEventListener("keydown", clear);
-	}, [anyTicked]);
+	}, [anyTicked, clearSelection]);
 
 	// A file dropped anywhere but the list would make the browser leave the Drive to show it. Refuse those drops.
 	useEffect(() => {
@@ -324,11 +344,11 @@ export function App() {
 		const from = { id: placeId, name: placeName };
 		setBusy(true);
 		try {
-			const t = await api.remove(placeId, item.id);
+			const r = await api.remove(placeId, item.id);
 			setTicked(new Set());
 			refresh(folderId);
 			void queryClient.invalidateQueries({ queryKey: ["trash", placeId] });
-			say({ text: `“${t.name}” was moved to the trash.`, action: { label: "Undo", run: () => void restore(from, t) } });
+			say({ text: t.notices.toTrash(r.name), action: { label: t.common.undo, run: () => void restore(from, r) } });
 		} catch (e) {
 			say({ text: e instanceof Error ? e.message : String(e), failed: true });
 			refresh(folderId);
@@ -337,19 +357,18 @@ export function App() {
 		}
 	};
 
-	const restore = async (from: { id: number; name: string }, t: TrashItem) => {
-		setRestoring(`${from.id}:${t.id}`);
+	const restore = async (from: { id: number; name: string }, item: TrashItem) => {
+		setRestoring(`${from.id}:${item.id}`);
 		try {
-			const r = await api.restore(from.id, t.id);
+			const r = await api.restore(from.id, item.id);
 			const to = r.path.at(-1) ?? null;
 			void queryClient.invalidateQueries({ queryKey: ["items", from.id, to?.id ?? null] });
 			void queryClient.invalidateQueries({ queryKey: ["usage"] });
 			void queryClient.invalidateQueries({ queryKey: ["trash", from.id] });
 			const back = [from.name, ...r.path.map((f) => f.name)].join(" › ");
-			const renamed = r.item.name !== t.name ? ` as “${r.item.name}”, as “${t.name}” is taken there` : "";
 			say({
-				text: `“${t.name}” is back in ${back}${renamed}.`,
-				action: { label: "Show", run: () => goTo({ view: "files", place: placeParam(from.id), folder: to?.id ?? null }) },
+				text: r.item.name !== item.name ? t.notices.backInAs(item.name, back, r.item.name) : t.notices.backIn(item.name, back),
+				action: { label: t.common.show, run: () => goTo({ view: "files", place: placeParam(from.id), folder: to?.id ?? null }) },
 			});
 		} catch (e) {
 			say({ text: e instanceof Error ? e.message : String(e), failed: true });
@@ -363,42 +382,42 @@ export function App() {
 	const removeSeveral = async (list: Item[]) => {
 		if (placeId === undefined || list.length === 0) return;
 		const from = { id: placeId, name: placeName };
-		setProgress(`Moving to the trash: 0 of ${list.length}`);
-		const r = await eachOf(list, (it) => api.remove(from.id, it.id), (n) => setProgress(`Moving to the trash: ${n} of ${list.length}`));
+		setProgress(t.progress.toTrash(0, list.length));
+		const r = await eachOf(list, (it) => api.remove(from.id, it.id), (n) => setProgress(t.progress.toTrash(n, list.length)));
 		setProgress(undefined);
-		setTicked(new Set());
+		clearSelection();
 		refresh(folderId);
 		void queryClient.invalidateQueries({ queryKey: ["trash", from.id] });
-		const undo = { label: "Undo", run: () => void restoreSeveral(from, r.done) };
+		const undo = { label: t.common.undo, run: () => void restoreSeveral(from, r.done) };
 		if (r.failed.length === 0) {
-			say({ text: `${itemsCount(r.done.length)} moved to the trash.`, action: undo });
+			say({ text: t.notices.manyToTrash(r.done.length), action: undo });
 			return;
 		}
 		setBulkResult({
-			title: `${r.failed.length} of ${itemsCount(list.length)} not deleted`,
-			done: r.done.length > 0 ? `${itemsCount(r.done.length)} moved to the trash.` : "Nothing was moved to the trash.",
-			stayed: r.failed.length === 1 ? "This one was not, and is still here:" : "These were not, and are still here:",
+			title: t.bulk.notDeleted(r.failed.length, list.length),
+			done: r.done.length > 0 ? t.notices.manyToTrash(r.done.length) : t.bulk.noneDeleted,
+			stayed: r.failed.length === 1 ? t.bulk.deletedStayedOne : t.bulk.deletedStayedMany,
 			failed: r.failed,
-			undo: r.done.length > 0 ? { label: "Undo the delete", run: undo.run } : undefined,
+			undo: r.done.length > 0 ? { label: t.bulk.undoDelete, run: undo.run } : undefined,
 		});
 	};
 
 	/** Brings several items back from a place's trash (Undo after deleting several), and says what happened. */
 	const restoreSeveral = async (from: { id: number; name: string }, list: TrashItem[]) => {
-		setProgress(`Restoring: 0 of ${list.length}`);
-		const r = await eachOf(list, (t) => api.restore(from.id, t.id), (n) => setProgress(`Restoring: ${n} of ${list.length}`));
+		setProgress(t.progress.restoring(0, list.length));
+		const r = await eachOf(list, (it) => api.restore(from.id, it.id), (n) => setProgress(t.progress.restoring(n, list.length)));
 		setProgress(undefined);
 		void queryClient.invalidateQueries({ queryKey: ["items", from.id] });
 		void queryClient.invalidateQueries({ queryKey: ["usage"] });
 		void queryClient.invalidateQueries({ queryKey: ["trash", from.id] });
 		if (r.failed.length === 0) {
-			say({ text: `${itemsCount(r.done.length)} back where they were.` });
+			say({ text: t.notices.manyBack(r.done.length) });
 			return;
 		}
 		setBulkResult({
-			title: `${r.failed.length} of ${itemsCount(list.length)} not restored`,
-			done: r.done.length > 0 ? `${itemsCount(r.done.length)} back where they were.` : "Nothing was restored.",
-			stayed: r.failed.length === 1 ? "This one is still in the trash:" : "These are still in the trash:",
+			title: t.bulk.notRestored(r.failed.length, list.length),
+			done: r.done.length > 0 ? t.notices.manyBack(r.done.length) : t.bulk.noneRestored,
+			stayed: r.failed.length === 1 ? t.bulk.restoreStayedOne : t.bulk.restoreStayedMany,
 			failed: r.failed,
 		});
 	};
@@ -410,8 +429,8 @@ export function App() {
 			void queryClient.invalidateQueries({ queryKey: ["places"] });
 			void queryClient.invalidateQueries({ queryKey: ["deleted-shared-folders"] });
 			say({
-				text: `“${d.name}” is back, with everything in it.`,
-				action: { label: "Show", run: () => goTo({ view: "files", place: d.id, folder: null }) },
+				text: t.notices.sharedFolderBack(d.name),
+				action: { label: t.common.show, run: () => goTo({ view: "files", place: d.id, folder: null }) },
 			});
 		} catch (e) {
 			say({ text: e instanceof Error ? e.message : String(e), failed: true });
@@ -426,22 +445,22 @@ export function App() {
 		goTo({ view: "files", place: null, folder: null });
 		void queryClient.invalidateQueries({ queryKey: ["places"] });
 		void queryClient.invalidateQueries({ queryKey: ["deleted-shared-folders"] });
-		say({ text: `“${d.name}” was moved to the trash.`, action: { label: "Undo", run: () => void restoreSharedFolder(d) } });
+		say({ text: t.notices.toTrash(d.name), action: { label: t.common.undo, run: () => void restoreSharedFolder(d) } });
 	};
 
 	// Everything in the trash, the most recently deleted first.
 	const trashRows: { row: TrashRow; restore: () => void }[] = [];
 	trashPlaces.forEach((p, i) => {
 		const from = { id: p.id, name: nameOfPlace(p) };
-		for (const t of trashes[i]?.data ?? []) {
+		for (const it of trashes[i]?.data ?? []) {
 			trashRows.push({
-				row: { ...t, key: `${p.id}:${t.id}`, backTo: [from.name, ...t.from.map((f) => f.name)].join(" › ") },
-				restore: () => void restore(from, t),
+				row: { ...it, key: `${p.id}:${it.id}`, backTo: [from.name, ...it.from.map((f) => f.name)].join(" › ") },
+				restore: () => void restore(from, it),
 			});
 		}
 	});
 	for (const d of deletedPlaces.data ?? []) {
-		trashRows.push({ row: { ...d, key: `place:${d.id}`, backTo: "Shared folders" }, restore: () => void restoreSharedFolder(d) });
+		trashRows.push({ row: { ...d, key: `place:${d.id}`, backTo: t.common.sharedFolders }, restore: () => void restoreSharedFolder(d) });
 	}
 	trashRows.sort((a, b) => b.row.deleted.localeCompare(a.row.deleted));
 	const trashError = places.error ?? deletedPlaces.error ?? trashes.find((q) => q.error)?.error;
@@ -450,16 +469,16 @@ export function App() {
 	const folderGone = listingGone;
 	const role = listing.data?.role || (place?.kind === "shared-folder" ? place.role : "");
 	const note = !place
-		? `Shared with you. ${ROLE_SENTENCE[role] ?? ""}`
+		? [t.note.sharedWithYou, roleSentence(role)].filter(Boolean).join(" ")
 		: place.kind === "shared-folder"
-			? `Owned by the project. ${ROLE_SENTENCE[role] ?? ""} Project admins can open every shared folder.`
-			: "Only you can see these, unless you share them. Project admins cannot open them.";
+			? [t.note.ownedByProject, roleSentence(role), t.note.adminsOpenShared].filter(Boolean).join(" ")
+			: t.note.myFiles;
 	// The panel for the folder being looked at: the shared folder as a whole at its top, the folder itself further in.
 	const herePanel = placePanel && !selected && where.view === "files" && placeId !== undefined;
 	const canSeeHere = current ? can.includes("see-access") : place?.kind === "shared-folder";
 	// Where an item is, as the person may see it: from the place's name when they can open it, otherwise from "Shared
 	// with me", where they found what they were given.
-	const rootName = fromTop ? placeName : "Shared with me";
+	const rootName = fromTop ? placeName : t.app.sharedWithMe;
 	// The shared folders an item of the person's own My files may be moved into (with the warning).
 	const moveInto = sharedFolders.filter((p) => p.can.includes("move-in") && p.id !== placeId).map((p) => ({ id: p.id, name: p.name }));
 
@@ -472,13 +491,12 @@ export function App() {
 		if (placeId === undefined) return;
 		const there = folder?.name ?? to.name;
 		const intoPlace = to.id === placeId ? undefined : to.id;
-		const project = intoPlace === undefined ? "" : list.length === 1 ? " It belongs to the project now." : " They belong to the project now.";
 		const show = {
-			label: "Show",
+			label: t.common.show,
 			run: () => (intoPlace === undefined ? openFolder(folder) : goTo({ view: "files", place: to.id, folder: folder?.id ?? null })),
 		};
 		const changed = () => {
-			setTicked(new Set());
+			clearSelection();
 			refresh(folderId);
 			if (intoPlace === undefined) refresh(folder?.id ?? null);
 			else {
@@ -486,64 +504,70 @@ export function App() {
 				void queryClient.invalidateQueries({ queryKey: ["access"] });
 			}
 		};
+		const movedMany = (n: number) => (intoPlace === undefined ? t.notices.movedMany(n, there) : t.notices.movedManyToProject(n, there));
 		const only = list.length === 1 ? list[0] : undefined;
 		if (only) {
 			await api.move(placeId, only.id, folder?.id ?? null, intoPlace);
 			changed();
-			say({ text: `“${only.name}” was moved to ${there}.${project}`, action: show });
+			say({
+				text: intoPlace === undefined ? t.notices.movedOne(only.name, there) : t.notices.movedOneToProject(only.name, there),
+				action: show,
+			});
 			return;
 		}
-		setProgress(`Moving: 0 of ${list.length}`);
+		setProgress(t.progress.moving(0, list.length));
 		const r: BulkOutcome<unknown> = await eachOf(
 			list,
 			(it) => api.move(placeId, it.id, folder?.id ?? null, intoPlace),
-			(n) => setProgress(`Moving: ${n} of ${list.length}`),
+			(n) => setProgress(t.progress.moving(n, list.length)),
 		);
 		setProgress(undefined);
 		changed();
 		if (r.failed.length === 0) {
-			say({ text: `${itemsCount(r.done.length)} moved to ${there}.${project}`, action: show });
+			say({ text: movedMany(r.done.length), action: show });
 			return;
 		}
 		setBulkResult({
-			title: `${r.failed.length} of ${itemsCount(list.length)} not moved`,
-			done: r.done.length > 0 ? `${itemsCount(r.done.length)} moved to ${there}.${project}` : "Nothing was moved.",
-			stayed: r.failed.length === 1 ? "This one was not, and is still where it was:" : "These were not, and are still where they were:",
+			title: t.bulk.notMoved(r.failed.length, list.length),
+			done: r.done.length > 0 ? movedMany(r.done.length) : t.bulk.noneMoved,
+			stayed: r.failed.length === 1 ? t.bulk.movedStayedOne : t.bulk.movedStayedMany,
 			failed: r.failed,
 		});
 	};
 
-	// The bar the list's header becomes with two or more items selected.
-	const several = tickedItems.length >= 2;
+	// What can be done with the items selected: on a wide screen, the bar the list's header becomes with two or more;
+	// on a phone, the bar at the bottom while choosing, with one or more.
+	const several = choosing ? tickedItems.length >= 1 : tickedItems.length >= 2;
 	const canMoveAll = several && tickedItems.every((i) => i.can?.includes("move"));
 	const canDeleteAll = several && tickedItems.every((i) => i.can?.includes("delete"));
+	const canZipAll = several && can.includes("download");
 	const bar =
-		placeId !== undefined && several ? (
+		placeId !== undefined && several && !choosing ? (
 			<div className="flex flex-wrap items-center gap-2 py-1.5">
 				<span className="mr-auto pl-3 font-semibold" aria-live="polite">
-					{progress ?? `${tickedItems.length} selected`}
+					{progress ?? t.selection.selected(tickedItems.length)}
 				</span>
 				{canMoveAll && (
 					<Button small onClick={() => setMoving(tickedItems)} disabled={!!progress}>
-						<FolderInput aria-hidden /> Move
+						<FolderInput aria-hidden /> {t.common.move}
 					</Button>
 				)}
-				{can.includes("download") && (
+				{canZipAll && (
 					<a
 						href={api.zipUrl(placeId, folderId, tickedItems.map((i) => i.id))}
 						download
 						className={`${link} h-8 px-2.5 ${progress ? "pointer-events-none opacity-50" : ""}`}
 					>
-						<Download aria-hidden className="size-4" /> Download as zip
+						<Download aria-hidden className="size-4" /> {t.common.downloadZip}
 					</a>
 				)}
 				{canDeleteAll && (
 					<Button small variant="danger" onClick={() => void removeSeveral(tickedItems)} disabled={!!progress}>
-						<Trash2 aria-hidden /> Delete
+						<Trash2 aria-hidden /> {t.common.delete}
 					</Button>
 				)}
-				<Button small variant="ghost" onClick={() => setTicked(new Set())} disabled={!!progress}>
-					<X aria-hidden /> Clear
+				<Button small variant="ghost" onClick={clearSelection} disabled={!!progress}>
+					<X aria-hidden /> {t.selection.clear}
 				</Button>
 			</div>
 		) : undefined;
@@ -553,21 +577,18 @@ export function App() {
 	const refused = [me, places, listing].map((q) => q.error).find((e) => e instanceof ApiError && e.status === 403);
 	if (refused) {
 		return (
-			<main className="grid h-screen place-items-center bg-background p-6 text-foreground">
+			<main className="grid h-dvh place-items-center bg-background p-6 text-foreground max-md:p-4">
 				<div className="max-w-md rounded-xl border border-border bg-card p-6">
-					<h1 className="text-lg font-semibold">The Drive is closed to you</h1>
+					<h1 className="text-lg font-semibold">{t.app.closedTitle}</h1>
 					<p className="mt-2 text-sm text-muted-foreground">{refused.message}</p>
-					<p className="mt-2 text-sm text-muted-foreground">
-						If you think this is a mistake, ask a project admin. If you are added back, your files are here as you left
-						them, unless they were handed to someone else or deleted.
-					</p>
+					<p className="mt-2 text-sm text-muted-foreground">{t.app.closedNote}</p>
 				</div>
 			</main>
 		);
 	}
 
 	return (
-		<div className="flex h-screen bg-background text-foreground">
+		<div className="flex h-dvh bg-background text-foreground">
 			<Sidebar
 				project={project}
 				where={where}
@@ -578,9 +599,12 @@ export function App() {
 				onNewFolder={inFiles && can.includes("make-folder") ? () => setDialog("new-folder") : undefined}
 				onNewSharedFolder={() => setDialog("new-shared-folder")}
 				oversees={me.data?.can?.includes("oversee")}
+				open={narrow && menuOpen}
+				onClose={closeMenu}
 			/>
 			<div
-				className="relative min-w-0 flex-1"
+				className="relative flex min-w-0 flex-1 flex-col"
+				inert={narrow && menuOpen}
 				onDragEnter={dragOver}
 				onDragOver={dragOver}
 				onDragLeave={(e) => {
@@ -591,11 +615,24 @@ export function App() {
 					e.preventDefault();
 					setDragging(false);
 					droppedFiles(e.dataTransfer).then(uploads.add, (err) =>
-						say({ text: `What was dropped could not be read: ${err instanceof Error ? err.message : String(err)}`, failed: true }),
+						say({ text: t.app.droppedUnreadable(err instanceof Error ? err.message : String(err)), failed: true }),
 					);
 				}}
 			>
-				<main className="h-full overflow-auto p-6 pb-24">
+				<header className="flex h-14 shrink-0 items-center gap-2 border-b border-border bg-card px-2 md:hidden">
+					<button
+						type="button"
+						onClick={() => setMenuOpen(true)}
+						aria-label={t.app.openMenu}
+						aria-expanded={menuOpen}
+						className="grid size-11 place-items-center rounded-md hover:bg-muted"
+					>
+						<Menu aria-hidden className="size-5" />
+					</button>
+					<Wordmark className="text-lg" />
+					<span className="min-w-0 truncate text-sm text-muted-foreground">{project ? t.app.driveOf(project) : t.app.drive}</span>
+				</header>
+				<main className={`min-h-0 flex-1 overflow-auto p-6 pb-24 max-md:p-4 ${choosing ? "max-md:pb-40" : "max-md:pb-24"}`}>
 					{me.data?.rollback && <RollbackNotice key={me.data.rollback.at} rollback={me.data.rollback} />}
 					<div className="mb-5">
 						<SearchField query={query} onSearch={onSearch} onClear={endSearch} />
@@ -604,15 +641,12 @@ export function App() {
 						me.data?.can?.includes("oversee") ? (
 							<OversightView />
 						) : (
-							<p className="mt-16 text-center text-sm text-muted-foreground">This is not in the Drive, or you have no access to it.</p>
+							<p className="mt-16 text-center text-sm text-muted-foreground">{t.common.notHere}</p>
 						)
 					) : where.view === "search" ? (
 						<>
-							<h1 className="text-xl font-semibold break-words">Search: “{query.trim()}”</h1>
-							<p className="mt-1 text-sm text-muted-foreground">
-								Names of files and folders you can see, in any case and with or without accents. What is inside files is
-								not searched.
-							</p>
+							<h1 className="text-xl font-semibold break-words">{t.views.searchTitle(query.trim())}</h1>
+							<p className="mt-1 text-sm text-muted-foreground">{t.views.searchNote}</p>
 							<SearchList
 								items={found.data?.items}
 								loading={found.isPending}
@@ -623,20 +657,12 @@ export function App() {
 								selected={foundKey}
 								onSelect={(f) => setFoundKey(keyOfFound(f))}
 							/>
-							{found.data?.more && (
-								<p className="mt-3 text-sm text-muted-foreground">
-									These are the best {found.data.items.length}. More names have this in them: type more of the name to find
-									the one you want.
-								</p>
-							)}
+							{found.data?.more && <p className="mt-3 text-sm text-muted-foreground">{t.views.searchMore(found.data.items.length)}</p>}
 						</>
 					) : where.view === "trash" ? (
 						<>
-							<h1 className="text-xl font-semibold">Trash</h1>
-							<p className="mt-1 text-sm text-muted-foreground">
-								Deleted files and folders stay here for 30 days, and are then removed for good. Until then they count
-								towards the space used.
-							</p>
+							<h1 className="text-xl font-semibold">{t.app.trash}</h1>
+							<p className="mt-1 text-sm text-muted-foreground">{t.views.trashNote}</p>
 							<TrashList
 								rows={trashRows.map((r) => r.row)}
 								loading={trashLoading}
@@ -652,11 +678,8 @@ export function App() {
 						</>
 					) : where.view === "shared" ? (
 						<>
-							<h1 className="text-xl font-semibold">Shared with me</h1>
-							<p className="mt-1 text-sm text-muted-foreground">
-								What others shared with you from their My files, or from shared folders you are not part of. What is in
-								a folder is found by opening it.
-							</p>
+							<h1 className="text-xl font-semibold">{t.app.sharedWithMe}</h1>
+							<p className="mt-1 text-sm text-muted-foreground">{t.views.sharedNote}</p>
 							<SharedList
 								items={shared.data}
 								loading={shared.isPending}
@@ -667,22 +690,20 @@ export function App() {
 								onSelect={(item) => setSharedKey(keyOf(item))}
 							/>
 							{shared.data && shared.data.length > 0 && (
-								<p className="mt-3 text-sm text-muted-foreground">
-									Click a name to open it. Click elsewhere on a row to see its details.
-								</p>
+								<p className="mt-3 text-sm text-muted-foreground">{narrow ? t.note.sharedHintPhone : t.note.sharedHint}</p>
 							)}
 						</>
 					) : missingPlace ? (
 						<div className="mt-16 flex flex-col items-center text-center text-sm text-muted-foreground">
-							<p>This is not in the Drive, or you have no access to it.</p>
+							<p>{t.common.notHere}</p>
 							<Button className="mt-3" onClick={() => goTo({ view: "files", place: null, folder: null })}>
-								Go to My files
+								{t.app.goToMyFiles}
 							</Button>
 						</div>
 					) : (
 						<>
-							<div className="flex items-start gap-3">
-								<div className="min-w-0 flex-1">
+							<div className="flex flex-wrap items-start gap-3">
+								<div className="min-w-0 flex-1 max-md:basis-full">
 									<Breadcrumb
 										placeName={fromTop ? placeName : undefined}
 										place={where.view === "files" ? where.place : null}
@@ -692,7 +713,7 @@ export function App() {
 								</div>
 								{inFiles && placeId !== undefined && can.includes("download") && items && items.length > 0 && (
 									<a href={api.zipUrl(placeId, current?.id ?? null)} download className={`${link} h-8 px-2.5`}>
-										<Download aria-hidden className="size-4" /> Download as zip
+										<Download aria-hidden className="size-4" /> {t.common.downloadZip}
 									</a>
 								)}
 								{inFiles && canSeeHere && (
@@ -703,23 +724,26 @@ export function App() {
 											setPlacePanel(true);
 										}}
 									>
-										<Users aria-hidden /> Who can see this
+										<Users aria-hidden /> {t.toolbar.whoCanSeeThis}
+									</Button>
+								)}
+								{narrow && inFiles && items && items.length > 0 && !choosing && (
+									<Button small onClick={() => startSelecting()}>
+										<CheckSquare aria-hidden /> {t.toolbar.select}
 									</Button>
 								)}
 							</div>
 							<p className="mt-1 text-sm text-muted-foreground">{note}</p>
 							{listing.data?.outside && listing.data.outside !== "on" && (
 								<p className="mt-1 text-sm text-muted-foreground">
-									Sharing outside the project is switched off{" "}
-									{listing.data.outside === "project" ? "for the whole project" : "for this shared folder"}: public links here open
-									nothing and guests get nothing.
+									{listing.data.outside === "project" ? t.note.offForProject : t.note.offForFolder}
 								</p>
 							)}
 							{differs && acting && (
-								<p role="status" className="mt-3 flex items-center gap-3 text-sm text-muted-foreground">
-									This folder changed on the Drive storage.
+								<p role="status" className="mt-3 flex flex-wrap items-center gap-x-3 text-sm text-muted-foreground">
+									{t.note.changedOnStorage}
 									<Button small variant="ghost" onClick={showChanges}>
-										Show the changes
+										{t.note.showChanges}
 									</Button>
 								</p>
 							)}
@@ -731,7 +755,7 @@ export function App() {
 								onRetry={() =>
 									places.error ? places.refetch() : folderGone ? (fromTop ? openFolder(null) : goTo({ view: "files", place: null, folder: null })) : listing.refetch()
 								}
-								retryLabel={folderGone ? `Go to ${fromTop ? placeName : "My files"}` : undefined}
+								retryLabel={folderGone ? t.app.goTo(fromTop ? placeName : t.app.myFiles) : undefined}
 								onOpen={openFolder}
 								ticked={ticked}
 								onSelect={select}
@@ -741,25 +765,32 @@ export function App() {
 								me={me.data?.userId}
 								members={members.data}
 								canAdd={can.includes("upload")}
+								selecting={choosing}
+								onHold={(item) => startSelecting(item)}
 							/>
-							{items && items.length > 0 && (
-								<p className="mt-3 text-sm text-muted-foreground">
-									Click a name to open it. Click elsewhere on a row to see its details. Tick several to move, download or
-									delete them together.
-								</p>
-							)}
+							{items && items.length > 0 && <p className="mt-3 text-sm text-muted-foreground">{narrow ? t.note.hintPhone : t.note.hint}</p>}
 						</>
 					)}
 				</main>
 				{dragging && (
 					<div className="pointer-events-none absolute inset-3 grid place-items-center rounded-xl border-2 border-dashed border-ring bg-card/85">
 						<p className="flex items-center gap-2 font-semibold">
-							<Upload aria-hidden className="size-5 text-muted-foreground" /> Drop files or folders to upload them to {here}
+							<Upload aria-hidden className="size-5 text-muted-foreground" /> {t.app.dropHere(here)}
 						</p>
 					</div>
 				)}
+				{choosing && placeId !== undefined && (
+					<PhoneBar
+						count={tickedItems.length}
+						progress={progress}
+						onMove={canMoveAll ? () => setMoving(tickedItems) : undefined}
+						zip={canZipAll ? api.zipUrl(placeId, folderId, tickedItems.map((i) => i.id)) : undefined}
+						onDelete={canDeleteAll ? () => void removeSeveral(tickedItems) : undefined}
+						onDone={clearSelection}
+					/>
+				)}
 				<NoticeBar notice={notice} onClose={closeNotice} />
-				<UploadsPanel uploads={uploads.uploads} onCancel={uploads.cancel} onClose={uploads.clear} />
+				<UploadsPanel uploads={uploads.uploads} onCancel={uploads.cancel} onClose={uploads.clear} raised={choosing} />
 			</div>
 			{selected && placeId !== undefined && where.view === "files" && (
 				<DetailsPanel
@@ -795,7 +826,7 @@ export function App() {
 				<DetailsPanel
 					key={keyOf(sharedSelected)}
 					placeId={sharedSelected.place}
-					where="Shared with me"
+					where={t.app.sharedWithMe}
 					can={sharedSelected.can ?? []}
 					me={me.data?.userId}
 					item={sharedSelected}
@@ -837,10 +868,10 @@ export function App() {
 
 			{dialog === "new-folder" && placeId !== undefined && (
 				<NameDialog
-					title="New folder"
-					description={`In ${whereOf(rootName, path)}`}
-					initial={freeName("New folder", items, true)}
-					submitLabel="Make folder"
+					title={t.dialogs.newFolder}
+					description={t.dialogs.newFolderIn(whereOf(rootName, path))}
+					initial={freeName(t.dialogs.newFolderName, items, true)}
+					submitLabel={t.dialogs.makeFolder}
 					onSubmit={async (name) => {
 						await api.newFolder(placeId, folderId, name);
 						refresh(folderId);
@@ -850,10 +881,10 @@ export function App() {
 			)}
 			{dialog === "new-shared-folder" && (
 				<NameDialog
-					title="New shared folder"
-					description="A shared folder belongs to the project, not to you. You become its manager and decide who has access to it. Project admins can open every shared folder."
+					title={t.dialogs.newSharedFolder}
+					description={t.dialogs.newSharedFolderNote}
 					initial=""
-					submitLabel="Make shared folder"
+					submitLabel={t.dialogs.makeSharedFolder}
 					onSubmit={async (name) => {
 						const p = await api.newSharedFolder(name);
 						await queryClient.invalidateQueries({ queryKey: ["places"] });
@@ -864,10 +895,10 @@ export function App() {
 			)}
 			{dialog === "rename" && selected && placeId !== undefined && (
 				<NameDialog
-					title={`Rename “${selected.name}”`}
+					title={t.dialogs.renameTitle(selected.name)}
 					initial={selected.name}
 					selectStem={selected.kind === "file"}
-					submitLabel="Rename"
+					submitLabel={t.common.rename}
 					onSubmit={async (name) => {
 						if (name === selected.name) return;
 						await api.rename(placeId, selected.id, name);
@@ -897,6 +928,56 @@ export function App() {
 }
 
 /**
+ * On a phone, while choosing several: a bar at the bottom of the screen with how many are ticked (or how far a change
+ * has got), what can be done with them, and Done. Each button is a large target, its icon over its word.
+ */
+function PhoneBar(props: {
+	count: number;
+	progress?: string;
+	onMove?: () => void;
+	zip?: string;
+	onDelete?: () => void;
+	onDone: () => void;
+}) {
+	const { count, progress, onMove, zip, onDelete, onDone } = props;
+	const none = count === 0 || !!progress;
+	const action =
+		"flex min-h-14 flex-1 flex-col items-center justify-center gap-1 rounded-md px-1 text-xs leading-tight font-medium hover:bg-muted disabled:pointer-events-none disabled:opacity-40 aria-disabled:pointer-events-none aria-disabled:opacity-40";
+	return (
+		<section
+			aria-label={t.selection.actions}
+			className="absolute inset-x-0 bottom-0 z-10 border-t border-border bg-card px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] shadow-[0_-4px_12px_rgb(0_0_0/0.06)]"
+		>
+			<div className="flex items-center gap-2 px-2">
+				<p className="min-w-0 flex-1 truncate text-sm font-semibold" aria-live="polite">
+					{progress ?? t.selection.selected(count)}
+				</p>
+				<Button small variant="ghost" onClick={onDone} disabled={!!progress}>
+					{t.selection.done}
+				</Button>
+			</div>
+			<div className="mt-1 flex gap-1">
+				<button type="button" className={action} onClick={onMove} disabled={none || !onMove}>
+					<FolderInput aria-hidden className="size-5" /> {t.common.move}
+				</button>
+				<a
+					href={zip && !none ? zip : undefined}
+					download
+					aria-disabled={none || !zip}
+					className={`${action} text-center`}
+					role={zip && !none ? undefined : "link"}
+				>
+					<Download aria-hidden className="size-5" /> {t.common.downloadZip}
+				</a>
+				<button type="button" className={`${action} text-destructive`} onClick={onDelete} disabled={none || !onDelete}>
+					<Trash2 aria-hidden className="size-5" /> {t.common.delete}
+				</button>
+			</div>
+		</section>
+	);
+}
+
+/**
  * Where the list is: the place and the folders down to the one shown, each but the last a link up to it. For someone
  * given part of a place (placeName undefined), it starts at the highest folder they can open.
  */
@@ -912,14 +993,14 @@ function Breadcrumb({
 		go({ view: "files", place, folder: to?.id ?? null });
 	};
 	if (path.length === 0) return <h1 className="text-xl font-semibold break-words">{placeName ?? ""}</h1>;
-	const crumb = "max-w-64 truncate underline-offset-4 hover:underline";
+	const crumb = "max-w-64 truncate underline-offset-4 hover:underline max-md:max-w-40 max-md:py-2";
 	const toShared = (e: MouseEvent) => {
 		if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
 		e.preventDefault();
 		go({ view: "shared" });
 	};
 	return (
-		<nav aria-label="Breadcrumb">
+		<nav aria-label={t.app.breadcrumb}>
 			<ol className="flex min-w-0 flex-wrap items-center gap-1 text-xl font-semibold">
 				<li>
 					{placeName !== undefined ? (
@@ -929,7 +1010,7 @@ function Breadcrumb({
 					) : (
 						// Given part of a place: it was found in "Shared with me", and nothing above it is theirs to see.
 						<a href={hrefOf({ view: "shared" })} onClick={toShared} className={`block ${crumb}`}>
-							Shared with me
+							{t.app.sharedWithMe}
 						</a>
 					)}
 				</li>
@@ -937,7 +1018,7 @@ function Breadcrumb({
 					<li key={f.id} className="flex min-w-0 items-center gap-1">
 						<ChevronRight aria-hidden className="size-4 shrink-0 text-muted-foreground" />
 						{i === path.length - 1 ? (
-							<h1 aria-current="page" className="max-w-96 truncate" title={f.name}>
+							<h1 aria-current="page" className="max-w-96 truncate max-md:max-w-full" title={f.name}>
 								{f.name}
 							</h1>
 						) : (

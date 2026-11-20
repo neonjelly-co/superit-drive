@@ -18,6 +18,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/members"
+	"github.com/neonjelly-co/superit-drive/internal/text"
 )
 
 // The public prefix: what visitors reach with a public link, without signing in. Its routes are in routes.go with all
@@ -57,13 +58,6 @@ const (
 
 // visitorListLimit is the most items a visitor's page lists of one folder; the zip holds them all.
 const visitorListLimit = 1000
-
-const (
-	// visitorNotHere is the one answer for a link that does not work, and for anything a link does not cover.
-	visitorNotHere = "This link does not work. It may have been removed, or its address may be incomplete. Ask whoever sent it to you for a new one."
-	onlyReading    = "A public link only opens and downloads: nothing can be changed through one."
-	visitorsBusy   = "The Drive is busy. Try again in a moment."
-)
 
 // guardVisitor is guard for a route under the public prefix: only reading (or, on the one route for it, sending a file
 // in), then the visitor's link, the place its item is in, the item the request is about and the access given on the way
@@ -212,6 +206,7 @@ func (s *Server) visitorPage(w http.ResponseWriter, r *http.Request, c call) {
 		return
 	}
 	token := r.PathValue("token")
+	l, keep := text.Of(r), keepLang(r)
 	path := pathTo(*c.item)
 	at := slices.IndexFunc(path, func(it index.Item) bool { return it.ID == c.link.Item })
 	if at < 0 {
@@ -220,11 +215,11 @@ func (s *Server) visitorPage(w http.ResponseWriter, r *http.Request, c call) {
 	}
 	here := func(id int64) string {
 		if id == c.link.Item {
-			return PublicPrefix + token
+			return keep(PublicPrefix + token)
 		}
-		return PublicPrefix + token + "/items/" + strconv.FormatInt(id, 10)
+		return keep(PublicPrefix + token + "/items/" + strconv.FormatInt(id, 10))
 	}
-	v := visitorView{Name: c.item.Name, By: s.sharer(*c.link), Folder: c.item.Folder}
+	v := visitorView{Name: c.item.Name, By: s.sharer(*c.link, l), Folder: c.item.Folder}
 	for _, f := range path[at : len(path)-1] {
 		v.Crumbs = append(v.Crumbs, visitorLink{Name: f.Name, Href: here(f.ID)})
 	}
@@ -234,7 +229,7 @@ func (s *Server) visitorPage(w http.ResponseWriter, r *http.Request, c call) {
 			s.fail(w, r, err)
 			return
 		}
-		v.Zip = PublicPrefix + token + "/items/" + strconv.FormatInt(c.item.ID, 10) + "/zip"
+		v.Zip = keep(PublicPrefix + token + "/items/" + strconv.FormatInt(c.item.ID, 10) + "/zip")
 		// Folders first, then by name as people read it: without regard to case or accents.
 		slices.SortStableFunc(items, func(a, b index.Item) int {
 			if a.Folder != b.Folder {
@@ -248,43 +243,63 @@ func (s *Server) visitorPage(w http.ResponseWriter, r *http.Request, c call) {
 		for _, it := range items {
 			row := visitorRow{Name: it.Name, Folder: it.Folder, Href: here(it.ID)}
 			if !it.Folder {
-				row.Size = formatSize(it.Size)
-				row.Href = PublicPrefix + token + "/items/" + strconv.FormatInt(it.ID, 10) + "/download"
+				row.Size = text.Size(l, it.Size)
+				row.Href = keep(PublicPrefix + token + "/items/" + strconv.FormatInt(it.ID, 10) + "/download")
 				if opensInTheBrowser(it.Name) {
-					row.Open = PublicPrefix + token + "/items/" + strconv.FormatInt(it.ID, 10) + "/open"
+					row.Open = keep(PublicPrefix + token + "/items/" + strconv.FormatInt(it.ID, 10) + "/open")
 				}
 			}
 			v.Items = append(v.Items, row)
 		}
-		v.More = more
+		if more {
+			v.More = onlyTheFirst.In(l, len(items))
+		}
 	} else {
-		v.Size = formatSize(c.item.Size)
-		v.Download = PublicPrefix + token + "/items/" + strconv.FormatInt(c.item.ID, 10) + "/download"
+		v.Size = text.Size(l, c.item.Size)
+		v.Download = keep(PublicPrefix + token + "/items/" + strconv.FormatInt(c.item.ID, 10) + "/download")
 		if opensInTheBrowser(c.item.Name) {
-			v.Open = PublicPrefix + token + "/items/" + strconv.FormatInt(c.item.ID, 10) + "/open"
+			v.Open = keep(PublicPrefix + token + "/items/" + strconv.FormatInt(c.item.ID, 10) + "/open")
 		}
 	}
-	s.renderVisitor(w, http.StatusOK, v)
+	s.renderVisitor(w, r, http.StatusOK, v)
 	s.used(r, c)
 }
 
-// sharer says who shared what a link is on, as a visitor reads it: the display name of the member who made it, and
-// never their email address or user id. Without a name (they have none, or have left the project), the project's.
-func (s *Server) sharer(l index.Link) string {
+// sharer says who shared what a link is on, as a visitor reads it in the language l: the display name of the member who
+// made it, and never their email address or user id. Without a name (they have none, or have left the project), the
+// project's.
+func (s *Server) sharer(l index.Link, in text.Lang) string {
 	if m, ok := s.members.Current().Lookup(l.MadeBy); ok && strings.TrimSpace(m.DisplayName) != "" {
-		return "Shared by " + strings.TrimSpace(m.DisplayName)
+		return sharedBy.In(in, strings.TrimSpace(m.DisplayName))
 	}
-	return "Shared from " + s.project
+	return sharedFrom.In(in, s.project)
 }
 
-// visitorRefusal answers a visitor with a page saying why. Every "not here" is the one page for a link that does not
-// work, whatever it was about.
-func (s *Server) visitorRefusal(w http.ResponseWriter, status int, message string) {
-	v := visitorView{Heading: "This did not work", Message: message}
-	if message == notHere {
-		v = visitorView{Heading: "This link does not work", Message: visitorNotHere}
+// keepLang is what keeps a visitor's choice of language from page to page: once they chose one (the page's switch adds
+// "lang" to its address), every address on the page carries it too. Without a choice the addresses are as they are,
+// and each page follows the browser's language. No cookie is set or read under the public prefix.
+func keepLang(r *http.Request) func(href string) string {
+	l, ok := text.Chosen(r)
+	if !ok {
+		return func(href string) string { return href }
 	}
-	s.renderVisitor(w, status, v)
+	return func(href string) string {
+		if strings.Contains(href, "?") {
+			return href + "&lang=" + l.Code()
+		}
+		return href + "?lang=" + l.Code()
+	}
+}
+
+// visitorRefusal answers a visitor with a page saying why, in their language. Every "not here" is the one page for a
+// link that does not work, whatever it was about: the same bytes in each language.
+func (s *Server) visitorRefusal(w http.ResponseWriter, r *http.Request, status int, message text.Message, values ...any) {
+	l := text.Of(r)
+	v := visitorView{Heading: didNotWork.In(l), Message: message.In(l, values...)}
+	if message == notHere {
+		v = visitorView{Heading: linkDoesNotWork.In(l), Message: visitorNotHere.In(l)}
+	}
+	s.renderVisitor(w, r, status, v)
 }
 
 // visitorView is what a visitor's page shows.
@@ -299,10 +314,10 @@ type visitorView struct {
 	// Name is the name of the file or folder shown.
 	Name   string
 	Folder bool
-	// For a folder: the zip of it, what is in it, and whether there is more than is listed.
+	// For a folder: the zip of it, what is in it, and, when there is more than is listed, a line that says so.
 	Zip   string
 	Items []visitorRow
-	More  bool
+	More  string
 	// For a file: its size, and where it opens (when its kind does) and downloads.
 	Size, Open, Download string
 	// Send is true for an upload-only link's page: a place to choose or drop files and send them into the folder, and
@@ -320,21 +335,29 @@ type visitorRow struct {
 	Size, Open string
 }
 
-func (s *Server) renderVisitor(w http.ResponseWriter, status int, v visitorView) {
+// renderVisitor sends a visitor's page in the request's language (text.Of): its words, its lang, and a switch to the
+// other language that keeps to the same page.
+func (s *Server) renderVisitor(w http.ResponseWriter, r *http.Request, status int, v visitorView) {
+	l := text.Of(r)
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
+	h.Set("Content-Language", l.Code())
 	if v.Send && !v.Full {
 		h.Set("Content-Security-Policy", s.sendPolicy)
 	}
 	w.WriteHeader(status)
 	if err := visitorTemplate.Execute(w, struct {
 		visitorView
-		Style    template.CSS
-		Script   template.JS
-		Title    string
-		FullNote string
-	}{v, template.CSS(visitorStyle), template.JS(sendScript), titleOf(v), linkFull}); err != nil {
+		Lang      string
+		W         visitorWords
+		SendWords string
+		Style     template.CSS
+		Script    template.JS
+		Title     string
+		FullNote  string
+	}{v, l.Code(), visitorWordsOf[l], sendWordsOf[l], template.CSS(visitorStyle), template.JS(sendScript), titleOf(v),
+		linkFull.In(l)}); err != nil {
 		s.log.Info("a visitor's page was not sent whole", "error", err)
 	}
 }
@@ -346,25 +369,9 @@ func titleOf(v visitorView) string {
 	return v.Name
 }
 
-// formatSize is a file's size the way the members' interface writes it, and storage is sold: 1 KB is 1000 bytes.
-func formatSize(bytes int64) string {
-	if bytes < 1000 {
-		return strconv.FormatInt(bytes, 10) + " B"
-	}
-	units := []string{"KB", "MB", "GB", "TB"}
-	value, unit := float64(bytes)/1000, 0
-	for unit < len(units)-1 && value+0.5 >= 1000 {
-		value /= 1000
-		unit++
-	}
-	if value < 9.95 {
-		return strconv.FormatFloat(value, 'f', 1, 64) + " " + units[unit]
-	}
-	return strconv.FormatFloat(value, 'f', 0, 64) + " " + units[unit]
-}
-
 // visitorStyle is the visitors' pages' only style, in the page itself: Pilot light's mist ground, white panel and
-// graphite ink, in one column on every screen.
+// graphite ink, in one column on every screen. Everything a finger taps is at least 44 px tall. On a screen without a
+// mouse (a phone), the place to send files says "Choose files", since nothing is dragged there.
 const visitorStyle = `:root{color-scheme:light;--background:oklch(0.956 0.006 239.8);--foreground:oklch(0.283 0.026 246.5);` +
 	`--card:oklch(1 0 0);--muted:oklch(0.937 0.008 241.7);--muted-foreground:oklch(0.511 0.028 248.4);` +
 	`--border:oklch(0.893 0.013 244.3);--ring:oklch(0.511 0.028 248.4);--destructive:oklch(0.544 0.186 26)}` +
@@ -373,25 +380,26 @@ const visitorStyle = `:root{color-scheme:light;--background:oklch(0.956 0.006 23
 	`"Atkinson Hyperlegible",ui-sans-serif,system-ui,sans-serif;line-height:1.5;-webkit-text-size-adjust:100%}` +
 	`body{min-height:100vh;display:flex;flex-direction:column}` +
 	`main{width:100%;max-width:44rem;margin:0 auto;padding:2.5rem 1rem 2rem;flex:1}` +
-	`.by{margin:0;color:var(--muted-foreground)}` +
-	`.crumbs{margin:.75rem 0 0;color:var(--muted-foreground);overflow-wrap:anywhere}` +
-	`.crumbs a{color:inherit}` +
+	`.by{margin:0;color:var(--muted-foreground);overflow-wrap:anywhere}` +
+	`.crumbs{margin:.5rem 0 0;color:var(--muted-foreground);overflow-wrap:anywhere}` +
+	`.crumbs a{display:inline-flex;align-items:center;min-height:2.75rem;color:inherit}` +
 	`h1{margin:.25rem 0 0;font-size:1.625rem;line-height:1.25;font-weight:700;overflow-wrap:anywhere}` +
 	`.actions{display:flex;flex-wrap:wrap;gap:.5rem;margin:1.25rem 0 0}` +
-	`.button{display:inline-flex;align-items:center;min-height:2.5rem;padding:.4rem 1rem;border-radius:.625rem;` +
+	`.button{display:inline-flex;align-items:center;min-height:2.75rem;padding:.4rem 1rem;border-radius:.625rem;` +
 	`background:var(--foreground);color:#fff;text-decoration:none;font-weight:600}` +
 	`.button.quiet{background:var(--card);color:var(--foreground);border:1px solid var(--border)}` +
 	`a:focus-visible{outline:3px solid var(--ring);outline-offset:2px}` +
 	`.list{list-style:none;margin:1.5rem 0 0;padding:0;background:var(--card);border:1px solid var(--border);` +
 	`border-radius:.75rem;overflow:hidden}` +
-	`.list li{display:flex;flex-wrap:wrap;align-items:center;gap:.25rem .75rem;padding:.75rem 1rem;` +
+	`.list li{display:flex;flex-wrap:wrap;align-items:center;gap:0 .75rem;padding:.25rem 1rem;` +
 	`border-top:1px solid var(--border)}` +
 	`.list li:first-child{border-top:0}` +
-	`.name{flex:1 1 12rem;min-width:0;display:flex;gap:.625rem;align-items:center;overflow-wrap:anywhere}` +
+	`.name{flex:1 1 12rem;min-width:0;min-height:2.75rem;display:flex;gap:.625rem;align-items:center;overflow-wrap:anywhere}` +
 	`a.name{color:inherit;text-decoration:none;font-weight:600}a.name:hover{text-decoration:underline}` +
 	`.icon{width:1.25rem;height:1.25rem;flex:none;color:var(--muted-foreground)}` +
 	`.size{color:var(--muted-foreground);font-variant-numeric:tabular-nums;white-space:nowrap}` +
-	`.do{display:flex;gap:1rem;white-space:nowrap}.do a{color:var(--foreground);font-weight:600}` +
+	`.do{display:flex;gap:.5rem;white-space:nowrap}` +
+	`.do a{display:inline-flex;align-items:center;min-height:2.75rem;padding:0 .25rem;color:var(--foreground);font-weight:600}` +
 	`.note{margin:1rem 0 0;color:var(--muted-foreground)}` +
 	`.send{margin:1.5rem 0 0}` +
 	`.drop{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.375rem;` +
@@ -401,11 +409,14 @@ const visitorStyle = `:root{color-scheme:light;--background:oklch(0.956 0.006 23
 	`.drop:focus-within{outline:3px solid var(--ring);outline-offset:2px}` +
 	`.drop input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}` +
 	`.drop strong{font-weight:600}.drop span{color:var(--muted-foreground)}` +
+	`.drop .touch{display:none}` +
+	`@media (hover:none) and (pointer:coarse){.drop .mouse{display:none}.drop .touch{display:inline}}` +
 	`.send .list .state{color:var(--muted-foreground);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}` +
 	`.send .list .state.bad{color:var(--destructive)}` +
 	`button.button{border:0;font:inherit;cursor:pointer}button.button:disabled{opacity:.5;cursor:default}` +
 	`button:focus-visible{outline:3px solid var(--ring);outline-offset:2px}` +
-	`footer{padding:1.5rem 1rem;text-align:center;font-size:.875rem;color:var(--muted-foreground)}`
+	`footer{padding:1rem;text-align:center;font-size:.875rem;color:var(--muted-foreground)}` +
+	`footer a{display:inline-flex;align-items:center;min-height:2.75rem;padding:0 .5rem;color:inherit}`
 
 // visitorPolicy is the Content-Security-Policy of every answer under the public prefix that is not a file's bytes
 // (those carry opening.go's): nothing may load or run but the page's own style, no form goes anywhere, nothing may frame
@@ -425,11 +436,16 @@ const fileIcon = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="curr
 	`stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>` +
 	`<path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>`
 
+// visitorTemplate is every visitor's page (visitorHTML).
 var visitorTemplate = template.Must(template.New("visitor").Funcs(template.FuncMap{
 	"folderIcon": func() template.HTML { return folderIcon },
 	"fileIcon":   func() template.HTML { return fileIcon },
-}).Parse(`<!doctype html>
-<html lang="en">
+}).Parse(visitorHTML))
+
+// visitorHTML is the template of every visitor's page. It holds no words of its own: they are the language's (W, and
+// the view's own), so that a page is all in one language (a test checks that it says nothing outside them).
+const visitorHTML = `<!doctype html>
+<html lang="{{.Lang}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -446,51 +462,51 @@ var visitorTemplate = template.Must(template.New("visitor").Funcs(template.FuncM
 {{- else}}
 <p class="by">{{.By}}</p>
 {{- if .Crumbs}}
-<nav class="crumbs" aria-label="Folders">{{range .Crumbs}}<a href="{{.Href}}">{{.Name}}</a> › {{end}}</nav>
+<nav class="crumbs" aria-label="{{.W.Folders}}">{{range .Crumbs}}<a href="{{.Href}}">{{.Name}}</a> › {{end}}</nav>
 {{- end}}
 <h1>{{.Name}}</h1>
 {{- if .Send}}
-<p class="note">Send files to this folder. What is in it stays hidden: you cannot see its files, their names, or what anyone else sent. Nothing you send replaces anything in it.</p>
+<p class="note">{{.W.SendIntro}}</p>
 {{- if .Full}}
 <p class="note" id="full">{{.FullNote}}</p>
 {{- else}}
-<div class="send">
-<label class="drop" id="drop"><input type="file" id="files" multiple><strong>Drop files here, or choose them</strong><span>Files only: send what is in a folder, not the folder.</span></label>
+<div class="send" id="sending" data-words="{{.SendWords}}">
+<label class="drop" id="drop"><input type="file" id="files" multiple><strong><span class="mouse">{{.W.DropOrChoose}}</span><span class="touch">{{.W.ChooseFiles}}</span></strong><span>{{.W.FilesOnly}}</span></label>
 <ul class="list" id="chosen" hidden></ul>
-<p class="actions"><button class="button" id="send" type="button" disabled>Send</button></p>
+<p class="actions"><button class="button" id="send" type="button" disabled>{{.W.Send}}</button></p>
 <p class="note" id="said" role="status" aria-live="polite"></p>
 </div>
-<noscript><p class="note">Sending files needs JavaScript, which is switched off in this browser. Switch it on, then reload this page.</p></noscript>
+<noscript><p class="note">{{.W.NeedsScript}}</p></noscript>
 <script>{{.Script}}</script>
 {{- end}}
 {{- else if .Folder}}
-<p class="actions"><a class="button" href="{{.Zip}}" download>Download all as zip</a></p>
+<p class="actions"><a class="button" href="{{.Zip}}" download>{{.W.DownloadAll}}</a></p>
 {{- if .Items}}
 <ul class="list">
 {{- range .Items}}
 {{- if .Folder}}
 <li><a class="name" href="{{.Href}}">{{folderIcon}}<span>{{.Name}}</span></a></li>
 {{- else}}
-<li><span class="name">{{fileIcon}}<span>{{.Name}}</span></span><span class="size">{{.Size}}</span><span class="do">{{if .Open}}<a href="{{.Open}}" target="_blank" rel="noopener">Open</a>{{end}}<a href="{{.Href}}" download>Download</a></span></li>
+<li><span class="name">{{fileIcon}}<span>{{.Name}}</span></span><span class="size">{{.Size}}</span><span class="do">{{if .Open}}<a href="{{.Open}}" target="_blank" rel="noopener">{{$.W.Open}}</a>{{end}}<a href="{{.Href}}" download>{{$.W.Download}}</a></span></li>
 {{- end}}
 {{- end}}
 </ul>
 {{- if .More}}
-<p class="note">Only the first {{len .Items}} items are listed here. Download all as zip to get everything.</p>
+<p class="note">{{.More}}</p>
 {{- end}}
 {{- else}}
-<p class="note">This folder is empty.</p>
+<p class="note">{{.W.Empty}}</p>
 {{- end}}
 {{- else}}
 <p class="note">{{.Size}}</p>
-<p class="actions">{{if .Open}}<a class="button quiet" href="{{.Open}}" target="_blank" rel="noopener">Open</a>{{end}}<a class="button" href="{{.Download}}" download>Download</a></p>
+<p class="actions">{{if .Open}}<a class="button quiet" href="{{.Open}}" target="_blank" rel="noopener">{{.W.Open}}</a>{{end}}<a class="button" href="{{.Download}}" download>{{.W.Download}}</a></p>
 {{- end}}
 {{- end}}
 </main>
-<footer>Superit Drive</footer>
+<footer>Superit Drive · <a href="?lang={{.W.OtherCode}}" hreflang="{{.W.OtherCode}}" lang="{{.W.OtherCode}}">{{.W.Other}}</a></footer>
 </body>
 </html>
-`))
+`
 
 // admission lets at most a fixed number of requests be worked on at once, and a fixed number more wait for their turn,
 // each for at most a while. Any more are refused at once.

@@ -3,9 +3,12 @@ import type { ReactNode } from "react";
 import { nameOf } from "../access";
 import type { SharedItem } from "../api";
 import { formatChanged, formatChangedFull, formatSize } from "../format";
+import { t } from "../i18n";
+import { useNarrow } from "../narrow";
 import { Button } from "./button";
 import { FileIcon } from "./file-icon";
 import { FileLink, FolderButton } from "./file-link";
+import { PhoneList, PhoneMessage, PhoneRow } from "./phone-row";
 
 type Props = {
 	items?: SharedItem[];
@@ -24,8 +27,8 @@ export const keyOf = (item: SharedItem) => `${item.place}:${item.id}`;
 
 /** Who shared it, for the list: their name, and whether with everyone in the project. */
 export function sharedByOf(item: SharedItem): string {
-	const by = item.sharedBy ? nameOf(item.sharedBy) : "Someone no longer in the project";
-	return item.toEveryone ? `${by}, with everyone` : by;
+	const by = item.sharedBy ? nameOf(item.sharedBy) : t.common.someoneWhoLeft;
+	return item.toEveryone ? t.shared.withEveryone(by) : by;
 }
 
 /**
@@ -33,39 +36,62 @@ export function sharedByOf(item: SharedItem): string {
  * My files or from a shared folder they have no role on, the most recently shared first. Each is the highest point of
  * what was shared: what is inside a shared folder is found by opening it. The click rule is the list's: a name opens
  * (a folder in the list, a file in the browser or as a download), the rest of the row selects it and shows its details.
+ * On a phone, a row is the name with who shared it and its size under it, and ⋯ for its details.
  */
 export function SharedList({ items, loading, error, onRetry, onOpen, selected, onSelect }: Props) {
+	const narrow = useNarrow();
+	const message = error ? (
+		<>
+			<span className="text-destructive">{error.message}</span>
+			<Button className="mt-3" onClick={onRetry}>
+				<RotateCw aria-hidden /> {t.common.tryAgain}
+			</Button>
+		</>
+	) : loading || !items ? (
+		t.common.loading
+	) : items.length === 0 ? (
+		t.shared.empty
+	) : undefined;
+	if (narrow) {
+		if (message !== undefined || !items) return <PhoneMessage>{message}</PhoneMessage>;
+		return (
+			<PhoneList>
+				{items.map((item) => (
+					<PhoneRow
+						key={keyOf(item)}
+						item={item}
+						line={[sharedByOf(item), item.size !== undefined ? formatSize(item.size) : ""].filter(Boolean).join(" · ")}
+						open={item.kind === "file" ? { placeId: item.place, file: item } : { folder: () => onOpen(item) }}
+						onDetails={() => onSelect(item)}
+						detailsLabel={t.list.details(item.name)}
+						ticked={keyOf(item) === selected}
+					/>
+				))}
+			</PhoneList>
+		);
+	}
 	return (
 		<div className="mt-5 overflow-hidden rounded-xl border border-border bg-card">
 			<table className="w-full table-fixed text-sm">
 				<thead>
 					<tr className="h-11 border-b border-border text-left text-muted-foreground">
 						<th scope="col" className="px-4 font-normal">
-							Name
+							{t.common.name}
 						</th>
 						<th scope="col" className="w-56 px-4 font-normal">
-							Shared by
+							{t.shared.sharedBy}
 						</th>
 						<th scope="col" className="w-32 px-4 font-normal">
-							Shared
+							{t.shared.shared}
 						</th>
 						<th scope="col" className="w-28 px-4 text-right font-normal">
-							Size
+							{t.common.size}
 						</th>
 					</tr>
 				</thead>
 				<tbody>
-					{error ? (
-						<Message>
-							<span className="text-destructive">{error.message}</span>
-							<Button className="mt-3" onClick={onRetry}>
-								<RotateCw aria-hidden /> Try again
-							</Button>
-						</Message>
-					) : loading || !items ? (
-						<Message>Loading…</Message>
-					) : items.length === 0 ? (
-						<Message>Nothing has been shared with you yet. When someone shares a file or folder with you, it shows here.</Message>
+					{message !== undefined || !items ? (
+						<Message>{message}</Message>
 					) : (
 						items.map((item) => {
 							const key = keyOf(item);

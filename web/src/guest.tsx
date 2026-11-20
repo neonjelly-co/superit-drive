@@ -6,6 +6,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { forGuests } from "./api";
 import { GuestApp } from "./guest-app";
+import { start } from "./i18n";
 
 forGuests();
 
@@ -16,10 +17,13 @@ const queryClient = new QueryClient({
 const root = document.getElementById("root");
 if (!root) throw new Error("guest.html has no #root");
 
-createRoot(root).render(
-	<StrictMode>
-		<QueryClientProvider client={queryClient}>
-			<GuestApp />
-		</QueryClientProvider>
-	</StrictMode>,
+// The page's words first, then the page: it is never shown in a language it is not in.
+void start().then(() =>
+	createRoot(root).render(
+		<StrictMode>
+			<QueryClientProvider client={queryClient}>
+				<GuestApp />
+			</QueryClientProvider>
+		</StrictMode>,
+	),
 );

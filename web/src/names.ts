@@ -1,13 +1,10 @@
 // What the Drive says about a name before sending anything, so a person is not made to wait for a whole file to
 // travel only to be refused. The Drive checks again and its answer is the one that counts (internal/drive/files.go);
-// the messages here are the same as its own.
+// the messages here (t.names) are the same as its own, in both languages.
+import { t } from "./i18n";
 
 /** The longest name the Drive stores, in bytes of UTF-8. */
 export const MAX_NAME_BYTES = 255;
-
-export const TOO_LONG =
-	"This name is too long. Names can be up to 255 characters, and fewer when they have accented letters, " +
-	"other alphabets or symbols. Shorten the name and try again.";
 
 const encoder = new TextEncoder();
 
@@ -19,10 +16,10 @@ export const composed = (name: string) => name.normalize("NFC");
 
 /** Why a file or folder cannot have this name, or undefined when it can. */
 export function nameProblem(name: string): string | undefined {
-	if (name === "") return "A name is needed.";
-	if (encoder.encode(name).length > MAX_NAME_BYTES) return TOO_LONG;
-	if (name === "." || name === "..") return "“.” and “..” cannot be used as names. Choose another name.";
-	if (name.includes("/")) return "A name cannot contain “/”. Choose another name.";
+	if (name === "") return t.names.needed;
+	if (encoder.encode(name).length > MAX_NAME_BYTES) return t.names.tooLong;
+	if (name === "." || name === "..") return t.names.dots;
+	if (name.includes("/")) return t.names.slash;
 	return undefined;
 }
 

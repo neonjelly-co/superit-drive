@@ -1,4 +1,5 @@
 import { api, type Item } from "../api";
+import { t } from "../i18n";
 
 const nameLink = "truncate font-medium underline-offset-4 hover:underline focus-visible:underline";
 
@@ -14,7 +15,7 @@ export function FileLink({ placeId, item }: { placeId: number; item: Item }) {
 				href={api.openUrl(placeId, item.id)}
 				target="_blank"
 				rel="noopener noreferrer"
-				title={`Open ${item.name}`}
+				title={t.list.openNamed(item.name)}
 				onClick={(e) => e.stopPropagation()}
 				className={nameLink}
 			>
@@ -23,7 +24,7 @@ export function FileLink({ placeId, item }: { placeId: number; item: Item }) {
 		);
 	}
 	return (
-		<a href={api.downloadUrl(placeId, item.id)} download title={`Download ${item.name}`} onClick={(e) => e.stopPropagation()} className={nameLink}>
+		<a href={api.downloadUrl(placeId, item.id)} download title={t.list.downloadNamed(item.name)} onClick={(e) => e.stopPropagation()} className={nameLink}>
 			{item.name}
 		</a>
 	);
@@ -34,7 +35,7 @@ export function FolderButton({ item, onOpen }: { item: { name: string }; onOpen:
 	return (
 		<button
 			type="button"
-			title={`Open ${item.name}`}
+			title={t.list.openNamed(item.name)}
 			onClick={(e) => {
 				e.stopPropagation();
 				onOpen();

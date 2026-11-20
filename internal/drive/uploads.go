@@ -55,12 +55,16 @@ var (
 // A WrongOffset error says that a part was sent for another place in the file than where the file now ends: Offset.
 type WrongOffset struct{ Offset int64 }
 
-func (w *WrongOffset) Error() string { return fmt.Sprintf("the file on the storage ends at %d", w.Offset) }
+func (w *WrongOffset) Error() string {
+	return fmt.Sprintf("the file on the storage ends at %d", w.Offset)
+}
 
 // An Incomplete error says that an upload was to be finished before the whole file arrived: Offset bytes have.
 type Incomplete struct{ Offset int64 }
 
-func (i *Incomplete) Error() string { return fmt.Sprintf("only %d bytes of the file have arrived", i.Offset) }
+func (i *Incomplete) Error() string {
+	return fmt.Sprintf("only %d bytes of the file have arrived", i.Offset)
+}
 
 // uploadID is the form of an upload's id: 16 random bytes, in hex.
 var uploadID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -184,7 +188,7 @@ func (d *Drive) StartUpload(ctx context.Context, p index.Place, folder *index.It
 	}
 	file, ok := pathIn(dir, name)
 	if !ok {
-		return index.Upload{}, &BadName{"This name cannot be used. Choose another name."}
+		return index.Upload{}, &BadName{nameUnusable}
 	}
 	if err := d.askFirst(ctx, file, name, existing); err != nil {
 		return index.Upload{}, err
@@ -381,7 +385,7 @@ func (d *Drive) FinishUpload(ctx context.Context, p index.Place, folder *index.I
 	}
 	file, ok := pathIn(dir, u.Name)
 	if !ok {
-		return Upload{}, &BadName{"This name cannot be used. Choose another name."}
+		return Upload{}, &BadName{nameUnusable}
 	}
 	leave, err := d.inPlace(ctx, p)
 	if err != nil {

@@ -1,4 +1,6 @@
-// The Drive's JSON API, as the interface uses it. The server side is internal/server/routes.go.
+// The Drive's JSON API, as the interface uses it. The server side is internal/server/routes.go. Every call says the
+// page's language (Accept-Language), so the Drive answers, and words its refusals, in it.
+import { lang, t } from "./i18n";
 
 /**
  * Where the API is: "/api" for members, signed in through the reverse proxy; the guests' own, under the public prefix,
@@ -403,8 +405,6 @@ export class ApiError extends Error {
 	}
 }
 
-/** An error the browser gave because the connection broke, not the Drive. */
-const unreachable = (what: string) => new ApiError(0, `${what} could not reach the Drive. Check your connection.`);
 
 /** A resumable upload in progress: started, its parts on their way, not yet finished. */
 export type Session = {
@@ -429,15 +429,18 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 	try {
 		res = await fetch(path, {
 			method,
-			headers: body === undefined ? { Accept: "application/json" } : { Accept: "application/json", "Content-Type": "application/json" },
+			headers:
+				body === undefined
+					? { Accept: "application/json", "Accept-Language": lang }
+					: { Accept: "application/json", "Accept-Language": lang, "Content-Type": "application/json" },
 			body: body === undefined ? undefined : JSON.stringify(body),
 		});
 	} catch {
-		throw new ApiError(0, "The Drive could not be reached. Check your connection and try again.");
+		throw new ApiError(0, t.connection.unreachable);
 	}
 	const data = await res.json().catch(() => null);
 	if (!res.ok) {
-		throw new ApiError(res.status, data?.error ?? `The Drive answered with an error (${res.status}).`, data?.exists, {
+		throw new ApiError(res.status, data?.error ?? t.connection.answeredWith(res.status), data?.exists, {
 			busy: data?.busy,
 			offset: data?.offset,
 			resumable: data?.resumable,
@@ -476,6 +479,7 @@ function send<T>(
 		const xhr = new XMLHttpRequest();
 		xhr.open(method, path);
 		xhr.setRequestHeader("Accept", "application/json");
+		xhr.setRequestHeader("Accept-Language", lang);
 		xhr.setRequestHeader("Content-Type", "application/octet-stream");
 		xhr.responseType = "json";
 		xhr.upload.onprogress = (e) => onProgress(e.loaded);
@@ -489,7 +493,7 @@ function send<T>(
 			}
 			const retryAfter = Number(xhr.getResponseHeader("Retry-After")) || undefined;
 			reject(
-				new ApiError(xhr.status, answer?.error ?? `The Drive answered with an error (${xhr.status}).`, answer?.exists, {
+				new ApiError(xhr.status, answer?.error ?? t.connection.answeredWith(xhr.status), answer?.exists, {
 					busy: answer?.busy,
 					retryAfter,
 					offset: answer?.offset,
@@ -497,8 +501,8 @@ function send<T>(
 				}),
 			);
 		};
-		xhr.onerror = () => reject(unreachable("The upload"));
-		xhr.onabort = () => reject(new DOMException("The upload was cancelled.", "AbortError"));
+		xhr.onerror = () => reject(new ApiError(0, t.connection.uploadUnreachable));
+		xhr.onabort = () => reject(new DOMException("upload cancelled", "AbortError"));
 		signal?.addEventListener("abort", () => xhr.abort(), { once: true });
 		if (signal?.aborted) xhr.abort();
 		else xhr.send(body);
@@ -657,12 +661,12 @@ export const api = {
 	/** Cancels a resumable upload: what arrived of it is removed. */
 	cancelUpload: (placeId: number, id: string) => call<null>("DELETE", sessionPath(placeId, id)),
 	/** The address that downloads a file under its original name, whatever kind of file it is. */
-	downloadUrl: (placeId: number, itemId: number) => `${base}/places/${placeId}/items/${itemId}/download`,
+	downloadUrl: (placeId: number, itemId: number) => `${base}/places/${placeId}/items/${itemId}/download?lang=${lang}`,
 	/**
 	 * The address that shows a file in the browser, for a kind that opens there (`opens`); any other file downloads
 	 * from it.
 	 */
-	openUrl: (placeId: number, itemId: number) => `${base}/places/${placeId}/items/${itemId}/open`,
+	openUrl: (placeId: number, itemId: number) => `${base}/places/${placeId}/items/${itemId}/open?lang=${lang}`,
 	/**
 	 * The address that downloads a folder of a place (null: its top folder) as one zip; with items, only those items
 	 * of it.
@@ -670,7 +674,8 @@ export const api = {
 	zipUrl: (placeId: number, folderId: number | null, items?: number[]) => {
 		const query = new URLSearchParams();
 		for (const id of items ?? []) query.append("item", String(id));
-		return `${inFolder(placeId, folderId)}/zip${items ? `?${query}` : ""}`;
+		query.set("lang", lang);
+		return `${inFolder(placeId, folderId)}/zip?${query}`;
 	},
 };
 

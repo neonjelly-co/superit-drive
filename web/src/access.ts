@@ -1,25 +1,26 @@
-// How the interface says who can see something, and what each role means. English for now; Hungarian comes with its
-// own ticket.
+// How the interface says who can see something, and what each role means, in the page's language.
 import type { Access, Member, RoleAt, SeenBy } from "./api";
+import { formatDay, formatMoment } from "./format";
+import { t } from "./i18n";
 
-export const ROLE_NAME: Record<RoleAt, string> = { viewer: "Viewer", editor: "Editor", manager: "Manager", owner: "Owner" };
+/** A role's name: "Viewer", "Editor", "Manager", "Owner". */
+export const roleName = (r: RoleAt): string => t.common[r];
 
 /**
  * What each role means, said where it is chosen. "Editor" is about the files and folders, never about changing what
  * is inside a file.
  */
-export const ROLE_MEANS = {
-	viewer: "Can open and download.",
-	editor: "Can also upload, rename, move and delete, and share it further. Does not mean changing what is inside a file.",
-	manager: "Can also decide who has access to the shared folder, and delete it.",
-} as const;
+export const roleMeans = (r: "viewer" | "editor" | "manager"): string => t.roles[r];
+
+/** What an invitation lets a guest do, said where it is given. */
+export const guestRoleMeans = (r: "viewer" | "editor"): string => (r === "editor" ? t.roles.guestEditor : t.roles.guestViewer);
 
 /** A member's name as people read it: their display name, or their email address. */
 export const nameOf = (p: { displayName?: string; email?: string }) => p.displayName || p.email || "";
 
 /** The short form of a member's name, for the list's sentence: the first word of their name, or of their address. */
 function shortName(m: Member | undefined): string {
-	if (!m) return "someone";
+	if (!m) return t.who.someone;
 	if (m.displayName) return m.displayName.split(/\s+/)[0] ?? m.displayName;
 	return m.email.split("@")[0] ?? m.email;
 }
@@ -30,36 +31,41 @@ function shortName(m: Member | undefined): string {
  * that too: "You and a guest", "Everyone in the project and 2 guests".
  */
 export function whoCanSee(seenBy: SeenBy, me: string | undefined, members: Member[] | undefined): string {
-	if (seenBy.link) return "Anyone with the link";
+	if (seenBy.link) return t.who.anyoneWithLink;
 	const guests = seenBy.guests ?? 0;
 	if (guests === 0) return whoCanSeeInside(seenBy, me, members);
-	const them = guests === 1 ? "a guest" : `${guests} guests`;
 	const inside = whoCanSeeInside(seenBy, me, members);
-	return inside ? `${inside} and ${them}` : them.charAt(0).toUpperCase() + them.slice(1);
+	return inside ? t.who.andGuests(inside, t.who.guests(guests)) : t.who.onlyGuests(guests);
 }
 
 function whoCanSeeInside(seenBy: SeenBy, me: string | undefined, members: Member[] | undefined): string {
-	if (seenBy.everyone) return "Everyone in the project";
+	if (seenBy.everyone) return t.who.everyone;
 	const byId = new Map(members?.map((m) => [m.userId, m]));
 	const others = seenBy.members.filter((id) => id !== me).map((id) => shortName(byId.get(id)));
 	const withMe = me !== undefined && seenBy.members.includes(me);
 	if (!withMe) {
-		if (others.length <= 2) return others.join(" and ");
-		return `${others.length} people`;
+		if (others.length === 0) return "";
+		if (others.length === 1) return t.who.one(others[0] ?? "");
+		if (others.length === 2) return t.who.two(others[0] ?? "", others[1] ?? "");
+		return t.who.people(others.length);
 	}
-	if (others.length === 0) return "Only you";
-	if (others.length === 1) return `You and ${others[0]}`;
-	if (others.length === 2) return `You, ${others[0]} and ${others[1]}`;
-	return `You and ${others.length} others`;
+	if (others.length === 0) return t.who.onlyYou;
+	if (others.length === 1) return t.who.youAnd(others[0] ?? "");
+	if (others.length === 2) return t.who.youAndTwo(others[0] ?? "", others[1] ?? "");
+	return t.who.youAndMore(others.length);
 }
+
+/** Whether a line of "who can see this" is about the person reading it. */
+export const isMe = (a: Access, me: string | undefined) =>
+	!a.link && !a.guest && !a.everyone && !a.former && me !== undefined && a.userId === me;
 
 /** Who a line of "who can see this" is about, as the person reading it says it. */
 export function whoOf(a: Access, me: string | undefined): string {
-	if (a.link) return a.linkKind === "upload-only" ? "Anyone with the upload-only link" : "Anyone with the link";
+	if (a.link) return a.linkKind === "upload-only" ? t.who.anyoneWithUploadLink : t.who.anyoneWithLink;
 	if (a.guest) return a.guest.address;
-	if (a.everyone) return "Everyone in the project";
-	if (a.former) return "Someone no longer in the project";
-	return a.userId === me ? "You" : nameOf(a);
+	if (a.everyone) return t.who.everyone;
+	if (a.former) return t.common.someoneWhoLeft;
+	return isMe(a, me) ? t.who.you : nameOf(a);
 }
 
 /**
@@ -67,28 +73,16 @@ export function whoOf(a: Access, me: string | undefined): string {
  * that they send files in.
  */
 export function roleOf(a: Access): string {
-	if (!a.role) return a.link ? "Can only send files in" : "";
-	return ROLE_NAME[a.role];
+	if (!a.role) return a.link ? t.who.canOnlySendIn : "";
+	return roleName(a.role);
 }
-
-/** What a public link lets its visitors do, said where it is chosen. */
-export const LINK_KIND_MEANS = {
-	view: { name: "Open and download", means: "They see what is in it, and download it." },
-	"upload-only": {
-		name: "Only send files in",
-		means: "They send files into this folder. They cannot see what is in it, not even the names, and replace nothing.",
-	},
-} as const;
 
 /** Why someone in "who can see this" has their access, in a few words after their role. */
 export function whyOf(a: Access): string {
-	if (a.admin) return "project admin";
-	if (a.inherited) return a.from ? `from “${a.from.name}”` : "from a folder above";
+	if (a.admin) return t.who.projectAdmin;
+	if (a.inherited) return a.from ? t.who.from(a.from.name) : t.who.fromAbove;
 	return "";
 }
-
-const day = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium" });
-const moment = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" });
 
 /**
  * What else a line says: a guest's ("Guest"), until when, whether it lets them in now, and how often they used it. Each
@@ -96,17 +90,15 @@ const moment = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle
  */
 export function moreOf(a: Access): string[] {
 	const out: string[] = [];
-	if (a.guest) out.push("Guest");
-	if (a.until) out.push(new Date(a.until) > new Date() ? `until ${day.format(new Date(a.until))}` : `ended ${day.format(new Date(a.until))}`);
-	if (a.guest && a.works === false && !(a.until && new Date(a.until) <= new Date())) out.push("does not let them in now");
+	if (a.guest) out.push(t.who.guest);
+	if (a.until) out.push(new Date(a.until) > new Date() ? t.who.until(formatDay(a.until)) : t.who.ended(formatDay(a.until)));
+	if (a.guest && a.works === false && !(a.until && new Date(a.until) <= new Date())) out.push(t.who.notLettingIn);
 	if (a.uses !== undefined) {
-		out.push(a.uses === 0 ? "not used yet" : `used ${a.uses === 1 ? "once" : `${a.uses} times`}${a.used ? `, last ${moment.format(new Date(a.used))}` : ""}`);
+		if (a.uses === 0) out.push(t.who.notUsedYet);
+		else {
+			const used = a.uses === 1 ? t.who.usedOnce : t.who.usedTimes(a.uses);
+			out.push(a.used ? t.who.lastUsed(used, formatMoment(a.used)) : used);
+		}
 	}
 	return out;
 }
-
-/** What an invitation lets a guest do, said where it is given. */
-export const GUEST_ROLE_MEANS = {
-	viewer: "Can open and download.",
-	editor: "Can also upload, rename, move and delete inside it. Cannot share it.",
-} as const;

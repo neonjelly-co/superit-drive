@@ -13,6 +13,7 @@ import (
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/storage"
+	"github.com/neonjelly-co/superit-drive/internal/text"
 )
 
 // Errors the server tells the person about.
@@ -40,15 +41,29 @@ func (t *Taken) Error() string { return fmt.Sprintf("something called %q is alre
 // mod_dav and of most file systems.
 const MaxNameBytes = 255
 
-// A BadName is a name the Drive will not store. Its text is written for the person who chose the name.
-type BadName struct{ reason string }
+// A BadName is a name the Drive will not store. Why is written for the person who chose the name, in each language.
+type BadName struct{ Why text.Message }
 
-func (b *BadName) Error() string { return b.reason }
+func (b *BadName) Error() string { return b.Why.English() }
 
-// TooLong is what a person is told about a name longer than MaxNameBytes. The interface says the same before it
-// sends anything (web/src/names.ts).
-const TooLong = "This name is too long. Names can be up to 255 characters, and fewer when they have accented letters, " +
-	"other alphabets or symbols. Shorten the name and try again."
+// Why a name is not stored, as the person who chose it reads it. The interface says the same before it sends anything
+// (nameProblem in web/src/names.ts, with its words in web/src/i18n).
+var (
+	nameNeeded  = text.M("A name is needed.", "Adj meg egy nevet.")
+	nameNotText = text.M("This name is not valid text. Choose another name.", "Ez a név nem érvényes szöveg. Válassz másik nevet.")
+	// TooLong is what a person is told about a name longer than MaxNameBytes.
+	TooLong = text.M("This name is too long. Names can be up to 255 characters, and fewer when they have accented letters, "+
+		"other alphabets or symbols. Shorten the name and try again.",
+		"Ez a név túl hosszú. Egy név legfeljebb 255 karakter lehet, ékezetes betűkkel, más írásokkal vagy jelekkel kevesebb. "+
+			"Rövidítsd le, és próbáld újra.")
+	nameDots    = text.M("“.” and “..” cannot be used as names. Choose another name.", "A „.” és a „..” nem lehet név. Válassz másik nevet.")
+	nameSlash   = text.M("A name cannot contain “/”. Choose another name.", "A név nem tartalmazhat „/” jelet. Válassz másik nevet.")
+	nameControl = text.M("A name cannot contain line breaks, tabs or other control characters. Choose another name.",
+		"A név nem tartalmazhat sortörést, tabulátort vagy más vezérlőkaraktert. Válassz másik nevet.")
+	nameUnusable = text.M("This name cannot be used. Choose another name.", "Ez a név nem használható. Válassz másik nevet.")
+	nameTurns    = text.M("This name holds characters that change the direction of text. Rename the file and send it again.",
+		"Ebben a névben olyan karakterek vannak, amelyek megfordítják a szöveg irányát. Nevezd át a fájlt, és küldd el újra.")
+)
 
 // CheckName says whether name can be the name of a file or folder on the storage. Names are kept exactly as given
 // (no change of case or Unicode form): they are the real names on the storage. The interface sends names in Unicode's
@@ -56,17 +71,17 @@ const TooLong = "This name is too long. Names can be up to 255 characters, and f
 func CheckName(name string) error {
 	switch {
 	case name == "":
-		return &BadName{"A name is needed."}
+		return &BadName{nameNeeded}
 	case !utf8.ValidString(name):
-		return &BadName{"This name is not valid text. Choose another name."}
+		return &BadName{nameNotText}
 	case len(name) > MaxNameBytes:
 		return &BadName{TooLong}
 	case name == "." || name == "..":
-		return &BadName{"“.” and “..” cannot be used as names. Choose another name."}
+		return &BadName{nameDots}
 	case strings.Contains(name, "/"):
-		return &BadName{"A name cannot contain “/”. Choose another name."}
+		return &BadName{nameSlash}
 	case strings.ContainsFunc(name, unicode.IsControl):
-		return &BadName{"A name cannot contain line breaks, tabs or other control characters. Choose another name."}
+		return &BadName{nameControl}
 	}
 	return nil
 }
@@ -110,7 +125,7 @@ func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, n
 	}
 	file, ok := pathIn(dir, name)
 	if !ok {
-		return Upload{}, &BadName{"This name cannot be used. Choose another name."} // CheckName refuses these first
+		return Upload{}, &BadName{nameUnusable} // CheckName refuses these first
 	}
 	leave, err := d.inPlace(ctx, p)
 	if err != nil {

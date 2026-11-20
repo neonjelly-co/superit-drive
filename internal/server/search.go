@@ -62,10 +62,10 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, c call) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	switch {
 	case len(q) > drive.MaxNameBytes:
-		s.refuse(w, r, http.StatusBadRequest, "This is longer than any name can be. Search for a part of the name.")
+		s.refuse(w, r, http.StatusBadRequest, searchTooLong)
 		return
 	case index.SearchKey(q) == "":
-		s.refuse(w, r, http.StatusBadRequest, "Type a part of a name to search for.")
+		s.refuse(w, r, http.StatusBadRequest, searchNothing)
 		return
 	}
 	scope, err := s.searchScope(ctx, c.member)

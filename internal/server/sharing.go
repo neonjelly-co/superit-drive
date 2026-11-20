@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -16,6 +15,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/mail"
 	"github.com/neonjelly-co/superit-drive/internal/members"
+	"github.com/neonjelly-co/superit-drive/internal/text"
 )
 
 // The handlers for who has access, and for giving it: on a shared folder as a whole (its managers decide) and on any
@@ -257,19 +257,19 @@ func (s *Server) giveAccess(who grantee) func(http.ResponseWriter, *http.Request
 		if !to.Everyone {
 			m, ok := s.members.Current().Lookup(to.Member)
 			if !ok {
-				s.refuse(w, r, http.StatusBadRequest, "This person is not a member of the project.")
+				s.refuse(w, r, http.StatusBadRequest, notInTheProject)
 				return
 			}
 			to.Member = m.UserID
 			if c.place.Kind == index.MyFiles && m.UserID == c.place.Owner {
-				s.refuse(w, r, http.StatusBadRequest, "This is in their own My files: they have it already.")
+				s.refuse(w, r, http.StatusBadRequest, theirOwnFiles)
 				return
 			}
 			// Access on an item is given to others. Given to oneself it would only outlast what one was given above,
 			// after the person who gave that took it away. (A manager stepping down on a shared folder as a whole changes
 			// their own role there, under the rule that it keeps a manager.)
 			if c.item != nil && m.UserID == c.member.UserID {
-				s.refuse(w, r, http.StatusBadRequest, "You cannot give yourself access. Ask someone who may share it.")
+				s.refuse(w, r, http.StatusBadRequest, notToYourself)
 				return
 			}
 		}
@@ -288,7 +288,7 @@ func (s *Server) giveAccess(who grantee) func(http.ResponseWriter, *http.Request
 		added, err := s.drive.Give(r.Context(), *c.place, c.item, to, string(body.Role), c.member.UserID, check)
 		if added && !to.Everyone {
 			if m, ok := s.members.Current().Lookup(to.Member); ok {
-				s.tellShared(c, m, body.Role)
+				s.tellShared(c, m, body.Role, text.Of(r))
 			}
 		}
 		s.changedAccess(w, r, c, err)
@@ -301,22 +301,23 @@ func (s *Server) giveAccess(who grantee) func(http.ResponseWriter, *http.Request
 //
 // The mail says only what the member may now see: the sharer's name, the item's name (or the shared folder's, when it
 // was given as a whole), the project's, and a link to it at DRIVE_ADDRESS. It never names a folder above what was
-// shared, nor the shared folder an item is in.
-func (s *Server) tellShared(c call, to members.Member, role access.Role) {
+// shared, nor the shared folder an item is in. It is in l, the language of the page the person shared from: the Drive
+// knows no other language of the member it goes to.
+func (s *Server) tellShared(c call, to members.Member, role access.Role, l text.Lang) {
 	if !s.mail.On() || to.UserID == c.member.UserID || s.address == nil {
 		return
 	}
 	link := url.Values{"place": {strconv.FormatInt(c.place.ID, 10)}}
-	what, name := "the shared folder", c.place.Name
+	what, name := sharedSharedFolderWithYou, c.place.Name
 	switch {
 	case c.item == nil:
 	case c.item.Folder:
-		what, name = "the folder", c.item.Name
+		what, name = sharedFolderWithYou, c.item.Name
 		link.Set("folder", strconv.FormatInt(c.item.ID, 10))
 	default:
 		// A file has no page of its own: the folder it is in, when they may open it, and otherwise "Shared with me",
 		// which lists it.
-		what, name = "the file", c.item.Name
+		what, name = sharedFileWithYou, c.item.Name
 		if !access.Decide(personOf(to), access.List, c.access.Up(len(c.access.Path)-1)) {
 			link = url.Values{"shared": {""}}
 		} else if c.item.ParentID != 0 {
@@ -329,17 +330,16 @@ func (s *Server) tellShared(c call, to members.Member, role access.Role) {
 	var can string
 	switch role {
 	case access.Viewer:
-		can = "You can open and download it."
+		can = canOpen.In(l)
 	case access.Editor:
-		can = "As an editor you can also upload, rename, move and delete, and share it further."
+		can = canEdit.In(l)
 	case access.Manager:
-		can = "As a manager you can also decide who has access to it, and delete it."
+		can = canManage.In(l)
 	}
-	body := fmt.Sprintf("%s shared %s “%s” with you in the Drive of %s.\n%s\n\nOpen it: %s\n",
-		sharer, what, name, mail.Clean(s.project), can, address.String())
+	body := what.In(l, sharer, name, mail.Clean(s.project)) + "\n" + can + "\n\n" + openIt.In(l, address.String()) + "\n"
 	s.mail.Send(mail.Message{
 		To:      to.Email,
-		Subject: fmt.Sprintf("%s shared “%s” with you", sharer, name),
+		Subject: sharedSubject.In(l, sharer, name),
 		Body:    body,
 		About:   []any{"mail", "shared with you", "recipient", to.UserID, "place", c.place.ID, "item", itemID(c.item)},
 	})
@@ -361,14 +361,14 @@ func itemID(it *index.Item) int64 {
 }
 
 // roleRefused says which roles can be given where the request tried to give one that cannot.
-func roleRefused(c call, to index.Grantee) string {
+func roleRefused(c call, to index.Grantee) text.Message {
 	switch {
 	case c.item != nil:
-		return "Access to a file or folder is given as viewer or editor."
+		return rolesOnAnItem
 	case to.Everyone:
-		return "Everyone in the project can be given viewer or editor on a shared folder, not manager."
+		return rolesForEveryone
 	}
-	return "Access to a shared folder is given as viewer, editor or manager."
+	return rolesOnASharedFolder
 }
 
 // takeAccess takes away what was given to a member, or to everyone in the project, on an item or on a shared folder as
@@ -396,7 +396,7 @@ func (s *Server) changedAccess(w http.ResponseWriter, r *http.Request, c call, e
 	case err == nil:
 		s.writeAccess(w, r, c)
 	case errors.Is(err, errNoManagerLeft):
-		s.refuse(w, r, http.StatusConflict, "A shared folder needs a manager. Make someone else a manager first.")
+		s.refuse(w, r, http.StatusConflict, needsAManager)
 	case errors.Is(err, index.ErrNoItem), errors.Is(err, drive.ErrPlaceGone):
 		// It went to the trash after guard found it: the same answer guard gives from now on.
 		s.refuse(w, r, http.StatusNotFound, notHere)

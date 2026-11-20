@@ -1,11 +1,13 @@
-import { FolderOpen, Trash2, X } from "lucide-react";
+import { FolderOpen, Trash2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, type Place } from "../api";
+import { t } from "../i18n";
 import { AccessSection } from "./access-section";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
 import { switchedOffBy } from "./oversight-view";
+import { SidePanel } from "./side-panel";
 
 type SharedFolder = Extract<Place, { kind: "shared-folder" }>;
 
@@ -31,20 +33,12 @@ export function SharedFolderPanel({ place, me, onClose, onDelete, onAccessChange
 	const [confirming, setConfirming] = useState(false);
 
 	return (
-		<aside aria-label="Shared folder" className="relative w-96 shrink-0 overflow-auto border-l border-border bg-card p-6 pb-24">
-			<button
-				type="button"
-				onClick={onClose}
-				aria-label="Close details"
-				className="absolute top-4 right-4 grid size-8 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-			>
-				<X aria-hidden className="size-4" />
-			</button>
-			<div className="flex items-start gap-3 pr-8">
+		<SidePanel label={t.sharedFolder.label} closeLabel={t.details.close} onClose={onClose}>
+			<div className="flex items-start gap-3 pr-8 max-md:pr-12">
 				<FolderOpen aria-hidden className="mt-0.5 size-6 shrink-0 text-muted-foreground" />
 				<div className="min-w-0">
 					<h2 className="text-lg font-semibold break-words">{place.name}</h2>
-					<p className="text-sm text-muted-foreground">Shared folder, owned by the project</p>
+					<p className="text-sm text-muted-foreground">{t.sharedFolder.ownedByProject}</p>
 				</div>
 			</div>
 
@@ -63,12 +57,12 @@ export function SharedFolderPanel({ place, me, onClose, onDelete, onAccessChange
 			{canDelete && (
 				<div className="mt-8 border-t border-border pt-5">
 					<Button variant="danger" onClick={() => setConfirming(true)}>
-						<Trash2 aria-hidden /> Delete shared folder
+						<Trash2 aria-hidden /> {t.sharedFolder.delete}
 					</Button>
 				</div>
 			)}
 			{confirming && <ConfirmDelete name={place.name} onDelete={onDelete} onClose={() => setConfirming(false)} />}
-		</aside>
+		</SidePanel>
 	);
 }
 
@@ -88,17 +82,17 @@ function ConfirmDelete({ name, onDelete, onClose }: { name: string; onDelete: ()
 	};
 	return (
 		<Dialog
-			title={`Delete “${name}”?`}
-			description="The shared folder goes to the trash with everything in it, and nobody can open it there. Its managers and project admins can restore it from the trash for 30 days; then it is removed for good."
+			title={t.sharedFolder.deleteTitle(name)}
+			description={t.sharedFolder.deleteNote}
 			onClose={onClose}
 			onSubmit={submit}
 			footer={
 				<>
 					<Button variant="ghost" onClick={onClose}>
-						Cancel
+						{t.common.cancel}
 					</Button>
 					<Button variant="danger" type="submit" disabled={busy}>
-						<Trash2 aria-hidden /> Delete shared folder
+						<Trash2 aria-hidden /> {t.sharedFolder.delete}
 					</Button>
 				</>
 			}
@@ -139,30 +133,22 @@ function OutsideSwitch({ place, onChanged }: { place: SharedFolder; onChanged: (
 	return (
 		<section aria-labelledby={`outside-${place.id}`} className="mt-6">
 			<h3 id={`outside-${place.id}`} className="text-sm font-semibold">
-				Sharing outside the project
+				{t.sharedFolder.outsideTitle}
 			</h3>
 			{own.on ? (
-				<p className="mt-0.5 text-sm text-muted-foreground">
-					On for this shared folder: whoever may share something in it can make a public link or invite a guest.
-				</p>
+				<p className="mt-0.5 text-sm text-muted-foreground">{t.sharedFolder.on}</p>
 			) : (
 				<p className="mt-0.5 text-sm text-attention">
-					Off for this shared folder: no public link in it opens and no guest gets in. {switchedOffBy(own)}
+					{t.sharedFolder.off} {switchedOffBy(own)}
 				</p>
 			)}
-			{place.outside === "project" && (
-				<p className="mt-1 text-sm text-attention">A project admin has switched it off for the whole project, so it is off here too.</p>
-			)}
+			{place.outside === "project" && <p className="mt-1 text-sm text-attention">{t.sharedFolder.offForProject}</p>}
 			{canSwitch && (
 				<Button className="mt-3" disabled={busy} onClick={() => void change(!own.on)}>
-					{own.on ? "Switch it off for this shared folder" : "Switch it back on"}
+					{own.on ? t.sharedFolder.switchOff : t.sharedFolder.switchBackOn}
 				</Button>
 			)}
-			{canSwitch && own.on && (
-				<p className="mt-2 text-sm text-muted-foreground">
-					Links and guests are not removed: they work again once it is switched back on.
-				</p>
-			)}
+			{canSwitch && own.on && <p className="mt-2 text-sm text-muted-foreground">{t.sharedFolder.notRemoved}</p>}
 			{problem && (
 				<p role="alert" className="mt-2 text-sm text-destructive">
 					{problem}

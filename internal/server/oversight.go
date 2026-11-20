@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"path"
 	"slices"
@@ -16,6 +15,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/members"
+	"github.com/neonjelly-co/superit-drive/internal/text"
 )
 
 // Sharing outside the project switched off, and what a project admin oversees. Their routes are in routes.go with all
@@ -67,16 +67,6 @@ func outsideHere(p index.Place) string {
 	return "on"
 }
 
-const (
-	// guestUnavailable is what a guest is told about something given to them while sharing outside the project is off
-	// where it is (%s: the project's name).
-	guestUnavailable = "This is not available right now: %s has switched off sharing outside the project. It works again " +
-		"once they switch it back on. Ask whoever invited you."
-	// visitorUnavailable is a visitor's page for a link that would open, while sharing outside the project is off.
-	visitorUnavailable = "Sharing outside the organisation that shared this is switched off for now, so the link opens " +
-		"nothing. It works again once they switch it back on. Ask whoever sent it to you."
-)
-
 // switchedOff answers someone refused only because sharing outside the project is switched off where they asked
 // (access.SwitchedOff): told so, rather than "not here", since with it on they would be let in, and so learn nothing
 // they could not see then. A member who may share it (making a link, inviting a guest) gets 409 with "outside", where
@@ -85,17 +75,16 @@ const (
 func (s *Server) switchedOff(w http.ResponseWriter, r *http.Request, c call) {
 	switch {
 	case c.link != nil:
-		s.renderVisitor(w, http.StatusForbidden, visitorView{Heading: "This link is not available", Message: visitorUnavailable})
+		l := text.Of(r)
+		s.renderVisitor(w, r, http.StatusForbidden, visitorView{Heading: linkNotAvailable.In(l), Message: visitorUnavailable.In(l)})
 	case c.guest != nil:
-		writeJSON(w, http.StatusForbidden, map[string]any{"unavailable": true,
-			"error": fmt.Sprintf(guestUnavailable, s.project)})
+		refuseWith(w, r, http.StatusForbidden, map[string]any{"unavailable": true}, guestUnavailable, s.project)
 	default:
-		where := "for this shared folder, so no public link can be made and no guest invited here. Its managers can switch it back on."
+		why := offForThisFolder
 		if outsideHere(*c.place) == "project" {
-			where = "for the whole project, so no public link can be made and no guest invited. A project admin can switch it back on."
+			why = offForTheProject
 		}
-		writeJSON(w, http.StatusConflict, map[string]any{"outside": outsideHere(*c.place),
-			"error": "Sharing outside the project is switched off " + where})
+		refuseWith(w, r, http.StatusConflict, map[string]any{"outside": outsideHere(*c.place)}, why)
 	}
 }
 
@@ -108,7 +97,7 @@ func (s *Server) readSwitch(w http.ResponseWriter, r *http.Request) (on, ok bool
 		return false, false
 	}
 	if body.On == nil {
-		s.refuse(w, r, http.StatusBadRequest, `Say whether sharing outside the project is on: {"on": true} or {"on": false}.`)
+		s.refuse(w, r, http.StatusBadRequest, sayOnOrOff)
 		return false, false
 	}
 	return *body.On, true

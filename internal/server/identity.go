@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/neonjelly-co/superit-drive/internal/members"
+	"github.com/neonjelly-co/superit-drive/internal/text"
 )
 
 // The headers a signed-in request carries. The reverse proxy in front of the Drive signs people in, removes any copies
@@ -24,13 +25,13 @@ const (
 // refusal is why a request was refused before anything else happened.
 type refusal struct {
 	status  int
-	message string
+	message text.Message
 }
 
 var (
-	refusedSecret = refusal{http.StatusForbidden, "This request did not come through the Drive's sign-in."}
-	refusedNoUser = refusal{http.StatusForbidden, "This request does not say who is signed in."}
-	refusedMember = refusal{http.StatusForbidden, "You are not a member of this project, so its Drive is closed to you."}
+	refusedSecret = refusal{http.StatusForbidden, notThroughSignIn}
+	refusedNoUser = refusal{http.StatusForbidden, noOneSignedIn}
+	refusedMember = refusal{http.StatusForbidden, notAMember}
 )
 
 // identify says who is asking. A request without the right secret is refused whatever its identity headers say: only

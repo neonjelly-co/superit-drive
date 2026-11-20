@@ -346,8 +346,8 @@ by the Drive's clock), `GET /api/me` answers members with
 "rollback": {"by": "Réka Kovács", "to": "2026-11-19T03:00:00Z", "at": "2026-11-20T09:41:00Z", "until": "2026-11-27T09:41:00Z"}
 ```
 
-and the interface shows it above the list, in every view, as "The files were put back to 19 November at 04:00" (the
-time in the browser's time zone): "Réka Kovács put the Drive's files back to how they were then, on 20 November. Files
+and the interface shows it above the list, in every view, in the page's language (see [Languages](#languages)), as "The
+files were put back to 19 November at 04:00" (the time in the browser's time zone): "Réka Kovács put the Drive's files back to how they were then, on 20 November. Files
 added after that are gone, changes made after that are undone, and files deleted after that are back. Files that came
 back may need to be shared again." The name is shown as text. A member can close it: it stays closed in that browser,
 for that rollback, and nowhere else; a new rollback shows again. Visitors through a public link are told nothing: their pages say nothing
@@ -785,9 +785,10 @@ POST   /s/{token}/files?name=…[&turn=…]    a file sent through an upload-onl
 `{item}` must be the link's item or something inside it, through a view link; an upload-only link reaches no item at
 all, its own folder included (only its page and sending). A link that does not work, and anything it does not cover (a
 folder above it, a file beside it, an item of another place or in the trash), gets the one answer: 404 with the page
-"This link does not work". The one exception is a link that would open what is asked for but for sharing outside the
-project being switched off where it is: 403 with the page "This link is not available", which says it is switched off
-for now (only after the token matched, and nothing about what it is on).
+"This link does not work" (the same bytes for every one of them, in each language). The one exception is a link that
+would open what is asked for but for sharing outside the project being switched off where it is: 403 with the page "This
+link is not available", which says it is switched off for now (only after the token matched, and nothing about what it
+is on).
 
 **The page** is plain HTML made by the Drive (`internal/server/visitors.go`), in one column on every screen, with no
 script and nothing of the members' interface (but an upload-only link's: below): it works with JavaScript off. It says
@@ -796,7 +797,8 @@ or has left), the item's name, the folders from the link's item down to the one 
 all as zip" for a folder, and what is in it: folders open their own page, files have Download, and Open when their kind
 opens in the browser. A folder's page lists at most 1,000 items (the zip holds them all). It lists what the index knows:
 what was put on the storage directly shows once a member has opened its folder, or the walk has passed it; the zip looks
-at the storage. English for now.
+at the storage. It is in the visitor's language (see [Languages](#languages)), with a switch to the other one at the
+bottom.
 
 Every answer under `/s/` carries `X-Robots-Tag: noindex, nofollow` (and the page `<meta name="robots">`),
 `Referrer-Policy: no-referrer` (the address is the secret), `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
@@ -1229,6 +1231,83 @@ as it would be alone. Deleting several offers Undo for all of them; a move into 
 what each item keeps; and when some items are not moved, deleted or restored, a dialog names each with the Drive's
 reason, and says what happened to the rest.
 
+### On a phone
+
+Below 48rem (768 px), at a phone's width, the same page folds (`useNarrow` in `web/src/narrow.ts`, and Tailwind's
+`max-md:`):
+
+- The sidebar is behind a menu button at the top: a drawer from the left, which closes when the person goes somewhere,
+  chooses what to upload, taps outside it or presses Escape. The language switch is at its bottom.
+- Each row is the name with one line under it: who can see it and the size ("From a guest" or "Through a link" first).
+  Tapping the name opens it, as a click does on a wide screen; the ⋯ button shows its details, as a sheet that slides up
+  from the bottom. The trash, search and "Shared with me" fold the same way.
+- Tick boxes show after "Select", or a press and hold on a row; a tap then ticks a row, and Move, Download as zip,
+  Delete and Done are in a bar at the bottom.
+- Upload opens the phone's own picker, for files and photos. Only dragging files in is missing, and "Upload folder"
+  where the browser cannot choose a folder (phones' and tablets' pickers choose files only, so it is not offered there).
+- Every target a finger taps is at least 44 px. Dialogs sit at the top of the screen and scroll within it, so the
+  on-screen keyboard does not cover their field or buttons (the pages also ask the browser to make room for it,
+  `interactive-widget=resizes-content`). Nothing is reachable only by hover or by dragging: what a tooltip says on a wide
+  screen is in the details, or shown.
+- The outsiders' pages are one plain column on every screen: a public link's, an upload-only link's (which says "Choose
+  files" on a touch screen rather than "Drop files here"), and the guests'.
+
+### Languages
+
+The Drive speaks English and Hungarian, to members, guests and visitors alike, and writes its mail in them. Nothing
+about anyone's language is kept on the server: no setting, no cookie, nothing in the index.
+
+- **Which language a page is in.** The one the person chose with the switch (members at the bottom of the sidebar,
+  guests at the top of their page), kept in that browser (`localStorage`); otherwise the first of the browser's
+  languages that the Drive speaks; English when it names neither. Switching loads the page again in the other language.
+  A page is never in two: it loads its words before it shows anything.
+- **The Drive's own answers** (the `"error"` of every refusal, `guests.why` in `GET /api/me`, the guests' "a code is on
+  its way") are in the language of the request: its `lang` query parameter when that is `en` or `hu`, otherwise the one
+  of the two its `Accept-Language` prefers (by weight, then order; English when it names neither), with
+  `Content-Language` saying which. The interface sends `Accept-Language` with its page's language on every call, and adds
+  `lang` to the addresses it opens in a tab or downloads, so an answer always matches the page.
+- **Visitors**: a view link's pages run no script, so a choice travels in the address. The switch at the bottom of a
+  page links to `?lang=hu` (or `en`), and every address on that page then carries it, so the folders inside, the files
+  and the error pages stay in that language; without a choice a page follows the browser. No cookie is set or read under
+  `/s/`. An upload-only link's page has its one script, which holds no words: what it says is in the page
+  (`data-words`), so one script, and one hash in the policy, serves both languages. It sends each file with the page's
+  `lang`, so a refusal is in the page's language too.
+- **Mail** is in the language of the page whose act sends it: "shared with you" in the language of the member who
+  shared, an invitation in the inviting member's, a guest's code in the language of the guests' page that asked for it.
+  The Drive knows no other language of the person it mails.
+- What only the people running the Drive read stays in English: the log, the settings' errors, and the storage check's
+  output (which the daemon reads).
+
+**Where the words are.** The server's are `text.Message`s (`internal/text`), each made once, when the program starts,
+with its English and Hungarian side by side: `internal/server/words.go`, and the names' and mail's own in
+`internal/drive/files.go` and `internal/mail/mail.go`. `refuse` takes only a `Message`, and `refuseWith` is the one
+place that writes `"error"`. The interface's are in `web/src/i18n`: `en.ts` defines the keys, `hu.ts` is typed against
+it (a key missing, or one too many, does not build), and each page downloads only its own language's catalogue. Tests
+fail on a Hungarian text missing, left in English, or saying other values than the English
+(`TestEveryTextAPersonReadsIsInEnglishAndHungarian`, `catalogue.test.ts`), on a sentence for a person written around the
+languages in the server or the interface (`TestNoTextForAPersonIsWrittenAroundTheLanguages`, and the components' scan in
+`catalogue.test.ts`), and on words in the visitors' page template itself; `test/language_test.go` checks the answers,
+pages and mail in Hungarian through HTTP.
+
+**How the Hungarian is written.** As a Hungarian writes, in the platform's plain "te" form, with its terms: Drive-tárhely,
+pillanatkép, kuka, tag, vendég, projektadmin. A name, an address or a number put into a sentence never takes a suffix or
+an article, which change with the value's sounds: it follows a colon, sits in quotes („…”) or parentheses, or is the
+sentence's subject; and a noun after a number stays singular (3 elem). Dates and sizes follow the language (2026. nov.
+20., 1,2 MB).
+
+| English | Hungarian |
+|---|---|
+| My files | Saját fájlok |
+| shared folder | közös mappa |
+| Shared with me | Velem megosztott |
+| trash | kuka |
+| member, guest, project admin | tag, vendég, projektadmin |
+| viewer, editor, manager, owner | megtekintő, szerkesztő, kezelő, tulajdonos |
+| public link, upload-only link | nyilvános link, feltöltési link |
+| Drive storage, snapshot | Drive-tárhely, pillanatkép |
+| sharing outside the project | projekten kívüli megosztás |
+| restore (from the trash) | visszaállítás |
+
 ### Mail
 
 The Drive sends three kinds of mail: "shared with you", to a member something was just shared with by name; an
@@ -1242,7 +1321,8 @@ not; inviting a guest checks again when that has run out.
 - **When:** a new share to a named member, on a file, a folder or a shared folder as a whole. Not for everyone in the
   project, not for a role changed or given again, not for access taken away, and never to the person sharing (a
   project admin taking a role on a shared folder).
-- **What it says,** in short plain text in English: who shared what, in which project, the role, and a link at
+- **What it says,** in short plain text, in the language of the page it was shared from (see [Languages](#languages)): who
+  shared what, in which project, the role, and a link at
   `DRIVE_ADDRESS`: a folder at `/?place=…&folder=…`, a shared folder at `/?place=…`, and a file at the folder it is in
   when the member can open it, otherwise at "Shared with me" (`/?shared`). It never names a folder above what was
   shared, nor the shared folder an item is in.
@@ -1378,6 +1458,8 @@ their My files is held, unopened, until a project admin hands it to another memb
 upload in parts that resume after a broken connection, downloads resume and seek, and folders upload
 whole and download as zips. Files changed on the WebDAV server by other programs show in the Drive as folders are
 opened, and through a slow walk now and then (see [Keeping in step with the storage](#keeping-in-step-with-the-storage)).
+It works in a phone's browser too, and speaks English and Hungarian (see [On a phone](#on-a-phone) and
+[Languages](#languages)).
 
 It needs:
 
@@ -1531,7 +1613,7 @@ You need Go 1.27, Bun 1.3 and Docker. `make help` lists the targets.
 
 ```sh
 make build        # interface (web/dist) and binary (bin/superit-drive)
-make test         # every test; needs Docker running
+make test         # every test (the interface's catalogue test with Bun, then Go's); needs Docker running
 make test-short   # only the tests that need no Docker
 make test-memory  # the image in a 64 MiB container under 40 downloads and 10 uploads at once (slow)
 make image        # the container image superit-drive:dev
@@ -1545,7 +1627,8 @@ test itself (`internal/mail/mailtest`). The stand-in storage also has folders th
 refuse or ignore one thing each, such as `MOVE` or `Range`, for the storage check's tests (`test/webdav/storage.conf`).
 Next to the code are unit tests where a rule needs a table: the access rules in `internal/access`, settings, the
 member list, the names that may become paths, the index's ids, and a check that every route goes through the
-authorisation function. The interface has no tests of its own; check it in a browser.
+authorisation function. The interface's one test (`web/src/i18n/catalogue.test.ts`, `bun test` in `web/`) checks its
+words in both languages (see [Languages](#languages)); otherwise check the interface in a browser, at phone width too.
 
 **The memory test** (`test/memory`, build tag `memory`, `make test-memory`) builds the image from the Dockerfile and
 runs it with `--memory=64m --memory-swap=64m` against the stand-in storage. It uploads a 256 MiB file with a part cut
@@ -1615,6 +1698,7 @@ cmd/superit-drive/     main: runs the Drive, or the storage check (`check-storag
 internal/app/          wires everything together and serves until stopped
 internal/settings/     every environment variable
 internal/members/      the member list file, re-read when it changes
+internal/text/         every text the server writes for a person, in English and Hungarian, and a request's language
 internal/mail/         the Drive's own mail over SMTP, sent in the background; mailtest/ is a throwaway SMTP server
                        for tests
 internal/access/       the one authorisation function (Decide), the role at an item (RoleAt), what Shared with me lists
@@ -1646,7 +1730,8 @@ internal/transfers/    what holds the memory figure: capped network buffers, and
 internal/storage/      the WebDAV client
 internal/storagecheck/ `superit-drive check-storage`: can a WebDAV server hold the Drive's files?
 web/                   the interface (Vite, React, Tailwind with the Pilot light tokens): the members' page
-                       (index.html) and the guests' (guest.html); built into web/dist
+                       (index.html) and the guests' (guest.html); built into web/dist; src/i18n holds its words in
+                       each language
 test/                  tests through HTTP; harness/ runs the Drive; webdav/ is the stand-in storage; memory/ is the
                        64 MiB test
 dev/                   settings and a member list for running locally

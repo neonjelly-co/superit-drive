@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import { t } from "../i18n";
 import type { Answer, Question } from "../uploads";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
@@ -14,31 +15,27 @@ export function ConflictDialog({ question, onAnswer }: { question: Question; onA
 	const choose = (a: Answer) => onAnswer(a, forOthers);
 	return (
 		<Dialog
-			title={folder ? `There is a folder called “${question.name}” here` : `“${question.name}” is already here`}
-			description={
-				folder
-					? "A file cannot replace a folder. Keep both, and the file gets a number added to its name."
-					: "Replace it with the one you are uploading, or keep both. A replaced file goes to the trash, where you can get it back for 30 days."
-			}
+			title={folder ? t.conflict.folderThere(question.name) : t.conflict.fileThere(question.name)}
+			description={folder ? t.conflict.folderNote : t.conflict.fileNote}
 			onClose={() => choose("skip")}
 			footer={
 				<>
 					<Button variant="ghost" onClick={() => choose("skip")}>
-						Skip this file
+						{t.conflict.skip}
 					</Button>
 					<Button variant={folder ? "primary" : "outline"} onClick={() => choose("keep-both")}>
-						Keep both
+						{t.conflict.keepBoth}
 					</Button>
 					{!folder && (
 						<Button variant="primary" onClick={() => choose("replace")}>
-							Replace
+							{t.conflict.replace}
 						</Button>
 					)}
 				</>
 			}
 		>
 			{question.others > 0 && (
-				<label htmlFor={checkboxId} className="flex items-center gap-2 text-sm">
+				<label htmlFor={checkboxId} className="flex items-center gap-2 text-sm max-md:min-h-11">
 					<input
 						id={checkboxId}
 						type="checkbox"
@@ -46,8 +43,7 @@ export function ConflictDialog({ question, onAnswer }: { question: Question; onA
 						onChange={(e) => setForOthers(e.target.checked)}
 						className="size-4 accent-primary"
 					/>
-					Do the same for the {question.others === 1 ? "other file" : `other ${question.others} files`} whose names are
-					already here
+					{t.conflict.forOthers(question.others)}
 				</label>
 			)}
 		</Dialog>
