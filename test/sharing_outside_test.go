@@ -56,6 +56,7 @@ type (
 		Former   bool        `json:"former"`
 		Guest    *guestJSON  `json:"guest"`
 		Role     string      `json:"role"`
+		LinkKind string      `json:"linkKind"`
 		Since    time.Time   `json:"since"`
 		Until    *time.Time  `json:"until"`
 		Uses     int64       `json:"uses"`

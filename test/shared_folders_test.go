@@ -533,6 +533,8 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 			"DELETE /api/places/{place}/items/{item}/access/everyone": {"DELETE", at("/api/places/%d/items/%d/access/everyone", place, folder), ""},
 			"GET /api/places/{place}/items/{item}/link":               {"GET", linkPath(place, folder), ""},
 			"POST /api/places/{place}/items/{item}/link":              {"POST", linkPath(place, folder), `{"replace":true}`},
+			"PUT /api/places/{place}/items/{item}/link":               {"PUT", linkPath(place, folder), `{"kind":"upload-only"}`},
+			"POST /api/places/{place}/items/{item}/link/reset":        {"POST", linkPath(place, folder) + "/reset", ""},
 			"DELETE /api/places/{place}/items/{item}/link":            {"DELETE", linkPath(place, file), ""},
 			"POST /api/places/{place}/items/{item}/access/guests": {"POST", invitePath(place, folder),
 				`{"address":"anna@client.example","role":"viewer"}`},
