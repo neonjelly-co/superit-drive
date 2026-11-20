@@ -118,10 +118,11 @@ func (d *Drive) DeleteSharedFolder(ctx context.Context, p index.Place) (DeletedS
 		return DeletedSharedFolder{}, err
 	}
 
-	entry, dir, err := d.makeEntry(ctx, p)
+	entry, dir, held, err := d.makeEntry(ctx, p)
 	if err != nil {
 		return DeletedSharedFolder{}, err
 	}
+	defer held()
 	to, ok := pathIn(dir, path.Base(p.Folder))
 	if !ok {
 		return DeletedSharedFolder{}, errors.New("a shared folder's top folder has no name") // the Drive made it

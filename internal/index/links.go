@@ -100,7 +100,8 @@ func (x *Index) LinksOn(ctx context.Context, items []int64) ([]Link, error) {
 func (x *Index) LinksInside(ctx context.Context, placeID, folderID int64) ([]Link, error) {
 	return scanLinks(x.db.QueryContext(ctx, "SELECT "+linkColumns+`
 		FROM links JOIN items ON items.id = links.item_id
-		WHERE items.place_id = ? AND IFNULL(items.parent_id, 0) = ? AND items.trashed_at IS NULL ORDER BY links.id`,
+		WHERE items.place_id = ? AND IFNULL(items.parent_id, 0) = ? AND items.trashed_at IS NULL AND items.missing_at IS NULL
+		ORDER BY links.id`,
 		placeID, folderID))
 }
 

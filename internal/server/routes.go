@@ -303,24 +303,47 @@ func seenBy(list *members.List, where *access.Place) seenByJSON {
 	return out
 }
 
+// recheckWait is how long a listing asked with ?wait waits for the look at its folder on the storage.
+const recheckWait = 10 * time.Second
+
 // items lists what is in a folder of a place: each item with what the person may do with it and who can see it, the
 // path down to the folder, and what they may do in it.
 //
 // The path holds only the folders the person can open: for someone given a folder deep inside a place, it starts at
 // that folder, and the names of the folders above it are never sent to them. fromTop says whether it starts at the
 // place's top folder (it is empty there).
+//
+// The list comes from the index, at once. Opening a folder also has it looked at on the storage in the background
+// (drive.Recheck), which brings the index in step with changes made there directly; checking says that look is under
+// way. The interface then asks once more with ?wait, which waits (at most recheckWait) until the look is done, starts no
+// other, and answers the list as the index has it then, with checking still true only when the look is not done yet.
+//
+//	GET /api/places/{place}/items[?wait]
+//	GET /api/places/{place}/items/{folder}/items[?wait]
 func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
 	folder, ok := s.folder(w, r, c, "This is a file, not a folder.")
 	if !ok {
 		return
 	}
-	items, err := s.drive.List(r.Context(), *c.place, folder)
-	if errors.Is(err, drive.ErrGone) {
-		s.refuse(w, r, http.StatusNotFound, "This folder is no longer on the Drive storage. Go up a level to see what is there now.")
-		return
+	var checking bool
+	if r.URL.Query().Has("wait") {
+		checking = s.drive.Rechecked(r.Context(), *c.place, folder, recheckWait)
+		if r.Context().Err() != nil {
+			return
+		}
+		// The look may have found the folder gone: from now on it answers as one that is not there.
+		if folder != nil {
+			if _, err := s.drive.Item(r.Context(), *c.place, folder.ID); errors.Is(err, index.ErrNoItem) {
+				s.refuse(w, r, http.StatusNotFound, notHere)
+				return
+			}
+		}
+	} else {
+		checking = s.drive.Recheck(*c.place, folder)
 	}
+	items, err := s.drive.Children(r.Context(), *c.place, folder)
 	if err != nil {
-		s.failed(w, r, err)
+		s.fail(w, r, err)
 		return
 	}
 	inside, err := s.drive.GrantsInside(r.Context(), *c.place, folder)
@@ -361,7 +384,7 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
 	open, fromTop := openPath(who, c.access, folders)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": out, "path": pathOf(open), "fromTop": fromTop,
-		"role": access.RoleAt(who, c.access), "can": can(who, c.access),
+		"role": access.RoleAt(who, c.access), "can": can(who, c.access), "checking": checking,
 	})
 }
 

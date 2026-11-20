@@ -129,7 +129,7 @@ func (c *check) file() string  { return c.dir + "/check.bin" }
 func (c *check) moved() string { return c.dir + "/check moved.bin" }
 
 func (c *check) signIn(ctx context.Context) (string, error) {
-	_, err := c.store.List(ctx, "")
+	err := c.store.Each(ctx, "", func(storage.Entry) error { return nil })
 	if errors.Is(err, storage.ErrNotFound) {
 		return "the Drive's folder is not there yet; the check makes it, as the Drive would", nil
 	}
@@ -141,7 +141,7 @@ func (c *check) makeFolder(ctx context.Context) (string, error) {
 	if err := c.store.MakeFolder(ctx, c.dir); err != nil {
 		return "", err
 	}
-	if _, err := c.store.List(ctx, c.dir); err != nil {
+	if err := c.store.Each(ctx, c.dir, func(storage.Entry) error { return nil }); err != nil {
 		return "", fmt.Errorf("the server said it made the folder, but then could not list it: %s", reason(err))
 	}
 	return "", nil

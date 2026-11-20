@@ -94,10 +94,9 @@ func TestNumberedNames(t *testing.T) {
 	}
 }
 
-// A listing that read the storage before an upload ended must not drop the upload's new item when it writes to the
-// index afterwards: the next listing would add it back under a new id, and access (later) hangs on ids. Nor may a
-// listing that read the storage before a rename bring back the old name.
-func TestAListingThatStartedBeforeAChangeLeavesTheIndexAlone(t *testing.T) {
+// A look at a folder that read the storage before an upload ended must not hide the upload's new item when it writes to
+// the index afterwards. Nor may a look that read the storage before a rename bring back the old name.
+func TestALookThatStartedBeforeAChangeLeavesTheIndexAlone(t *testing.T) {
 	ctx := context.Background()
 	x, err := index.Open(ctx, t.TempDir())
 	if err != nil {
@@ -110,47 +109,80 @@ func TestAListingThatStartedBeforeAChangeLeavesTheIndexAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := folderKey{p.ID, 0}
-	never := func(string) bool { return false }
+	reread := func(stale func() bool, seen ...index.Seen) error {
+		_, err := x.Reconcile(ctx, p.ID, 0, index.Reread{Seen: seen, Leave: func(string) bool { return false },
+			Busy: func() bool { return false }, Stale: stale, At: time.Now(), Hide: true})
+		return err
+	}
 
-	// The listing starts and reads the storage: nothing there yet.
+	// The look starts and reads the storage: nothing there yet.
 	stale := d.since(key)
 	// Meanwhile an upload ends: on the storage, then in the index, as Upload does it.
 	d.changed(key)
-	uploaded, err := x.PutItem(ctx, p.ID, 0, index.Seen{Name: "a.txt", Size: 1, Changed: time.Now()})
+	uploaded, err := x.PutItem(ctx, p.ID, 0, index.Seen{Name: "a.txt", Size: 1, Changed: time.Now()}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The listing writes what it saw.
-	if err := x.SetChildren(ctx, p.ID, 0, nil, never, stale); err != nil {
-		t.Fatal(err)
+	// The look writes what it saw.
+	if err := reread(stale); !errors.Is(err, index.ErrChanged) {
+		t.Fatalf("a look that started before the upload ended: %v, want ErrChanged", err)
 	}
 	items, _ := x.Children(ctx, p.ID, 0)
 	if len(items) != 1 || items[0].ID != uploaded.ID {
-		t.Fatalf("after a listing that started before the upload ended: %+v, want a.txt with id %d", items, uploaded.ID)
+		t.Fatalf("after a look that started before the upload ended: %+v, want a.txt with id %d", items, uploaded.ID)
 	}
 
-	// A listing that starts after the change is applied: what the storage shows wins.
-	stale = d.since(key)
-	if err := x.SetChildren(ctx, p.ID, 0, []index.Seen{{Name: "a.txt", Size: 5}}, never, stale); err != nil {
+	// A look that starts after the change is applied: what the storage shows wins.
+	if err := reread(d.since(key), index.Seen{Name: "a.txt", Size: 5}); err != nil {
 		t.Fatal(err)
 	}
 	items, _ = x.Children(ctx, p.ID, 0)
 	if len(items) != 1 || items[0].ID != uploaded.ID || items[0].Size != 5 {
-		t.Fatalf("after a fresh listing: %+v", items)
+		t.Fatalf("after a fresh look: %+v", items)
 	}
 
-	// A rename while a listing is under way: the listing saw the old name, and must not bring it back.
+	// A rename while a look is under way: the look saw the old name, and must not bring it back.
 	stale = d.since(key)
 	d.changed(key)
 	if _, err := x.Relocate(ctx, p.ID, uploaded.ID, 0, "b.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if err := x.SetChildren(ctx, p.ID, 0, []index.Seen{{Name: "a.txt", Size: 5}}, never, stale); err != nil {
-		t.Fatal(err)
+	if err := reread(stale, index.Seen{Name: "a.txt", Size: 5}); !errors.Is(err, index.ErrChanged) {
+		t.Fatalf("a look that started before a rename: %v, want ErrChanged", err)
 	}
 	items, _ = x.Children(ctx, p.ID, 0)
 	if len(items) != 1 || items[0].Name != "b.txt" || items[0].ID != uploaded.ID {
-		t.Fatalf("after a listing that started before a rename: %+v", items)
+		t.Fatalf("after a look that started before a rename: %+v", items)
+	}
+}
+
+// A path a change of the Drive's holds (claim) is busy for the folder it is in and everything below it, and a folder
+// is busy while it, or a folder above it, is held.
+func TestWhatIsBusy(t *testing.T) {
+	d := New(nil, nil, Options{})
+	release, ok := d.claim("My files/r/Clients/Bakery")
+	if !ok {
+		t.Fatal("not claimed")
+	}
+	for p, want := range map[string]bool{
+		"My files/r/Clients/Bakery": true, "My files/r/Clients/Bakery/2026": true, "My files/r/Clients": false,
+		"My files/r/Clients/Bakery Ltd": false,
+	} {
+		if got := d.busyAt(p); got != want {
+			t.Errorf("busyAt(%q) = %v, want %v", p, got, want)
+		}
+	}
+	for p, want := range map[string]bool{
+		"My files/r/Clients/Bakery": true, "My files/r/Clients": true, "My files/r": true,
+		"My files/r/Clients/Bakery/2026": false, "My files/r/Clients/Bak": false,
+	} {
+		if got := d.busyIn(p); got != want {
+			t.Errorf("busyIn(%q) = %v, want %v", p, got, want)
+		}
+	}
+	release()
+	if d.busyAt("My files/r/Clients/Bakery/2026") || d.busyIn("My files/r") {
+		t.Fatal("still busy after the change ended")
 	}
 }
 

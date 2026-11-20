@@ -82,11 +82,11 @@ func parent(id int64) any {
 }
 
 // Children returns what is directly in one folder of a place (folderID 0: its top folder), folders first, then by
-// name. Items in the trash are not in any folder.
+// name. Items in the trash are not in any folder, and missing ones (the storage no longer shows them) are not listed.
 func (x *Index) Children(ctx context.Context, placeID, folderID int64) ([]Item, error) {
 	return scanItems(x.db.QueryContext(ctx, `
 		SELECT `+itemColumns+` FROM items
-		WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL
+		WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL AND missing_at IS NULL
 		ORDER BY is_folder DESC, name`, placeID, folderID))
 }
 
@@ -94,7 +94,7 @@ func (x *Index) Children(ctx context.Context, placeID, folderID int64) ([]Item, 
 func (x *Index) FirstChildren(ctx context.Context, placeID, folderID int64, limit int) (items []Item, more bool, err error) {
 	items, err = scanItems(x.db.QueryContext(ctx, `
 		SELECT `+itemColumns+` FROM items
-		WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL
+		WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL AND missing_at IS NULL
 		ORDER BY is_folder DESC, name LIMIT ?`, placeID, folderID, limit+1))
 	if len(items) > limit {
 		return items[:limit], true, err
@@ -103,8 +103,9 @@ func (x *Index) FirstChildren(ctx context.Context, placeID, folderID int64, limi
 }
 
 // Item finds the item with id in the place, at any depth, with the folders above it in Above. It returns ErrNoItem for
-// an id that is not there: one in another place, one in the trash or inside a folder in the trash, and one that does
-// not exist. An item is only ever found inside the place it belongs to.
+// an id that is not there: one in another place, one in the trash or inside a folder in the trash, one missing from the
+// storage or inside a missing folder, and one that does not exist. An item is only ever found inside the place it
+// belongs to.
 func (x *Index) Item(ctx context.Context, placeID, id int64) (Item, error) {
 	return item(ctx, x.db, placeID, id)
 }
@@ -122,7 +123,7 @@ func item(ctx context.Context, q querier, placeID, id int64) (Item, error) {
 			SELECT up.depth + 1, items.parent_id FROM items JOIN up ON items.id = up.id
 			WHERE items.parent_id IS NOT NULL AND up.depth <= ?
 		)
-		SELECT `+itemColumns+`, items.trashed_at IS NOT NULL FROM up JOIN items ON items.id = up.id
+		SELECT `+itemColumns+`, items.trashed_at IS NOT NULL OR items.missing_at IS NOT NULL FROM up JOIN items ON items.id = up.id
 		ORDER BY up.depth DESC`, id, MaxDepth)
 	if err != nil {
 		return Item{}, err
@@ -130,12 +131,12 @@ func item(ctx context.Context, q querier, placeID, id int64) (Item, error) {
 	defer rows.Close()
 	var chain []Item // from the top down to the item
 	for rows.Next() {
-		var trashed bool
-		it, err := scanItem(rows, &trashed)
+		var gone bool // in the trash, or missing from the storage
+		it, err := scanItem(rows, &gone)
 		if err != nil {
 			return Item{}, err
 		}
-		if it.PlaceID != placeID || trashed {
+		if it.PlaceID != placeID || gone {
 			return Item{}, ErrNoItem
 		}
 		chain = append(chain, it)
@@ -153,36 +154,39 @@ func item(ctx context.Context, q querier, placeID, id int64) (Item, error) {
 	return chain[len(chain)-1], nil
 }
 
-// PutItem records one item the storage now has in a folder of the place (folderID 0: its top folder), such as a file
-// just uploaded or a folder just made, and returns it. A name the index knows keeps its id, as long as it is the same
-// kind of item: a file where a folder was (or the other way round) is a new item.
-func (x *Index) PutItem(ctx context.Context, placeID, folderID int64, s Seen) (Item, error) {
+// PutItem records one item the Drive itself just put in a folder of the place (folderID 0: its top folder), such as a
+// file just uploaded or a folder just made, at the time given, and returns it. A live item of that name keeps its id, as
+// long as it is the same kind of item: a file where a folder was (or the other way round) is a new item, and the other
+// is marked missing. An item missing from the storage is never taken over: the new one has an id of its own.
+func (x *Index) PutItem(ctx context.Context, placeID, folderID int64, s Seen, at time.Time) (Item, error) {
 	var it Item
 	err := x.write(ctx, func(tx *sql.Tx) error {
 		if err := liveFolder(ctx, tx, placeID, folderID); err != nil {
 			return err
 		}
-		if err := upsert(ctx, tx, placeID, folderID, s); err != nil {
+		if err := upsert(ctx, tx, placeID, folderID, s, at); err != nil {
 			return err
 		}
 		var err error
 		it, err = scanItem(tx.QueryRowContext(ctx, `
 			SELECT `+itemColumns+` FROM items
-			WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL`, placeID, folderID, s.Name))
+			WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL AND missing_at IS NULL`,
+			placeID, folderID, s.Name))
 		return err
 	})
 	return it, err
 }
 
-// liveFolder checks that folderID is a folder of the place, not in the trash (0, the top folder, always is), before
-// anything is put into it: ErrNoItem otherwise. A change decided on a folder that has since moved to another place, or
-// gone, never records an item in one place under a folder of another.
+// liveFolder checks that folderID is a folder of the place, not in the trash and not missing from the storage (0, the
+// top folder, always is), before anything is put into it: ErrNoItem otherwise. A change decided on a folder that has
+// since moved to another place, or gone, never records an item in one place under a folder of another.
 func liveFolder(ctx context.Context, tx *sql.Tx, placeID, folderID int64) error {
 	if folderID == 0 {
 		return nil
 	}
 	var n int
-	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE id = ? AND place_id = ? AND is_folder = 1 AND trashed_at IS NULL`,
+	err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM items WHERE id = ? AND place_id = ? AND is_folder = 1 AND trashed_at IS NULL AND missing_at IS NULL`,
 		folderID, placeID).Scan(&n)
 	if err == nil && n == 0 {
 		return fmt.Errorf("folder %d of place %d: %w", folderID, placeID, ErrNoFolder)
@@ -190,87 +194,37 @@ func liveFolder(ctx context.Context, tx *sql.Tx, placeID, folderID int64) error 
 	return err
 }
 
-// upsert adds or updates the item called s.Name in the folder, keeping the id of a known name of the same kind.
-func upsert(ctx context.Context, tx *sql.Tx, placeID, folderID int64, s Seen) error {
+// upsert adds or updates the live item called s.Name in the folder, keeping the id of a live item of that name and
+// kind. A live item of the other kind there is marked missing at the time given, as the storage no longer has it: it is
+// dropped later, as anything missing is (Reconcile).
+func upsert(ctx context.Context, tx *sql.Tx, placeID, folderID int64, s Seen, at time.Time) error {
 	_, err := tx.ExecContext(ctx, `
-		DELETE FROM items
-		WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL AND is_folder != ?`,
-		placeID, folderID, s.Name, s.Folder)
+		UPDATE items SET missing_at = ?
+		WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL AND missing_at IS NULL AND is_folder != ?`,
+		at.UnixMilli(), placeID, folderID, s.Name, s.Folder)
 	if err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO items (place_id, parent_id, name, is_folder, size, changed_at) VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT (place_id, IFNULL(parent_id, 0), name) WHERE trashed_at IS NULL DO UPDATE
+		ON CONFLICT (place_id, IFNULL(parent_id, 0), name) WHERE trashed_at IS NULL AND missing_at IS NULL DO UPDATE
 		SET size = excluded.size, changed_at = excluded.changed_at`,
 		placeID, parent(folderID), s.Name, s.Folder, s.Size, s.Changed.Unix())
 	return err
 }
 
-// SetChildren brings one folder of the place (folderID 0: its top folder) in step with what the storage showed in
-// it: new names are added, known ones updated (keeping their ids), and names the storage no longer has are dropped
-// with everything under them, except those keep says to leave alone (names an upload is writing).
-//
-// A listing takes a while, and the Drive may change the folder in the meantime. stale is asked once the index is
-// held for writing: when it says the folder changed since the listing began, nothing is changed, so a listing that
-// started before an upload ended never drops the upload's new item (whose id must last), and one that started
-// before a rename never brings back the old name.
-func (x *Index) SetChildren(ctx context.Context, placeID, folderID int64, seen []Seen, keep func(name string) bool, stale func() bool) error {
-	return x.write(ctx, func(tx *sql.Tx) error {
-		if stale() {
-			return nil
-		}
-		if err := liveFolder(ctx, tx, placeID, folderID); err != nil {
-			return err
-		}
-		rows, err := tx.QueryContext(ctx, `
-			SELECT id, name FROM items WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL`,
-			placeID, folderID)
-		if err != nil {
-			return err
-		}
-		known := map[string]int64{}
-		for rows.Next() {
-			var id int64
-			var name string
-			if err := rows.Scan(&id, &name); err != nil {
-				rows.Close()
-				return err
-			}
-			known[name] = id
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		for _, s := range seen {
-			if err := upsert(ctx, tx, placeID, folderID, s); err != nil {
-				return err
-			}
-			delete(known, s.Name)
-		}
-		for name, id := range known {
-			if keep(name) {
-				continue
-			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM items WHERE id = ?", id); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-// DropGone drops an item the storage no longer has, with everything in it, if it is still where the Drive looked for
-// it (in folderID, called name, not in the trash) and stale does not say the folder changed since the Drive looked.
-func (x *Index) DropGone(ctx context.Context, placeID, folderID, id int64, name string, stale func() bool) error {
+// MarkMissing marks an item the storage no longer has as missing, at the time given, if it is still where the Drive
+// looked for it (in folderID, called name, not in the trash) and stale does not say the folder changed since the Drive
+// looked. It is hidden from then on, and dropped only when a later look still finds it gone (Reconcile).
+func (x *Index) MarkMissing(ctx context.Context, placeID, folderID, id int64, name string, at time.Time, stale func() bool) error {
 	return x.write(ctx, func(tx *sql.Tx) error {
 		if stale() {
 			return nil
 		}
 		_, err := tx.ExecContext(ctx, `
-			DELETE FROM items
-			WHERE id = ? AND place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL`,
-			id, placeID, folderID, name)
+			UPDATE items SET missing_at = ?
+			WHERE id = ? AND place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL AND missing_at IS NULL`,
+			at.UnixMilli(), id, placeID, folderID, name)
 		return err
 	})
 }
@@ -299,7 +253,7 @@ func (x *Index) MoveToPlace(ctx context.Context, fromPlace, id, toPlace, folderI
 		}
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM items
-			WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL`,
+			WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL AND missing_at IS NULL`,
 			toPlace, folderID, name); err != nil {
 			return err
 		}
@@ -346,8 +300,8 @@ func uploading(ctx context.Context, q querier, placeID, id int64) (bool, error) 
 }
 
 // Relocate gives a live item a new folder in its place (folderID 0: the top folder) and a new name: a rename, a move,
-// or both. The storage has already moved it, so a row the index still holds under the new name there is out of date
-// and is dropped first.
+// or both. The storage has already moved it, so a live row the index still holds under the new name there is out of
+// date and is dropped first. A missing one is left to be dropped as anything missing is: the moved item is not it.
 func (x *Index) Relocate(ctx context.Context, placeID, id, folderID int64, name string) (Item, error) {
 	err := x.write(ctx, func(tx *sql.Tx) error {
 		if err := liveFolder(ctx, tx, placeID, folderID); err != nil {
@@ -355,13 +309,13 @@ func (x *Index) Relocate(ctx context.Context, placeID, id, folderID int64, name 
 		}
 		_, err := tx.ExecContext(ctx, `
 			DELETE FROM items
-			WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL AND id != ?`,
+			WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL AND missing_at IS NULL AND id != ?`,
 			placeID, folderID, name, id)
 		if err != nil {
 			return err
 		}
 		res, err := tx.ExecContext(ctx, `
-			UPDATE items SET parent_id = ?, name = ? WHERE id = ? AND place_id = ? AND trashed_at IS NULL`,
+			UPDATE items SET parent_id = ?, name = ? WHERE id = ? AND place_id = ? AND trashed_at IS NULL AND missing_at IS NULL`,
 			parent(folderID), name, id, placeID)
 		if err != nil {
 			return err

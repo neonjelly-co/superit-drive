@@ -597,12 +597,17 @@ func TestALinkFollowsItsItem(t *testing.T) {
 		t.Fatalf("the link on Bakery in Team: %+v", got)
 	}
 
-	// Gone from the storage: once a listing sees it, the link goes with it, and stays gone.
+	// Gone from the storage: once a look sees it, the link opens nothing, and a folder made anew under its name is
+	// another folder, which the link never opens (the storage keeps times to the second: the new one is made a second
+	// later, as it would be).
 	d.Storage.Delete(t, "Shared folders/Team/Bakery Ltd", true)
 	list(t, b, team.ID, 0)
 	sameAsNoLink(t, "the link once Bakery is gone", v.Get(t, page), missing)
+	nextSecond()
 	d.Storage.Put(t, "Shared folders/Team/Bakery Ltd/2026/Offer.pdf", "back on the storage")
-	list(t, b, team.ID, 0)
+	if l := list(t, b, team.ID, 0); named(t, l.Items, "Bakery Ltd").ID == x.bakery.ID {
+		t.Fatal("a folder made anew on the storage took over the old one's id")
+	}
 	sameAsNoLink(t, "the link once a folder of that name is back", v.Get(t, page), missing)
 }
 

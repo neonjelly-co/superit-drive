@@ -85,7 +85,7 @@ func grantsOnOne(ctx context.Context, q querier, placeID, itemID int64) ([]Grant
 func (x *Index) GrantsInside(ctx context.Context, placeID, folderID int64) ([]Grant, error) {
 	return scanGrants(x.db.QueryContext(ctx, "SELECT "+grantColumns+` FROM grants
 		WHERE place_id = ? AND item_id IN (
-			SELECT id FROM items WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL
+			SELECT id FROM items WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL AND missing_at IS NULL
 		)
 		ORDER BY given_at, rowid`, placeID, placeID, folderID))
 }

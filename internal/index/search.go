@@ -176,8 +176,8 @@ type Scope struct {
 
 // Search returns the live items in scope whose names match what is searched for (Match), the best matches first, then
 // by name, at most limit of them. It walks the folder tree down from the scope and reads nothing outside it: nothing in
-// the trash, nothing inside a folder in the trash, no other place. It reads only the index, holds no lock of the Drive,
-// and the database stops it at limit.
+// the trash, nothing inside a folder in the trash, nothing missing from the storage, no other place. It reads only the
+// index, holds no lock of the Drive, and the database stops it at limit.
 func (x *Index) Search(ctx context.Context, scope Scope, search string, limit int) ([]Item, error) {
 	key := SearchKey(search)
 	if key == "" || limit <= 0 || (len(scope.Places) == 0 && len(scope.Items) == 0) {
@@ -213,12 +213,13 @@ const searchSQL = `
 			-- not even finding where to start reads anything outside the scope.
 			SELECT items.id, 0 FROM whole JOIN items
 				ON items.place_id = whole.place_id AND IFNULL(items.parent_id, 0) = 0 AND items.trashed_at IS NULL
+				AND items.missing_at IS NULL
 			UNION ALL
 			SELECT items.id, 0 FROM given JOIN items
-				ON items.id = given.id AND items.place_id = given.place_id AND items.trashed_at IS NULL
+				ON items.id = given.id AND items.place_id = given.place_id AND items.trashed_at IS NULL AND items.missing_at IS NULL
 			UNION ALL
 			SELECT items.id, tree.depth + 1 FROM items JOIN tree ON items.parent_id = tree.id
-			WHERE items.trashed_at IS NULL AND tree.depth < ?
+			WHERE items.trashed_at IS NULL AND items.missing_at IS NULL AND tree.depth < ?
 		),
 		found AS (
 			-- CROSS JOIN keeps the walk the outer loop: SQLite would otherwise read every item and look each up in it.

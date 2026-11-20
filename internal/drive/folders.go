@@ -65,7 +65,7 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 		return index.Item{}, storageError(err)
 	}
 	d.changed(folderKey{p.ID, folderID(in)})
-	it, err := d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()})
+	it, err := d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()}, d.now())
 	if errors.Is(err, index.ErrNoFolder) {
 		return index.Item{}, ErrGone // its folder moved away, or went, meanwhile; a listing finds the new one there
 	}
@@ -200,7 +200,7 @@ func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item
 		_, err := d.storage.Stat(sctx, src)
 		cancel()
 		if errors.Is(err, storage.ErrNotFound) {
-			if err := d.index.DropGone(ctx, from.ID, it.ParentID, it.ID, it.Name, stale); err != nil {
+			if err := d.index.MarkMissing(ctx, from.ID, it.ParentID, it.ID, it.Name, d.now(), stale); err != nil {
 				return index.Item{}, err
 			}
 		}
@@ -270,7 +270,7 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 		_, err := d.storage.Stat(sctx, from)
 		cancel()
 		if errors.Is(err, storage.ErrNotFound) {
-			if err := d.index.DropGone(ctx, p.ID, it.ParentID, it.ID, it.Name, stale); err != nil {
+			if err := d.index.MarkMissing(ctx, p.ID, it.ParentID, it.ID, it.Name, d.now(), stale); err != nil {
 				return index.Item{}, err
 			}
 		}
@@ -289,10 +289,10 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 }
 
 // putBack moves an item back on the storage from to, where a move had just put it, to from, after the index refused
-// the move; logged when it cannot (a listing of either folder then sets the index right).
+// the move; logged when it cannot (a look at either folder then sets the index right).
 func (d *Drive) putBack(ctx context.Context, folder bool, from, to string) {
 	if err := d.moveOnStorage(context.WithoutCancel(ctx), folder, to, from); err != nil {
-		d.log.Error("an item moved on the storage could not be put back after the index refused the move; a listing of either folder sets the index right",
+		d.log.Error("an item moved on the storage could not be put back after the index refused the move; a look at either folder sets the index right",
 			"from", from, "to", to, "error", err)
 	}
 }

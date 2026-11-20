@@ -159,30 +159,30 @@ func (d *Drive) removePartial(ctx context.Context, partial string) {
 }
 
 // freeName finds a name in the folder at dir that nothing on the storage or in flight uses: name with " (2)", " (3)"
-// and so on added before its extension (at the end, for a folder), and holds it until release is called.
+// and so on added before its extension (at the end, for a folder), and holds it until release is called. It asks the
+// storage about each name in turn, rather than list the folder, which can hold any number of things.
 func (d *Drive) freeName(ctx context.Context, dir, name string, folder bool) (free string, release func(), err error) {
-	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
-	entries, err := d.storage.List(sctx, dir)
-	cancel()
-	if errors.Is(err, storage.ErrNotFound) {
-		return "", nil, ErrGone
-	}
-	if err != nil {
-		return "", nil, storageError(err)
-	}
-	taken := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		taken[e.Name] = true
-	}
 	for n := 2; n < 1000; n++ {
 		candidate := numbered(name, n, folder)
 		p, ok := pathIn(dir, candidate)
-		if !ok || taken[candidate] {
+		if !ok {
 			continue
 		}
-		if release, ok := d.claim(p); ok {
-			return candidate, release, nil
+		release, ok := d.claim(p)
+		if !ok {
+			continue
 		}
+		sctx, cancel := context.WithTimeout(ctx, storageTimeout)
+		_, err := d.storage.Stat(sctx, p)
+		cancel()
+		switch {
+		case errors.Is(err, storage.ErrNotFound):
+			return candidate, release, nil
+		case err != nil:
+			release()
+			return "", nil, storageError(err)
+		}
+		release()
 	}
 	return "", nil, &Taken{Name: name, Folder: folder}
 }
@@ -246,6 +246,12 @@ func (d *Drive) Download(ctx context.Context, p index.Place, it index.Item, r *s
 	f, err := d.storage.Read(ctx, file, r, ifRange)
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
+		// Gone from the storage: its folder is looked at, which hides it from the list.
+		var in *index.Item
+		if len(it.Above) > 0 {
+			in = &it.Above[len(it.Above)-1]
+		}
+		d.Recheck(p, in)
 		return nil, ErrGone
 	case errors.Is(err, storage.ErrNoSuchRange):
 		size := int64(-1)

@@ -23,13 +23,16 @@
 //	    uploads/
 //	        3f9c0b…e1                           one file per upload while its bytes arrive, named after a random id;
 //	                                            moved into its folder when whole
+//	    storage-id                              the Drive's mark: says the storage is the one its index belongs to
 //
 // The hidden folder for the index copy is added by the ticket that brings it.
 //
 // Every change is two steps, the storage and then the index. files.go has uploads in one request, downloads and the
 // name rules, uploads.go resumable uploads and moving any upload into place, zip.go folders downloaded as one zip,
 // folders.go new folders, renames and moves, trash.go the trash, shared.go shared folders, sharing.go the access given
-// on places and items, links.go public links, and this file the places, paths and listings.
+// on places and items, links.go public links, reread.go keeping the index in step with changes made on the storage
+// directly (a folder re-read when it is opened), walk.go the slow walk through the whole storage, and this file the
+// places, paths and listings.
 package drive
 
 import (
@@ -101,6 +104,18 @@ type Drive struct {
 
 	// uses counts the uses of public links between writes to the index (links.go).
 	uses uses
+
+	// rereading holds one look at a folder on the storage at a time per folder (reread.go); rechecks are the looks
+	// made in the background when a folder is opened; mark is whether the storage is the Drive's own.
+	rereading stripes
+	rechecks  rechecks
+	mark      mark
+	// background is the context of the Drive's own work in the background, which Stop ends and waits for.
+	background context.Context
+	stop       context.CancelFunc
+	working    sync.WaitGroup
+	// logged is when each kind of warning was last logged, so a recurring one is logged now and then.
+	logged logged
 }
 
 // New makes a Drive.
@@ -112,7 +127,15 @@ func New(x *index.Index, s *storage.Client, o Options) *Drive {
 	if d.log == nil {
 		d.log = slog.New(slog.DiscardHandler)
 	}
+	d.background, d.stop = context.WithCancel(context.Background())
 	return d
+}
+
+// Stop ends the Drive's work in the background (the looks at folders opened, see Recheck) and waits for it, before the
+// index is closed.
+func (d *Drive) Stop() {
+	d.stop()
+	d.working.Wait()
 }
 
 // Place finds a place by its id. A shared folder in the trash is not found: see DeletedPlace.
@@ -303,56 +326,9 @@ func (d *Drive) Item(ctx context.Context, p index.Place, id int64) (index.Item, 
 	return d.index.Item(ctx, p.ID, id)
 }
 
-// List reads one folder of the place from the storage (nil: its top folder), brings the index in step, and returns
-// what the index holds. A top folder that has gone from the storage is made again, empty; any other folder that has
-// gone is dropped from the index, and List returns ErrGone.
-func (d *Drive) List(ctx context.Context, p index.Place, folder *index.Item) ([]index.Item, error) {
-	dir, ok := folderPath(p, folder)
-	if !ok {
-		return nil, ErrGone
-	}
-	release, err := d.inPlace(ctx, p)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-	// Taken before the storage is asked: a change the Drive makes from here on means this listing may be out of date.
-	stale := d.since(folderKey{p.ID, folderID(folder)})
-	var parentStale func() bool
-	if folder != nil {
-		parentStale = d.since(folderKey{p.ID, folder.ParentID})
-	}
-
-	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
-	defer cancel()
-	entries, err := d.storage.List(sctx, dir)
-	if errors.Is(err, storage.ErrNotFound) {
-		if folder != nil {
-			if err := d.index.DropGone(ctx, p.ID, folder.ParentID, folder.ID, folder.Name, parentStale); err != nil {
-				return nil, err
-			}
-			return nil, ErrGone
-		}
-		entries, err = nil, d.storage.MakeFolder(sctx, dir)
-	}
-	if err != nil {
-		return nil, storageError(err)
-	}
-	seen := make([]index.Seen, 0, len(entries))
-	for _, e := range entries {
-		if _, ok := pathIn(dir, e.Name); !ok {
-			continue // a name no path can be made from: never listed, so never opened
-		}
-		seen = append(seen, index.Seen{Name: e.Name, Folder: e.Folder, Size: e.Size, Changed: e.Changed})
-	}
-	keep := func(name string) bool { return d.claimed(dir + "/" + name) }
-	err = d.index.SetChildren(ctx, p.ID, folderID(folder), seen, keep, stale)
-	if errors.Is(err, index.ErrNoFolder) {
-		return nil, ErrGone // it moved to another place, or went, while it was being listed
-	}
-	if err != nil {
-		return nil, err
-	}
+// Children is what the index holds in a folder of the place (nil: its top folder), folders first, then by name. It
+// does not ask the storage, and takes no lock: a look at the folder on the storage (Recheck) brings the index in step.
+func (d *Drive) Children(ctx context.Context, p index.Place, folder *index.Item) ([]index.Item, error) {
 	return d.index.Children(ctx, p.ID, folderID(folder))
 }
 
@@ -414,6 +390,30 @@ func (d *Drive) busyInside(dir string) bool {
 	return false
 }
 
+// busyAt says whether a change holds the path p, or a folder above it: what is at p is moving.
+func (d *Drive) busyAt(p string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for w := range d.writing {
+		if w == p || strings.HasPrefix(p, w+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// busyIn says whether a change holds the path p, or anything inside it.
+func (d *Drive) busyIn(p string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for w := range d.writing {
+		if w == p || strings.HasPrefix(w, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // A folderKey names one folder of one place for the generation counters: folder 0 is the place's top folder, and
 // trashFolder the place's trash.
 type folderKey struct{ place, folder int64 }
@@ -447,7 +447,8 @@ func (d *Drive) since(k folderKey) func() bool {
 }
 
 // Used is about how much space the Drive's files take: the sum of the sizes of every file the index knows, in every
-// place, the trash included. Files put on the storage directly count once a listing has seen them.
+// place, the trash included. Files put on the storage directly count once a look at their folder has seen them, and
+// files gone from it until they are dropped from the index.
 func (d *Drive) Used(ctx context.Context) (int64, error) {
 	return d.index.Used(ctx)
 }

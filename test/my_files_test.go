@@ -14,7 +14,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/test/harness"
 )
 
-// myFiles finds the member's "My files" the way the interface does and lists it.
+// myFiles finds the member's "My files" the way the interface does and opens it.
 func myFiles(t *testing.T, d *harness.Drive, m harness.Member) (placeID int64, items []itemJSON) {
 	t.Helper()
 	res := d.As(m).Get(t, "/api/places")
@@ -28,7 +28,7 @@ func myFiles(t *testing.T, d *harness.Drive, m harness.Member) (placeID int64, i
 	}
 	placeID = places.Places[0].ID
 
-	res = d.As(m).Get(t, fmt.Sprintf("/api/places/%d/items", placeID))
+	res = opened(t, d.As(m), placeID, 0)
 	if res.Status != http.StatusOK {
 		t.Fatalf("items for %s: %d %s", m.Email, res.Status, res.Body)
 	}
@@ -104,9 +104,20 @@ func TestTheStorageIsAReadableTreeWithOneTopFolderPerMember(t *testing.T) {
 		}
 	}
 
+	// Besides the places, only the Drive's own hidden folder, which holds its mark (opening a folder looked at the storage).
 	root, _ := d.Storage.List(t, "")
-	if len(root) != 1 || root[0].Name != "My files" || !root[0].Folder {
-		t.Fatalf("the Drive's folder should hold only \"My files\", got %+v", root)
+	var rootNames []string
+	for _, e := range root {
+		if !e.Folder {
+			t.Errorf("%q is not a folder", e.Name)
+		}
+		rootNames = append(rootNames, e.Name)
+	}
+	if slices.Sort(rootNames); !slices.Equal(rootNames, []string{".superit-drive", "My files"}) {
+		t.Fatalf("the Drive's folder should hold only \"My files\" and \".superit-drive\", got %q", rootNames)
+	}
+	if hidden, _ := d.Storage.List(t, ".superit-drive"); len(hidden) != 1 || hidden[0].Name != "storage-id" {
+		t.Fatalf("the hidden folder holds %+v, want only the Drive's mark", hidden)
 	}
 	tops, _ := d.Storage.List(t, "My files")
 	var got []string
@@ -158,13 +169,18 @@ func TestTheListFollowsTheStorage(t *testing.T) {
 		t.Fatalf("got %q", names(items))
 	}
 
-	// If the whole folder goes, My files is empty and the folder is made again.
+	// If the whole folder goes, My files is empty; a look only reads, and the folder is made again when something is put
+	// into it.
 	d.Storage.Delete(t, top, true)
 	if _, items := myFiles(t, d, reka); len(items) != 0 {
 		t.Fatalf("got %q", names(items))
 	}
-	if _, ok := d.Storage.List(t, top); !ok {
-		t.Fatal("the member's folder was not made again")
+	if _, ok := d.Storage.List(t, top); ok {
+		t.Fatal("a look at the storage made the member's folder again")
+	}
+	uploaded(t, d.As(reka), firstID, "c.txt", []byte("c"))
+	if got := onStorage(t, d, top); !slices.Equal(got, []string{"c.txt"}) {
+		t.Fatalf("the member's folder holds %q", got)
 	}
 }
 

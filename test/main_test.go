@@ -21,6 +21,16 @@ var (
 	dora  = harness.Member{UserID: "c4d2e9f0-dora", Email: "dora@example.com", DisplayName: "Dóra Nagy", Role: "member"}
 )
 
+// notHere is the one answer for a place or an item that is not there, or that the person has no access to.
+const notHere = "This is not in the Drive, or you have no access to it."
+
+// nextSecond waits until the clock is in the next second. The storage keeps the time a file or folder last changed to
+// the second, and the Drive takes an item that went from the storage and came back exactly as it was (the same name,
+// kind, size and time) for the same item: something made anew a second later, as it would be outside a test, is not.
+func nextSecond() {
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second + 10*time.Millisecond)))
+}
+
 // What the API answers.
 type (
 	meJSON struct {
@@ -71,6 +81,8 @@ type (
 		FromTop bool         `json:"fromTop"`
 		Role    string       `json:"role"`
 		Can     []string     `json:"can"`
+		// Checking says the Drive is looking at the folder on the storage in the background: ask again with ?wait.
+		Checking bool `json:"checking"`
 	}
 	itemJSON struct {
 		ID       int64   `json:"id"`
