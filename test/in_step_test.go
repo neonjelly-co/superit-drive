@@ -537,7 +537,10 @@ func TestAWalkCutShortGoesOnWhereItWas(t *testing.T) {
 	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka}, Env: env})
 	c := d.As(reka)
 	myFiles(t, d, reka)
-	for i := range 12 {
+	// Enough folders that the walk is still under way when the Drive is stopped, however slow the machine is to notice
+	// the first ones.
+	const folders = 40
+	for i := range folders {
 		d.Storage.Put(t, fmt.Sprintf("%s/Folder %02d/File %02d.txt", rekasTop, i, i), "x")
 	}
 	harness.Eventually(t, "the walk is under way, past the first folders", func() bool {
@@ -550,10 +553,10 @@ func TestAWalkCutShortGoesOnWhereItWas(t *testing.T) {
 			return strings.Contains(d.Logs(), "goes on from where it was")
 		})
 	}
-	harness.Eventually(t, "the walk that went on finds the last folder", func() bool {
-		return len(foundNames(t, c, "File 11")) == 1
+	harness.EventuallyWithin(t, 30*time.Second, "the walk that went on finds the last folder", func() bool {
+		return len(foundNames(t, c, fmt.Sprintf("File %02d", folders-1))) == 1
 	})
-	harness.Eventually(t, "the walk that went on ends", func() bool {
+	harness.EventuallyWithin(t, 30*time.Second, "the walk that went on ends", func() bool {
 		return strings.Contains(d.Logs(), `the walk through the storage ended" resumed=true`)
 	})
 }

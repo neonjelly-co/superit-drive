@@ -116,6 +116,12 @@ func (s *Storage) do(t *testing.T, method, address string, body io.Reader, heade
 	}
 	req.SetBasicAuth(s.user, s.password)
 	res, err := direct.Do(req)
+	// A read that meets a change the Drive is making at that moment (a folder being deleted while it is listed) can have
+	// its connection dropped by Apache: a read changes nothing, so it is asked again.
+	for try := 0; err != nil && body == nil && (method == "PROPFIND" || method == http.MethodGet) && try < 3; try++ {
+		time.Sleep(50 * time.Millisecond)
+		res, err = direct.Do(req)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -589,9 +589,15 @@ func TestAGuestsCookieOverHTTPS(t *testing.T) {
 	if res := browser(d).With("Cookie", "drive-guest="+c.Value).Get(t, guestAPI+"/me"); res.Status != http.StatusUnauthorized {
 		t.Fatalf("the token under another name: %d", res.Status)
 	}
-	if !strings.Contains(readMail(t, smtp.Messages()[0]).body, "Open it: https://drive.test/s/guest/?item=") {
-		t.Fatal("the invitation does not lead to the Drive's HTTPS address")
-	}
+	// The invitation is mailed after the answer, and may arrive after the code.
+	harness.Eventually(t, "the invitation leads to the Drive's HTTPS address", func() bool {
+		for _, m := range smtp.Messages() {
+			if strings.Contains(readMail(t, m).body, "Open it: https://drive.test/s/guest/?item=") {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // A guest stays signed in on their browser for 30 days, kept by the Drive; it ends at once, for good, when the last of
@@ -745,6 +751,10 @@ func TestAGuestWhoJoinsTheProjectKeepsTheirAccessAsAMember(t *testing.T) {
 	d.SetMembers(t, reka, bence, member)
 	harness.Eventually(t, "Anna is a member", func() bool { return d.As(member).Get(t, "/api/me").Status == http.StatusOK })
 	harness.Eventually(t, "her guest's session ends", func() bool { return signedInAs(t, d, annas) == "" })
+	// What was given to her as a guest becomes hers as a member just after the new member list is read.
+	harness.Eventually(t, "Anna, a member, opens Bakery", func() bool {
+		return d.As(member).Get(t, listPath(x.place, x.bakery.ID)).Status == http.StatusOK
+	})
 	if l := list(t, d.As(member), x.place, x.bakery.ID); l.Role != "editor" || !slices.Contains(l.Can, "upload") {
 		t.Fatalf("Anna, a member, in Bakery: %+v", l)
 	}

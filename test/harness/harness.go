@@ -489,7 +489,14 @@ const TestStopAt = "SUPERIT_DRIVE_TEST_STOP_AT"
 // Eventually waits up to five seconds for ok to hold.
 func Eventually(t *testing.T, what string, ok func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	EventuallyWithin(t, 5*time.Second, what, ok)
+}
+
+// EventuallyWithin is Eventually with a wait of its own: for what is paced on purpose, such as a walk through many
+// folders, which a busy machine slows further.
+func EventuallyWithin(t *testing.T, wait time.Duration, what string, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(wait)
 	for !ok() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting until %s", what)

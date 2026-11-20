@@ -310,9 +310,8 @@ func TestTheTrashKeepsItemsFor30Days(t *testing.T) {
 		_, ok := d.Storage.List(t, oldEntry)
 		return !ok
 	})
-	if used := usage(t, d).Used; *used != 320 {
-		t.Fatalf("used %d, want 320 once Old.bin is gone for good", *used)
-	}
+	// Gone from the storage first, from the index a moment after.
+	harness.Eventually(t, "320 are used once Old.bin is gone for good", func() bool { return *usage(t, d).Used == 320 })
 	// Today's leftover holds one file: it is shown in the trash, as deleted that day by nobody the Drive knows.
 	trash := trashOf(t, d.As(reka), placeID)
 	if len(trash) != 2 || trash[0].ID != recent.ID || trash[1].Name != "Leftover.txt" || trash[1].Deleted.Format("2006-01-02") != today {
