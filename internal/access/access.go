@@ -44,12 +44,15 @@
 //   - Whoever may share a file or folder may make a public link to it (MakeLink), see it and remove it (ManageLink):
 //     not a viewer. A link is on a file or folder, never on a place's top folder, one per item.
 //   - A visitor is someone who opened a public link: a person of their own kind, never a member, whatever else is
-//     known about them. They may see the link's item and everything inside it, and download them (SeeThroughLink,
-//     DownloadThroughLink), and nothing else: nothing beside it or above it, and none of what members do. A link
-//     counts while its item is live and its place open (not a held My files, not a shared folder in the trash), and
-//     while sharing outside the project is on there. In a My files a link is its maker's share: it counts only while
-//     they may still share its item. A shared folder's links are the project's, like everything in it, and do not
-//     depend on their maker.
+//     known about them. A link is of one of two kinds. Through a view link they may open its page (EnterThroughLink),
+//     see the link's item and everything inside it, and download them (SeeThroughLink, DownloadThroughLink). Through an
+//     upload-only link, which only a folder has, they may open its page and put new files into that folder itself
+//     (UploadThroughLink), and nothing else: they see nothing of what is in it, not even its names, never download,
+//     and never reach a folder inside it. Nothing beside the link's item or above it, and none of what members do,
+//     through either kind. A link counts while its item is live and its place open (not a held My files, not a shared
+//     folder in the trash), and while sharing outside the project is on there. In a My files a link is its maker's
+//     share: it counts only while they may still share its item. A shared folder's links are the project's, like
+//     everything in it, and do not depend on their maker.
 //   - A guest is someone outside the project whom a member invited by email address, and who proved the address with a
 //     code: a person of their own kind, never a member and never "everyone in the project", whatever else is known about
 //     them. Whoever may share a file or folder may invite a guest to it (InviteGuest), as viewer or editor, with an end
@@ -103,14 +106,17 @@ func (p Person) isMember() bool {
 	return p.Link == nil && p.Guest == nil && p.UserID != "" && (p.Role == members.RoleAdmin || p.Role == members.RoleMember)
 }
 
-// A Link is a public link: anyone with its address may see the file or folder it is on, and everything inside it, and
-// download them, without signing in.
+// A Link is a public link: anyone with its address may, without signing in, see the file or folder it is on, and
+// everything inside it, and download them (a view link); or put new files into the folder it is on, and see nothing
+// (an upload-only link).
 type Link struct {
-	// Item is the id of the item the link is on: the top of what its visitors may see. It is never a place's top
+	// Item is the id of the item the link is on: the top of what its visitors may reach. It is never a place's top
 	// folder.
 	Item int64
 	// Kind is what the link lets its visitors do.
 	Kind LinkKind
+	// Folder is true when the item it is on is a folder: an upload-only link counts only on one.
+	Folder bool
 	// By is the member who made it, as the member list has them now (without a role once they have left it). In a My
 	// files the link counts only while they may still share its item there.
 	By Person
@@ -119,8 +125,13 @@ type Link struct {
 // LinkKind is what a public link lets its visitors do.
 type LinkKind string
 
-// ViewLink lets visitors see and download what it is on. (Upload-only links come with their own ticket.)
-const ViewLink LinkKind = "view"
+const (
+	// ViewLink lets visitors see and download what it is on, and everything inside it.
+	ViewLink LinkKind = "view"
+	// UploadLink lets visitors put new files into the folder it is on, and nothing else: they see nothing of what is
+	// there, not even its names, and replace nothing. Only a folder's link can be one.
+	UploadLink LinkKind = "upload-only"
+)
 
 // PlaceKind is the kind of a place.
 type PlaceKind string
@@ -355,7 +366,9 @@ const (
 	DeleteHeld   Action = "delete-held"
 
 	// MakeLink is making a public link to a file or folder, or a new one in place of the one it has (whose address then
-	// stops working): whoever may share it, while sharing outside the project is on there. It concerns an item.
+	// stops working), changing what its link lets visitors do (view, or upload-only), and letting an upload-only link
+	// take files again once it has taken in all it may (a reset): whoever may share it, while sharing outside the project
+	// is on there. It concerns an item.
 	MakeLink Action = "make-link"
 	// ManageLink is seeing the public link on a file or folder (who made it, when, and how often it was used) and
 	// removing it: whoever may share it, also while sharing outside the project is off. It concerns an item.
@@ -371,6 +384,13 @@ const (
 	// DownloadThroughLink is, for a visitor, reading content through their link: downloading a file or opening it in
 	// the browser, or downloading a folder as one zip.
 	DownloadThroughLink Action = "download-through-link"
+	// EnterThroughLink is, for a visitor, opening the page of the item their link is on: who shared it and the item's
+	// name, then what the link lets them do there. It concerns the link's own item only, through a link of either kind.
+	EnterThroughLink Action = "enter-through-link"
+	// UploadThroughLink is, for a visitor with an upload-only link, putting a new file into the folder it is on: never
+	// into a folder inside it, never in place of anything there, and never seeing what is there. It concerns the
+	// link's own item only. (Not the members' Upload, which can replace a file, and so delete one.)
+	UploadThroughLink Action = "upload-through-link"
 
 	// SignInAsGuest is asking for a code mailed to an address, signing in with it, and loading the guests' pages: anyone
 	// who is not a member, under the guests' part of the public prefix. It concerns no place.
@@ -408,7 +428,7 @@ var AsAWhole = []Action{HandOverHeld, DeleteHeld}
 var Nowhere = []Action{Enter, SeeUsage, MakeSharedFolder, Oversee}
 
 // ThroughALink is every action a visitor may do through a public link, and only a visitor.
-var ThroughALink = []Action{SeeThroughLink, DownloadThroughLink}
+var ThroughALink = []Action{EnterThroughLink, SeeThroughLink, DownloadThroughLink, UploadThroughLink}
 
 // AsAGuest is every action a guest may do, and only a guest (SignInAsGuest also anyone who is not a member).
 var AsAGuest = []Action{SignInAsGuest, EnterAsGuest, ListAsGuest, DownloadAsGuest, UploadAsGuest, MakeFolderAsGuest,
@@ -539,8 +559,9 @@ func Finds(person Person, place *Place) bool {
 	return Decide(person, List, place)
 }
 
-// throughLink decides for a visitor who came with link: only what the link lets them do, at its item and anything
-// inside it, while it counts there. Nothing else, and none of what members do, whoever they are otherwise.
+// throughLink decides for a visitor who came with link: only what the link's kind lets them do, at its item (and, for a
+// view link, anything inside it), while it counts there. Nothing else, and none of what members do, whoever they are
+// otherwise.
 func throughLink(link Link, action Action, place *Place) bool {
 	if place == nil || place.Deleted || place.NoSharingOutside || link.Item <= 0 {
 		return false
@@ -566,9 +587,14 @@ func throughLink(link Link, action Action, place *Place) bool {
 	if place.Kind == MyFiles && !Decide(link.By, Share, place.Up(at+1)) {
 		return false
 	}
+	// Opening the link's page, and sending files in, are at the link's own item: never at something inside it.
+	own := at == len(place.Path)-1
 	switch link.Kind {
 	case ViewLink:
-		return action == SeeThroughLink || action == DownloadThroughLink
+		return action == SeeThroughLink || action == DownloadThroughLink || (action == EnterThroughLink && own)
+	case UploadLink:
+		// Only on a folder, only into that folder itself, and nothing that shows what is in it.
+		return link.Folder && own && (action == EnterThroughLink || action == UploadThroughLink)
 	}
 	return false
 }
@@ -651,7 +677,7 @@ func Guests(place *Place) []int64 {
 }
 
 // ByLink says whether anyone with a public link can see what place is about: a link on it, or on a folder above it,
-// among place.Links, that lets its visitors in there now.
+// among place.Links, that lets its visitors in there now. An upload-only link lets nobody see anything.
 func ByLink(place *Place) bool {
 	if place == nil {
 		return false
