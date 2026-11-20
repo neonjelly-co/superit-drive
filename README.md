@@ -20,8 +20,8 @@ guest, My files, shared folder, Drive storage, trash). The Drive also runs witho
   the storage directly reach the index (see [Keeping in step with the storage](#keeping-in-step-with-the-storage)).
 - Members do not sign in to the Drive. A reverse proxy in front of it signs them in and adds headers saying who they
   are (see below). Everyone else comes in under one public prefix, `/s/`, which the reverse proxy opens without sign-in:
-  so far, visitors with a public link (see [Public links](#public-links)). Every route passes through one authorisation
-  function, `internal/access`.
+  visitors with a public link (see [Public links](#public-links)), and guests, who sign in there with a code mailed to
+  them (see [Guests](#guests)). Every route passes through one authorisation function, `internal/access`.
 
 ### Signing in: headers and the member list
 
@@ -49,30 +49,35 @@ The list is the authority for each member's email address, name and role. (Super
 `role` is `admin` or `member`. A list with a mistake in it is refused whole: at start the Drive does not start, and
 later it keeps the previous list and logs why.
 
-**The public prefix.** Everything someone outside the project reaches lives under `/s/`: the pages of public links, the
-files and zips they download, and (later) guests' pages. The reverse proxy opens it without sign-in, and passes nothing
-about who anyone is there: it removes `Drive-Secret`, the identity headers and its own sign-in cookie, as it removes them
-everywhere else from what a browser sent. The Drive needs no secret there, and reads none of them: a request under
-`/s/` is a visitor's, always, whatever it carries, so a signed-in member who opens a link is a visitor like anyone, and a
-forged `Remote-User-Id` there does nothing. No request outside `/s/` is ever a visitor's: without the secret it is
-refused with 403 as before. In short, the reverse proxy must:
+**The public prefix.** Everything someone outside the project reaches lives under `/s/`: the pages of public links and
+the files and zips they download, and, under `/s/guest`, the guests' page, the interface's files for it and the guests'
+API. The reverse proxy opens it without sign-in, and passes nothing about who anyone is there: it removes
+`Drive-Secret`, the identity headers and its own sign-in cookie, as it removes them everywhere else from what a browser
+sent. The Drive needs no secret there, and reads none of them: a request under `/s/` is a visitor's, through the link its
+address names, or under `/s/guest` a guest's (the one whose session its own cookie names) or nobody's; never a member's,
+whatever it carries. A signed-in member who opens a link is a visitor like anyone, and a forged `Remote-User-Id` there
+does nothing. No request outside `/s/` is ever a visitor's or a guest's: without the secret it is refused with 403 as
+before. In short, the reverse proxy must:
 
 - send `/s/*` to the Drive without sign-in, removing `Drive-Secret`, `Remote-User-Id` (and the other `Remote-*`
-  headers) and its sign-in cookie; and pass `Range`, `If-Range` and the method through as for any other request;
+  headers) and its own sign-in cookie, and nothing else: every method (guests upload, rename, move and delete there
+  with `POST`, `PUT` and `DELETE`), the request body, `Origin`, `Range`, `If-Range`, and the guests' cookie
+  (`__Secure-drive-guest`, or `drive-guest` when `DRIVE_ADDRESS` is plain HTTP) both ways, as for any other request;
 - sign in everything else and add the two headers above, as before, and never add `Drive-Secret` to a request under
   `/s/` (the Drive would ignore it there, but the secret would travel where it is not needed);
-- not cache answers under `/s/` (they say `Cache-Control: no-store`) nor log their addresses: an address there is the
-  secret that opens a link.
+- not cache answers under `/s/` (they say `Cache-Control: no-store`) nor log their addresses: an address there can be
+  the secret that opens a link.
 
 Paths are matched as the Drive's router cleans them: `/s/x/../../api/places` is redirected to `/api/places`, which
 needs sign-in. Caddy's path matcher ignores case, so it also opens `/S/…` without sign-in; the Drive refuses that as
 any request outside `/s/` without the secret.
 
 **Changes come only from the Drive's own pages.** The reverse proxy signs members in with a cookie, which a browser
-also sends when a page on another site makes it call the Drive. So every request other than `GET` and `HEAD` must
-carry an `Origin` header equal to `DRIVE_ADDRESS` (browsers add it themselves); any other origin, `null`, or none is
-refused with 403, and the Drive logs both values. The reverse proxy must pass `Origin` through unchanged, and
-`DRIVE_ADDRESS` must be the address in the browser's address bar.
+also sends when a page on another site makes it call the Drive; so does the Drive's own cookie for guests. So every
+request other than `GET` and `HEAD`, a member's or a guest's (signing in included), must carry an `Origin` header equal
+to `DRIVE_ADDRESS` (browsers add it themselves); any other origin, `null`, or none is refused with 403, and the Drive
+logs both values. The reverse proxy must pass `Origin` through unchanged, and `DRIVE_ADDRESS` must be the address in the
+browser's address bar.
 
 ### Settings
 
@@ -89,11 +94,11 @@ a test keeps the two equal.)
 | `DRIVE_CAPACITY` | no | Size of the storage, in bytes or with a unit (`500GB`, `1TB`, `1TiB`). Empty when not known. |
 | `DRIVE_ADDRESS` | yes | The Drive's own address as people reach it, such as `https://files.example.com`. Changes are accepted only from pages at this address, and a public link's address starts with it. |
 | `DRIVE_PROJECT_NAME` | yes | Name of the project (the organisation) the Drive belongs to. |
-| `DRIVE_HEADER_SECRET` | yes | Secret the reverse proxy adds as `Drive-Secret`. At least 32 characters. |
+| `DRIVE_HEADER_SECRET` | yes | Secret the reverse proxy adds as `Drive-Secret`. At least 32 characters. The key that keeps guests' codes (see [Guests](#guests)) is made from it, so changing it ends the codes on their way (not the sessions). |
 | `DRIVE_MEMBERS_FILE` | yes | Path of the member list file. |
 | `DRIVE_DATA_DIR` | yes | Folder for the index. The container image sets it to `/data`. |
 | `DRIVE_LISTEN` | no, `:8080` | Address the web server listens on. |
-| `DRIVE_SMTP_HOST` | no | Mail server the Drive sends its own mail through (see [Mail](#mail)), such as `smtp.example.com`. Empty: the Drive sends no mail, and sharing works without it. |
+| `DRIVE_SMTP_HOST` | no | Mail server the Drive sends its own mail through (see [Mail](#mail)), such as `smtp.example.com`. Empty: the Drive sends no mail; sharing with members and public links work without it, and inviting guests is unavailable. |
 | `DRIVE_SMTP_PORT` | no, `587` | Port of the mail server. |
 | `DRIVE_SMTP_TLS` | no | How the connection to the mail server is encrypted: `starttls`, `implicit` (TLS from the first byte) or `none`. Empty: `implicit` on port 465, `starttls` on any other. `none` only without a login. |
 | `DRIVE_SMTP_USER` | no | Login name for the mail server. Empty when it needs none. |
@@ -330,7 +335,7 @@ time in the browser's time zone): "Réka Kovács put the Drive's files back to h
 added after that are gone, changes made after that are undone, and files deleted after that are back. Files that came
 back may need to be shared again." The name is shown as text. A member can close it: it stays closed in that browser,
 for that rollback, and nowhere else; a new rollback shows again. Visitors through a public link are told nothing: their pages say nothing
-about the project but who shared the item. Guests, when they come, will not be told either.
+about the project but who shared the item. Guests are not told either.
 
 **Connections to the storage.** A server closes a connection kept open between requests after a while, and can do so
 just as the Drive sends on it; the Drive then cannot tell whether the server acted. So every request that changes the
@@ -346,8 +351,9 @@ its files, when they leave. Everyone holding the admin role on the project (in t
 shared folder, for as long as they hold it. A member with no role on a shared folder does not see it in their places.
 
 **Sharing.** Access is given on a file or a folder, in "My files" or in a shared folder, to a named member (anyone in
-the member list, including people who have never opened the Drive) or to everyone in the project (every member, as
-long as they are one, new members included), as viewer or editor. A shared folder as a whole can also be given, by
+the member list, including people who have never opened the Drive), to everyone in the project (every member, as
+long as they are one, new members included), or to a guest by email address (see [Guests](#guests)), as viewer or
+editor. A shared folder as a whole can also be given, by
 its managers: viewer, editor or manager to a member, viewer or editor to everyone. "My files" as a whole is never
 shared: only items in it.
 
@@ -366,6 +372,7 @@ its siblings. Taking access away, or giving less, counts from the next request, 
 | Upload into a folder (and replace, or keep both), make folders in it | | yes | yes |
 | Share it: give access to others, change a role, take access away | | yes | yes |
 | Make a [public link](#public-links) to it, see it (who made it, how often it was used), remove it | | yes | yes |
+| Invite a [guest](#guests) to it, change their role or end date, take it away | | yes | yes |
 | Rename, move or delete it: also needs editor of the folder it is in | | yes | yes |
 | Restore it from the trash: also needs editor of the folder it goes back to, and either the place's whole trash or having put it there | | yes | yes |
 
@@ -425,12 +432,18 @@ GET    /api/places/{place}/items/{item}/access                   who can see an 
 PUT    /api/places/{place}/items/{item}/access/members/{member}  {"role": "viewer" | "editor"}  whoever may share it
 PUT    /api/places/{place}/items/{item}/access/everyone          {"role": "viewer" | "editor"}
 DELETE /api/places/{place}/items/{item}/access/members/{member}  (and …/everyone) take it away
+POST   /api/places/{place}/items/{item}/access/guests            {"address", "role", "ends"}  a member's address shares
+                                                                  with them; any other invites a guest (see Guests)
+PUT    /api/places/{place}/items/{item}/access/guests/{guest}    {"role", "ends"}  an invitation's role and end date
+DELETE /api/places/{place}/items/{item}/access/guests/{guest}    take it away
 ```
 
 Each answers with who has access now: one line per grant (and the owner, or the project admins, first), each with
-whether it was given right there or comes from a folder above (named when the person can open that folder). A
-listing gives each item what the person may do with it (`can`) and who can see it (`seenBy`: everyone, or the members
-by user id), and the folder's own `role` and `can`. Grants live in the index as one row per grantee per item (or per
+whether it was given right there or comes from a folder above (named when the person can open that folder), and, for
+access with an end date, `until`. A guest's line is `{"guest": {"id", "address"}, "role", …}`, and, to whoever may share
+the item, also `works` (whether it lets them in now), `uses` and `used`. A listing gives each item what the person may
+do with it (`can`), who can see it (`seenBy`: everyone, or the members by user id; and `guests`, how many guests), which
+guest added it (`addedBy`), and the folder's own `role` and `can`. Grants live in the index as one row per grantee per item (or per
 place as a whole), keyed on the item's id, so they follow it through rename, move, replace and the trash, and go
 with it when it is removed for good or dropped because the storage no longer has it.
 
@@ -535,8 +548,8 @@ and everyone who can see the item, see in "who can see this" (and in the list's 
   given back; a held My files (its owner left) opens nothing. Whoever may share the item sees in its details whether the
   link works now.
 - **Sharing outside the project switched off** (a later ticket adds the switches, for the project and for one shared
-  folder): no link opens there and none can be made, but links can still be seen and removed. The decision is already
-  in `internal/access` (`Place.NoSharingOutside`).
+  folder): no link opens there and none can be made, but links can still be seen and removed. The same goes for guests:
+  none gets in there and none can be invited. The decision is already in `internal/access` (`Place.NoSharingOutside`).
 - **Uses.** For each link the Drive keeps how often it was used and when last, and nothing else about visitors. One use
   is a page opened through it (its own, or a folder's inside it), or a download, a file opened or a zip from its start;
   not a `HEAD`, not a part of a file after its start (a video seeking, a download resuming), not a refused request. Link
@@ -583,13 +596,95 @@ Every answer under `/s/` carries `X-Robots-Tag: noindex, nofollow` (and the page
 `Referrer-Policy: no-referrer` (the address is the secret), `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
 `Cross-Origin-Resource-Policy: same-origin` and, on pages, `Content-Security-Policy: default-src 'none'; style-src
 'sha256-…'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`: nothing loads or runs but the page's own style.
-A file's bytes go out with the same content type and policy as to members (below). No cookie is set.
+A file's bytes go out with the same content type and policy as to members (below). No cookie is set or read on a link's
+addresses.
 
 **What visitors can use up, and what bounds it.** Their transfers take at most 8 of the 32 slots, in a line of their
-own, and at most 64 visitors wait in it at once (more are told 503 at once); a transfer that moves nothing for two minutes
-is ended. Besides transfers, at most 16 visitors' requests are worked on at once, and 64 more wait up to 5 seconds; more
+own (shared with guests), and at most 64 visitors wait in it at once (more are told 503 at once); a transfer that moves
+nothing for two minutes is ended. Besides transfers, at most 16 visitors' requests are worked on at once, and 64 more wait up to 5 seconds; more
 are answered 503 at once. Trying tokens costs a hash and one look in the index, with no lock and no log line. A zip is
 bounded as for members (10,000 entries).
+
+### Guests
+
+A member who may share a file or folder (as for a [public link](#public-links): `access.InviteGuest`) types an email
+address in its "Give access". An address in the member list (compared as below) is that member's: it is shared with
+them as with any member, and the answer says so (`"member"`). Any other address invites a **guest**, as viewer or editor,
+with an end date if the member gives one (none by default), and the answer says so (`"guest"`, and `"invited"` for a
+new invitation). The guest is mailed an invitation: who invited them, to what (never a folder above it), what they may
+do, until when, and a link to it on the guests' page, `DRIVE_ADDRESS/s/guest/?place=…&item=…#as=<their address>` (the
+address after `#` is never sent to a server; the page offers it to confirm). A guest never gets an account and never
+passes the reverse proxy: everything of theirs is under `/s/guest`.
+
+- **Who is a guest.** Addresses are compared as `members.Address` writes them: without spaces at either end and in lower
+  case, and nothing else, so dots and `+` tags make other addresses and are never merged. A guest's address is one plain
+  address in ASCII that mail can be sent to (`mail.Recipient`), at most 254 characters; anything else is refused (400),
+  so no address can add a header or a recipient. The member list may not hold one address twice (it is refused whole).
+- **What a guest may do** is decided in `internal/access`, with actions only guests have (`access.AsAGuest`), by the
+  role their invitations give them: a viewer opens and downloads (a file, or a folder as a zip) what was given to them
+  and everything in it; an editor also uploads (in one request, or resumable), makes folders, and renames, moves and
+  deletes what is inside it, as a member editor does, but never the item given to them itself (it is in a folder they
+  cannot open), never out of it, never into another place. A guest never shares (no route, and no action), never makes
+  or sees a link, never sees who has access, any trash, a place's top folder, the member list, a search, or anyone's
+  address but their own; their "Shared with me" names who shared each item by display name (or the project's), as a
+  link's page does. What they delete goes to the place's trash, for its owner or managers to restore; they restore
+  nothing. They are never "everyone in the project". A guest is given a file or a folder, never a shared folder as a
+  whole.
+- **When an invitation lets them in**: while its item is live (not in the trash, not gone from the storage) and its place
+  open (not a held My files, not a shared folder in the trash), before its end date, and where sharing outside the
+  project is on. In a My files an invitation is its giver's share, as a link is: it counts only while they may still
+  share its item there, and stops when they leave the project. In a shared folder it is the project's.
+- **Signing in.** The guests' page asks for their address and mails a code: six digits from `crypto/rand`, only the
+  newest of their codes works, once, for 10 minutes, and not after five wrong tries; at most five codes are sent to an
+  address an hour, and at most 100 to all addresses together. A code is sent only to a guest's address with something
+  shared with it that lets them in now, and never to a member's; the page says the same, at once, for every address
+  (the work is done afterwards, one address at a time, and nothing is logged about an address that is no guest's). Every
+  try of a code does the same work whatever the address; past 100 wrong tries of live codes in an hour, from everyone
+  together, no try is taken (429) until the hour has passed. The index keeps only each code's HMAC-SHA-256, keyed with a
+  key made from `DRIVE_HEADER_SECRET`, which the index never holds.
+- **Staying signed in.** The right code starts a session of 30 days on that browser, kept by the Drive (the index keeps
+  its token's SHA-256; the browser the token, in a cookie): `__Secure-drive-guest` (`drive-guest` when `DRIVE_ADDRESS`
+  is plain HTTP), `Path=/s/guest`, `HttpOnly`, `Secure` with HTTPS, `SameSite=Lax` (so it comes along when a guest opens
+  the Drive from their mail, and never with another site's change). A guest stays signed in on at most ten browsers;
+  signing out ends that one. A session ends, for good, when it ends; when the last of their invitations is taken away
+  or ends (the guest is removed with it, and their codes, sessions and uploads in progress); when nothing given to them
+  lets them in any more (in the trash, gone from the storage, in the My files of someone who left, its giver may no
+  longer share it); and when their address appears in the member list. Signed out, they sign in again with a new code.
+- **A guest who joins the project** (their address appears in the member list) keeps their access as a member: within a
+  second of the list changing (and when the Drive starts), every invitation to them becomes a grant to that member by
+  user id, with its end date (the higher role, and the later end or none, where they had one already), and the guest
+  is removed. From then on it follows their user id, also when their address changes. A member who leaves never
+  becomes a guest; their address invited again is a new guest.
+- **Labels and uses.** A file or folder a guest added (uploaded or made) is labelled with their address, for members
+  (`"addedBy": {"guest": …}` in listings, "Added by" in the details): an upload over it by a member takes the label off.
+  For each invitation the Drive keeps how often it was used and when last, and nothing else: a folder or file opened, a
+  download, a file opened or a zip from its start, an upload, a new folder, a rename, a move or a delete through it.
+  Counted in memory and written every 30 seconds, as links' uses are.
+- **Mail that works.** Inviting a guest needs mail that works: without mail settings, or with a mail server the Drive
+  cannot reach, cannot reach as `DRIVE_SMTP_TLS` says, or that refuses its login, inviting is refused (409, `"mail":
+  false`) and says why, and `GET /api/me` says so before anyone types (`"guests": {"invite", "why"}`). Sharing with a
+  member's address, and public links, still work.
+- **Their transfers** take turns with visitors': outsiders hold at most 8 of the 32 slots, in a line of their own.
+
+```
+GET    /s/guest/                                      the guests' page (and /s/guest/assets/…, /s/guest/favicon.svg)
+POST   /s/guest/api/code                {"address"}   202, the same for every address
+POST   /s/guest/api/sign-in             {"address", "code"}   200 and the cookie; 400 not right; 429 too many tries
+POST   /s/guest/api/sign-out                          204
+GET    /s/guest/api/me                                {"address", "project"}; 401 {"signIn": true} when not signed in
+GET    /s/guest/api/shared-with-me                    {"items": [{…, "can", "place", "role", "sharedBy", "until"}]}
+GET    /s/guest/api/places/{place}/items/{item}       {"item", "path", "role"}: a file or folder given to them, or inside
+GET    /s/guest/api/places/{place}/items/{item}/items[?wait]     a folder's list, as a member's, without seenBy or addedBy
+GET    /s/guest/api/places/{place}/items/{item}/download | /open | /zip
+POST   /s/guest/api/places/{place}/items/{item}/files | /uploads | /folders | /rename | /move {"to": <folder>}
+GET | PUT | DELETE /s/guest/api/places/{place}/uploads/{upload}, POST …/finish     their own uploads in progress
+DELETE /s/guest/api/places/{place}/items/{item}
+```
+
+Every answer under `/s/guest` carries `X-Robots-Tag: noindex, nofollow` and `Cache-Control: no-store`, the members'
+`Content-Security-Policy` (the page runs the interface's own script) and `Referrer-Policy: same-origin` (the addresses
+there hold no secret, and `no-referrer` would make a change's `Origin` null). An item they cannot reach answers exactly
+as one that does not exist (404, `notHere`); without a session every route but signing in answers 401.
 
 ### Opening files in the browser
 
@@ -677,9 +772,13 @@ reason, and says what happened to the rest.
 
 ### Mail
 
-The Drive sends one kind of mail so far: "shared with you", to a member something was just shared with by name. With
-`DRIVE_SMTP_HOST` empty it sends none and attempts none, and nothing else changes: sharing works the same. The line the
-Drive logs at start says where mail goes (`mail="smtp.example.com:587 (starttls)"`) or `mail=off`.
+The Drive sends three kinds of mail: "shared with you", to a member something was just shared with by name; an
+invitation, to a guest invited to something; and the codes guests sign in with (see [Guests](#guests)). With
+`DRIVE_SMTP_HOST` empty it sends none and attempts none: sharing with members and public links work the same, and
+inviting guests is unavailable. The line the Drive logs at start says where mail goes
+(`mail="smtp.example.com:587 (starttls)"`) or `mail=off`. Whether mail works is what the last mail sent, or the last
+check (connect, encrypt, sign in, and nothing sent), came to: trusted for ten minutes when it worked, one when it did
+not; inviting a guest checks again when that has run out.
 
 - **When:** a new share to a named member, on a file, a folder or a shared folder as a whole. Not for everyone in the
   project, not for a role changed or given again, not for access taken away, and never to the person sharing (a
@@ -701,7 +800,8 @@ Drive logs at start says where mail goes (`mail="smtp.example.com:587 (starttls)
   `DRIVE_SMTP_TLS` says), signing in with `AUTH PLAIN` when there is a login; the server's certificate is checked
   against the system's authorities (the image has them). It uses Go's standard library only.
 - **Never in the way:** a mail is queued (up to 64) and sent in the background, one at a time, within 30 seconds each;
-  the share is answered at once whatever happens to it. A mail that fails is logged with what it was about (the
+  the share is answered at once whatever happens to it. (A guest's code is sent by the guests' own sender in the
+  background, also never in the way of the page that asked.) A mail that fails is logged with what it was about (the
   recipient's user id, the place and item ids) and why, never with its text or the recipient's address, and is not
   tried again; so is one dropped because the queue is full. Mail still queued when the Drive stops is not sent.
 - **Names from people** (display names, file names) have line breaks and other control characters taken out and are
@@ -716,9 +816,10 @@ download (of a file or a zip, or a file opened in the browser), an upload in one
 upload. Three rules hold the
 figure (`internal/transfers`):
 
-- **At most 32 transfers are in flight, of which visitors with a public link hold at most 8.** Members can always use
-  the other 24, and all 32 while no visitor needs one; when a slot comes back, a member waiting gets it before a
-  visitor. Visitors wait in a line of their own, at most 64 of them; more are told at once that the Drive is busy. A
+- **At most 32 transfers are in flight, of which outsiders (visitors with a public link, and guests) hold at most 8.**
+  Members can always use the other 24, and all 32 while no outsider needs one; when a slot comes back, a member waiting
+  gets it before an outsider. Outsiders wait in a line of their own, at most 64 of them; more are told at once that the
+  Drive is busy. A
   download waits its turn in line (holding only its idle connection),
   for up to ten minutes, then gets 503. An upload is answered at once with 503, `{"busy": true}` and `Retry-After`,
   before any of its bytes are read, and keeps its place in line: a resumable upload by its id, an upload in one request
@@ -799,8 +900,9 @@ in "Shared with me", get a mail when something is shared with them by name (with
 from their own My files into a shared folder after a warning that says who will see them there. Images, PDFs, text,
 video and sound open in the browser (anything else downloads), a search finds files and folders by name across
 everything a member can see, and several items can be selected to move, download as a zip or delete together. Members
-who may share a file or folder make a public link to it, which anyone opens without signing in. Guests are not built
-yet. Large files upload in parts that resume after a broken connection, downloads resume and seek, and folders upload
+who may share a file or folder make a public link to it, which anyone opens without signing in, or invite someone
+outside the project by email address as a guest (with the mail settings), who signs in with a mailed code. Large files
+upload in parts that resume after a broken connection, downloads resume and seek, and folders upload
 whole and download as zips. Files changed on the WebDAV server by other programs show in the Drive as folders are
 opened, and through a slow walk now and then (see [Keeping in step with the storage](#keeping-in-step-with-the-storage)).
 
@@ -895,8 +997,9 @@ certificate: Caddy made it with its own authority, which the browser does not kn
 
 What happens on each request:
 
-0. A request under `/s/` (a public link) goes straight to the Drive, without sign-in: Caddy removes `Drive-Secret`, the
-   `Remote-*` headers and the cookie (`handle /s/*` in the `Caddyfile`). Everything else goes on as follows.
+0. A request under `/s/` (a public link, or a guest) goes straight to the Drive, without sign-in: Caddy removes
+   `Drive-Secret`, the `Remote-*` headers and Authelia's session cookie, and passes the rest, the guests' cookie
+   included (`handle /s/*` in the `Caddyfile`). Everything else goes on as follows.
 1. Caddy asks Authelia whether the person is signed in (`forward_auth`). If not, Authelia's answer sends the browser
    to the sign-in page at `auth.example.localhost`, which sets a session cookie for `example.localhost` and sends the
    browser back.
@@ -907,7 +1010,7 @@ What happens on each request:
 
 The Drive's port is not published: from the host, and from any container without the secret, it cannot be used. A
 request that reaches it without `Drive-Secret` is refused with 403, except under `/s/`, where only a public link's
-address opens anything. To try a link, sign in as `reka`, select a file or folder, make a public link in its details, and
+address, or a guest's session, opens anything. To try a link, sign in as `reka`, select a file or folder, make a public link in its details, and
 open the address in a private window.
 
 For real use on a server:
@@ -1029,11 +1132,12 @@ internal/mail/         the Drive's own mail over SMTP, sent in the background; m
 internal/access/       the one authorisation function (Decide), the role at an item (RoleAt), what Shared with me lists
                        and what a search finds (SharedWithMe, Finds), and their table tests
 internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify (under /s/, the visitor's
-                       link) → own page (for changes; under /s/, only reading) → place → item in it, or in its trash,
-                       or the person's upload in progress into it → the access given there → access.Decide;
-                       transfers.go has downloads, zips and uploads, opening.go what opens in the browser and how,
-                       search.go the search by name, links.go making and removing public links, visitors.go the
-                       public prefix and the visitor's pages
+                       link; under /s/guest, the guest's session) → own page (for changes; through a link, only
+                       reading) → place → item in it, or in its trash, or the person's upload in progress into it →
+                       the access given there → access.Decide; transfers.go has downloads, zips and uploads,
+                       opening.go what opens in the browser and how, search.go the search by name, links.go making
+                       and removing public links, visitors.go the public prefix and the visitor's pages,
+                       invitations.go inviting guests, guests.go the guests' sign-in, pages and codes
 internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
                        shared folders, the access given on them; reread.go and walk.go keep the index in step with
                        the storage, and rollback.go takes in the storage put back to a snapshot
@@ -1045,7 +1149,8 @@ internal/clock/        the Drive's clock, which test builds can move forward
 internal/transfers/    what holds the memory figure: capped network buffers, and the 32 transfer slots
 internal/storage/      the WebDAV client
 internal/storagecheck/ `superit-drive check-storage`: can a WebDAV server hold the Drive's files?
-web/                   the interface (Vite, React, Tailwind with the Pilot light tokens); built into web/dist
+web/                   the interface (Vite, React, Tailwind with the Pilot light tokens): the members' page
+                       (index.html) and the guests' (guest.html); built into web/dist
 test/                  tests through HTTP; harness/ runs the Drive; webdav/ is the stand-in storage; memory/ is the
                        64 MiB test
 dev/                   settings and a member list for running locally
