@@ -69,10 +69,10 @@ export function GuestApp() {
 		() =>
 			queryClient.getQueryCache().subscribe((event) => {
 				if (event.type === "updated" && event.query.queryKey[0] !== "guest-me" && signedOut(event.query.state.error)) {
-					void me.refetch();
+					void queryClient.invalidateQueries({ queryKey: ["guest-me"] });
 				}
 			}),
-		[queryClient, me],
+		[queryClient],
 	);
 	if (me.isPending) return <Page>Loading…</Page>;
 	if (me.error && signedOut(me.error)) return <SignIn onSignedIn={() => void queryClient.resetQueries()} />;

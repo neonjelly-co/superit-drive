@@ -681,9 +681,10 @@ GET | PUT | DELETE /s/guest/api/places/{place}/uploads/{upload}, POST …/finish
 DELETE /s/guest/api/places/{place}/items/{item}
 ```
 
-Every answer under `/s/guest` carries `X-Robots-Tag: noindex, nofollow` and `Cache-Control: no-store`, the members'
-`Content-Security-Policy` (the page runs the interface's own script) and `Referrer-Policy: same-origin` (the addresses
-there hold no secret, and `no-referrer` would make a change's `Origin` null). An item they cannot reach answers exactly
+Every answer under `/s/guest` carries `X-Robots-Tag: noindex, nofollow`, the members' `Content-Security-Policy` (the page
+runs the interface's own script) and `Referrer-Policy: same-origin` (the addresses there hold no secret, and
+`no-referrer` would make a change's `Origin` null); the API's answers `Cache-Control: no-store`, the page `no-cache`, and
+the interface's files are kept (their names hold their content's hash). An item they cannot reach answers exactly
 as one that does not exist (404, `notHere`); without a session every route but signing in answers 401.
 
 ### Opening files in the browser
