@@ -83,7 +83,7 @@ export const hu: Messages = {
 		searchMore: (n) => `Ez a legjobb ${n} találat. Több név is tartalmazza ezt: írj be többet a névből, hogy megtaláld, amit keresel.`,
 		trashNote: "A törölt fájlok és mappák 30 napig itt maradnak, utána végleg törlődnek. Addig beleszámítanak a foglalt tárhelybe.",
 		sharedNote:
-			"Amit mások megosztottak veled a Saját fájljaikból, vagy olyan közös mappákból, amelyekhez nincs hozzáférésed. Egy mappa tartalmát megnyitva látod.",
+			"Amit mások megosztottak veled a Saját fájljaikból, vagy olyan közös mappákból, amelyeknek nem vagy tagja. Egy mappa tartalmát megnyitva látod.",
 	},
 	toolbar: {
 		whoCanSeeThis: "Ki látja?",
@@ -214,7 +214,7 @@ export const hu: Messages = {
 		folder: "Mappa",
 		file: "Fájl",
 		in: "Helye",
-		addedBy: "Feltöltötte",
+		addedBy: "Hozzáadta",
 		addedByGuest: "Egy vendég, {address}: a projekten kívülről",
 		addedThroughLink: "Valaki egy feltöltési linkkel: a projekten kívülről",
 		showWhere: "Mutasd, hol van",
@@ -279,7 +279,7 @@ export const hu: Messages = {
 		takenInLabel: "A linken beküldött mennyiség",
 		takenInOf: (taken, limit) => `${limit} keretből ${taken}`,
 		nothingYet: "még semmi",
-		full: "Amíg nem engedsz neki többet, nem fogad több fájlt. Amit eddig küldtek rajta, a mappában marad.",
+		full: "Nem fogad több fájlt, amíg nem engeded, hogy fogadjon még. Amit eddig küldtek rajta, a mappában marad.",
 		notWorking:
 			"Most semmit nem nyit meg: aki készítette, már nem oszthatja meg ezt, vagy itt ki van kapcsolva a projekten kívüli megosztás. Ha már nincs rá szükség, távolítsd el.",
 		makeRoom: "Fogadjon még fájlokat",

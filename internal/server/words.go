@@ -72,7 +72,7 @@ var (
 			"Minden mást a saját helyén belül lehet áthelyezni.")
 	searchTooLong = text.M("This is longer than any name can be. Search for a part of the name.",
 		"Ez hosszabb, mint amilyen egy név lehet. Keress a név egy részére.")
-	searchNothing = text.M("Type a part of a name to search for.", "Írd be egy név egy részét, és arra keresel.")
+	searchNothing = text.M("Type a part of a name to search for.", "Írd be egy név egy részét, hogy rákeress.")
 )
 
 // Shared folders.
@@ -228,7 +228,7 @@ var (
 	onlyReading = text.M("A public link only opens and downloads: nothing can be changed through one.",
 		"Nyilvános linkkel csak megnyitni és letölteni lehet, módosítani semmit.")
 	visitorsBusy = text.M("The Drive is busy. Try again in a moment.",
-		"A Drive most nagyon elfoglalt. Próbáld újra egy kis idő múlva.")
+		"A Drive most túlterhelt. Próbáld újra egy kis idő múlva.")
 	// visitorUnavailable is a visitor's page for a link that would open, while sharing outside the project is off.
 	visitorUnavailable = text.M("Sharing outside the organisation that shared this is switched off for now, so the link opens "+
 		"nothing. It works again once they switch it back on. Ask whoever sent it to you.",
@@ -244,7 +244,7 @@ var (
 
 	// linkFull is the page, and the answer, of an upload-only link that has taken in all it may until it is reset.
 	linkFull = text.M("This link has taken in all it can for now. Ask whoever sent it to you to make room for more.",
-		"Ez a link most nem fogad több fájlt. Kérd meg azt, aki küldte, hogy engedjen még.")
+		"Ez a link most nem fogad több fájlt. Kérd meg azt, aki küldte, hogy engedjen még fájlokat.")
 	linkTooSmall = text.M("This file is larger than this link can still take in. Smaller files may still fit.",
 		"Ez a fájl nagyobb annál, amennyit ez a link még fogadhat. Kisebb fájlok még beférhetnek.")
 	sendCutOff = text.M("The file stopped before it all arrived, so nothing was kept. Send it again.",

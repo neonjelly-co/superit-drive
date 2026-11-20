@@ -52,7 +52,7 @@ func TestAMembersAnswersAreInTheLanguageTheirPageAsksFor(t *testing.T) {
 			"Itt már van valami ezzel a névvel: „Számlák”. Válassz másik nevet.", false},
 		{"an empty search", func(c *harness.Client) harness.Response {
 			return c.Get(t, "/api/search?q=%20")
-		}, http.StatusBadRequest, "Type a part of a name to search for.", "Írd be egy név egy részét, és arra keresel.", true},
+		}, http.StatusBadRequest, "Type a part of a name to search for.", "Írd be egy név egy részét, hogy rákeress.", true},
 	} {
 		got := c.ask(en)
 		if got.Status != c.status || errorOf(t, got) != c.english {
