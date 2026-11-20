@@ -45,7 +45,7 @@ func cannotInvite(why string) string {
 //	POST /api/places/{place}/items/{item}/access/guests   {"address", "role": "viewer" | "editor", "ends": <time> | null}
 //	200 {"access": […], "member": {…}} | {"access": […], "guest": {"id", "address"}, "invited": true}
 //	400 not an address, a role that cannot be given, an end date that has passed
-//	409 sharing outside the project is off here ("outside": false), or mail does not work ("mail": false)
+//	409 sharing outside the project is off here ("outside": "project" | "folder"), or mail does not work ("mail": false)
 func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 	var body invitationJSON
 	if !s.readBody(w, r, &body) {
@@ -82,8 +82,7 @@ func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 		return
 	}
 	if !access.Decide(c.person, access.InviteGuest, c.access) {
-		writeJSON(w, http.StatusConflict, map[string]any{"outside": false,
-			"error": "Sharing outside the project is switched off here, so no guest can be invited. Share it with members of the project."})
+		s.switchedOff(w, r, c) // they may share it (Share), so only the switch is in the way
 		return
 	}
 	ends, ok := s.invitationRules(w, r, c, body)
@@ -169,6 +168,7 @@ func (s *Server) answerAccess(w http.ResponseWriter, r *http.Request, c call, mo
 		return
 	}
 	more["access"] = list
+	more["outside"] = outsideHere(*c.place)
 	writeJSON(w, http.StatusOK, more)
 }
 

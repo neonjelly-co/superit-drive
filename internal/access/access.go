@@ -57,6 +57,14 @@
 //     place's top folder, never sharing, never a link, never the trash, never who has access. An invitation counts while
 //     its item is live and its place open, before its end date, and while sharing outside the project is on there; in a
 //     My files it is its giver's share, as a link is: it counts only while they may still share its item.
+//   - Sharing outside the project (public links and guests) can be switched off: for the whole project by a project admin
+//     (SwitchSharingOutside, at no place), and for one shared folder by its managers (SwitchSharingOutside, at its top
+//     folder). Where it is off (Place.NoSharingOutside) no link opens and none is made, no guest gets in and none is
+//     invited; links and invitations stay, can be seen and removed, and work again when it is switched back on.
+//     SwitchedOff says when that switch is the only thing in the way, so that whoever would otherwise be let in can be
+//     told so.
+//   - A project admin oversees what leaves the project and the space each person and shared folder uses (Oversee): never
+//     content. A project admin may do nothing in anyone else's My files but what was shared with them.
 package access
 
 import (
@@ -221,9 +229,9 @@ type Place struct {
 	// counts: access given on one item never reaches its parent or its siblings. A caller may pass more.
 	Grants []Grant
 	// NoSharingOutside is true where sharing outside the project (public links and guests) is switched off: for the
-	// whole project, or for this shared folder. Then no link opens and none can be made, no guest gets in and none can be
-	// invited; links and invitations already made stay, can be seen and removed, and work again when it is switched back
-	// on. (The switches themselves come with their own ticket.)
+	// whole project (by a project admin), or for this shared folder (by its managers). Then no link opens and none can be
+	// made, no guest gets in and none can be invited; links and invitations already made stay, can be seen and removed,
+	// and work again when it is switched back on.
 	NoSharingOutside bool
 	// Now is the time the decision is made: a grant with an end date counts only before it. Without it, no grant with an
 	// end date counts.
@@ -278,6 +286,14 @@ const (
 	// MakeSharedFolder is making a new shared folder. It concerns no place: the new one belongs to the project, and its
 	// maker becomes its first manager.
 	MakeSharedFolder Action = "make-shared-folder"
+	// Oversee is, for a project admin, seeing what is shared outside the project (each public link and each guest's
+	// invitation: the item's name, who shared it, with whom, when it was last used and how often) and the space each
+	// person's My files and each shared folder uses. Never what is in anything. It concerns no place.
+	Oversee Action = "oversee"
+	// SwitchSharingOutside is switching sharing outside the project (public links and guests) off, or back on: at no
+	// place, for the whole project, by a project admin; at a shared folder's top folder, for that shared folder, by its
+	// managers. Nowhere else: not for a My files, not at an item.
+	SwitchSharingOutside Action = "switch-sharing-outside"
 
 	// List is seeing what is in a folder: the place's top folder, or a folder item.
 	List Action = "list"
@@ -371,7 +387,11 @@ const (
 
 // InAPlace is every action a member may do in a place, in the order an interface lists them.
 var InAPlace = []Action{List, Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeTrash, Restore,
-	SeeAccess, Share, MakeLink, ManageLink, InviteGuest, ManageAccess, DeleteSharedFolder, RestoreSharedFolder}
+	SeeAccess, Share, MakeLink, ManageLink, InviteGuest, ManageAccess, SwitchSharingOutside, DeleteSharedFolder, RestoreSharedFolder}
+
+// Nowhere is every action that concerns no place only. (SwitchSharingOutside concerns no place for the whole project,
+// and is among InAPlace for a shared folder.)
+var Nowhere = []Action{Enter, SeeUsage, MakeSharedFolder, Oversee}
 
 // ThroughALink is every action a visitor may do through a public link, and only a visitor.
 var ThroughALink = []Action{SeeThroughLink, DownloadThroughLink}
@@ -401,7 +421,14 @@ func Decide(person Person, action Action, place *Place) bool {
 		return false
 	}
 	if place == nil {
-		return action == Enter || action == SeeUsage || action == MakeSharedFolder
+		switch action {
+		case Enter, SeeUsage, MakeSharedFolder:
+			return true
+		case Oversee, SwitchSharingOutside:
+			// For the whole project: its admins.
+			return person.Role == members.RoleAdmin
+		}
+		return false
 	}
 	role := RoleAt(person, place)
 	if place.Deleted {
@@ -444,6 +471,20 @@ func Decide(person Person, action Action, place *Place) bool {
 		return place.DeletedBy == person.UserID || Decide(person, SeeTrash, place.Up(0))
 	}
 	return true
+}
+
+// SwitchedOff says whether the person may not do action at place only because sharing outside the project is switched
+// off there: with it on, they would be let in. That is whoever may share an item, making a link to it or inviting a
+// guest; a visitor whose link would open it; a guest whose invitation would let them in. For anyone else, and for
+// anything that would be refused anyway, it is false, so that saying so tells nobody more than they could see with it
+// on.
+func SwitchedOff(person Person, action Action, place *Place) bool {
+	if place == nil || !place.NoSharingOutside || Decide(person, action, place) {
+		return false
+	}
+	on := *place
+	on.NoSharingOutside = false
+	return Decide(person, action, &on)
 }
 
 // SharedWithMe says whether "Shared with me" lists, for the person, the live item place is about: they may open it, and
@@ -609,7 +650,7 @@ func ByLink(place *Place) bool {
 var atTop = map[Role]map[Action]bool{
 	Viewer:  actions(List, Download, SeeAccess),
 	Editor:  actions(List, Download, SeeAccess, Upload, MakeFolder, SeeTrash),
-	Manager: actions(List, Download, SeeAccess, Upload, MakeFolder, SeeTrash, ManageAccess, DeleteSharedFolder),
+	Manager: actions(List, Download, SeeAccess, Upload, MakeFolder, SeeTrash, ManageAccess, SwitchSharingOutside, DeleteSharedFolder),
 	Owner:   actions(List, Download, Upload, MakeFolder, SeeTrash),
 }
 

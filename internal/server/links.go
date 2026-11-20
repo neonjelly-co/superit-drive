@@ -60,14 +60,14 @@ func (s *Server) linkJSONOf(l index.Link, where *access.Place, address string) l
 func (s *Server) linkOf(w http.ResponseWriter, r *http.Request, c call) {
 	l, err := s.drive.LinkOn(r.Context(), *c.item)
 	if errors.Is(err, index.ErrNoLink) {
-		writeJSON(w, http.StatusOK, map[string]any{"link": nil})
+		writeJSON(w, http.StatusOK, map[string]any{"link": nil, "outside": outsideHere(*c.place)})
 		return
 	}
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"link": s.linkJSONOf(l, c.access, "")})
+	writeJSON(w, http.StatusOK, map[string]any{"link": s.linkJSONOf(l, c.access, ""), "outside": outsideHere(*c.place)})
 }
 
 // makeLink makes a public link to a file or folder: anyone with its address may see it, and everything inside it, and

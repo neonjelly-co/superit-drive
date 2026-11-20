@@ -178,7 +178,7 @@ func (s *Server) writeAccess(w http.ResponseWriter, r *http.Request, c call) {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"access": list})
+	writeJSON(w, http.StatusOK, map[string]any{"access": list, "outside": outsideHere(*c.place)})
 }
 
 // whoHasAccess says who has access to an item, or to a shared folder as a whole, and in which role.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,14 @@ func (s *Server) routes() []route {
 		// Finding files and folders by name across everything the person can see (search.go): where it looks, and each
 		// result, are decided there through access.
 		{pattern: "GET /api/search", action: access.Enter, serve: s.search},
+		// What a project admin oversees (oversight.go): everything shared outside the project, and the space each person and
+		// each shared folder uses. Never content.
+		{pattern: "GET /api/oversight/shared-outside", action: access.Oversee, serve: s.sharedOutside},
+		{pattern: "GET /api/oversight/space", action: access.Oversee, serve: s.space},
+		// Sharing outside the project (public links and guests) switched off, or back on (oversight.go): for the whole
+		// project by a project admin; for one shared folder by its managers.
+		{pattern: "PUT /api/sharing-outside", action: access.SwitchSharingOutside, serve: s.switchProjectOutside},
+		{pattern: "PUT /api/places/{place}/sharing-outside", action: access.SwitchSharingOutside, place: "place", serve: s.switchFolderOutside},
 
 		// Shared folders as a whole (shared.go).
 		{pattern: "POST /api/places", action: access.MakeSharedFolder, serve: s.newSharedFolder},
@@ -159,20 +168,36 @@ type rollbackJSON struct {
 }
 
 // me says who is signed in and which project this Drive belongs to, whether guests can be invited on this Drive
-// (guests: not without mail that works, and why), and, for seven days after the storage was put back to a snapshot,
-// that it was (rollback): who did it, and to when. Only members are told; visitors and guests never ask here.
+// (guests: not without mail that works, and why), whether sharing outside the project is on for the whole project
+// (sharingOutside: or switched off since when and by whom), what they may do that concerns no place (can: a project
+// admin oversees, and switches sharing outside the project), and, for seven days after the storage was put back to a
+// snapshot, that it was (rollback): who did it, and to when. Only members are told; visitors and guests never ask here.
 func (s *Server) me(w http.ResponseWriter, r *http.Request, c call) {
 	invite, why := s.mail.Known()
 	if !invite {
 		why = cannotInvite(why)
 	}
+	sw, err := s.drive.ProjectOutsideOff(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	who := personOf(c.member)
+	mayDo := []access.Action{}
+	for _, a := range append(slices.Clone(access.Nowhere), access.SwitchSharingOutside) {
+		if access.Decide(who, a, nil) {
+			mayDo = append(mayDo, a)
+		}
+	}
 	out := map[string]any{
-		"userId":      c.member.UserID,
-		"email":       c.member.Email,
-		"displayName": c.member.DisplayName,
-		"role":        string(c.member.Role),
-		"project":     s.project,
-		"guests":      map[string]any{"invite": invite, "why": why},
+		"userId":         c.member.UserID,
+		"email":          c.member.Email,
+		"displayName":    c.member.DisplayName,
+		"role":           string(c.member.Role),
+		"project":        s.project,
+		"guests":         map[string]any{"invite": invite, "why": why},
+		"sharingOutside": s.outsideJSONOf(sw),
+		"can":            mayDo,
 	}
 	rb, ok, err := s.drive.Notice(r.Context())
 	if err != nil {
@@ -195,12 +220,19 @@ type placeJSON struct {
 	// Can is every action the person may do in the place's top folder (access.InAPlace), so the interface offers only
 	// those. The Drive decides again on every request.
 	Can []access.Action `json:"can"`
+	// SharingOutside is, for a shared folder, its own switch of sharing outside the project (its managers switch it):
+	// on, or off since when and by whom. Outside says whether sharing outside the project is on in the place now: "on",
+	// or where it was switched off, "project" or "folder".
+	SharingOutside *outsideJSON `json:"sharingOutside,omitempty"`
+	Outside        string       `json:"outside"`
 }
 
-func placeOf(who access.Person, p index.Place, where *access.Place) placeJSON {
-	j := placeJSON{ID: p.ID, Kind: string(p.Kind), Name: p.Name, Can: can(who, where)}
+func (s *Server) placeOf(who access.Person, p index.Place, where *access.Place) placeJSON {
+	j := placeJSON{ID: p.ID, Kind: string(p.Kind), Name: p.Name, Can: can(who, where), Outside: outsideHere(p)}
 	if p.Kind == index.SharedFolder {
 		j.Role = string(access.RoleAt(who, where))
+		sw := s.outsideJSONOf(p.OutsideOff)
+		j.SharingOutside = &sw
 	}
 	return j
 }
@@ -240,7 +272,7 @@ func (s *Server) places(w http.ResponseWriter, r *http.Request, c call) {
 	for _, p := range append([]index.Place{mine}, shared...) {
 		where := s.accessPlace(p, nil, given[p.ID])
 		if access.Decide(who, access.List, where) {
-			out = append(out, placeOf(who, p, where))
+			out = append(out, s.placeOf(who, p, where))
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"places": out})
@@ -440,7 +472,7 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
 	open, fromTop := openPath(who, c.access, folders)
 	s.writeListing(w, r, c, folder, map[string]any{
 		"path": pathOf(open), "fromTop": fromTop, "role": access.RoleAt(who, c.access), "can": can(who, c.access),
-		"checking": checking,
+		"checking": checking, "outside": outsideHere(*c.place),
 	}, func(it index.Item) any {
 		where := here.Below(it.ID, givenOn[it.ID]).WithLinks(linkOn[it.ID]...)
 		return listedOf(it, can(who, where), seenBy(list, where))

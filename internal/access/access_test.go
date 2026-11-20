@@ -248,6 +248,14 @@ var places = map[string]*Place{
 	"a shared folder › Offer.pdf, given editor on it as a whole, no sharing outside": {Kind: SharedFolder, Path: offer,
 		NoSharingOutside: true, Grants: grants(to("u-reka", onTop, Editor))},
 	"a shared folder › Clients, no role, no sharing outside": {Kind: SharedFolder, Path: clients, NoSharingOutside: true},
+	// The switch itself: its managers turn it back on where it is off; a My files has none of its own.
+	"a shared folder, given manager, no sharing outside": {Kind: SharedFolder, NoSharingOutside: true, Grants: grants(to("u-reka", onTop, Manager))},
+	"a shared folder, given editor, no sharing outside":  {Kind: SharedFolder, NoSharingOutside: true, Grants: grants(to("u-reka", onTop, Editor))},
+	"Réka's My files, no sharing outside":                {Kind: MyFiles, Owner: "u-reka", NoSharingOutside: true},
+	"Bence's My files, no sharing outside, the admin given editor on Clients": {Kind: MyFiles, Owner: "u-bence", NoSharingOutside: true,
+		Grants: grants(to("u-admin", onClients, Editor))},
+	"a deleted shared folder, given manager, no sharing outside": {Kind: SharedFolder, Deleted: true, NoSharingOutside: true,
+		Grants: grants(to("u-reka", onTop, Manager))},
 
 	// Guests. An invitation reaches everything inside what it is on, and nothing above it or beside it; an editor
 	// renames, moves and deletes only what is inside it.
@@ -324,10 +332,10 @@ var places = map[string]*Place{
 }
 
 // Every action there is. A test below fails when one is added to the package without being added here.
-var everyAction = []Action{Enter, SeeUsage, MakeSharedFolder, List, Download, Upload, MakeFolder, Rename, Move, MoveOut,
-	MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, MakeLink, ManageLink, InviteGuest, ManageAccess, DeleteSharedFolder,
-	RestoreSharedFolder, SeeThroughLink, DownloadThroughLink, SignInAsGuest, EnterAsGuest, ListAsGuest, DownloadAsGuest,
-	UploadAsGuest, MakeFolderAsGuest, RenameAsGuest, MoveAsGuest, DeleteAsGuest}
+var everyAction = []Action{Enter, SeeUsage, MakeSharedFolder, Oversee, List, Download, Upload, MakeFolder, Rename, Move,
+	MoveOut, MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, MakeLink, ManageLink, InviteGuest, ManageAccess,
+	SwitchSharingOutside, DeleteSharedFolder, RestoreSharedFolder, SeeThroughLink, DownloadThroughLink, SignInAsGuest,
+	EnterAsGuest, ListAsGuest, DownloadAsGuest, UploadAsGuest, MakeFolderAsGuest, RenameAsGuest, MoveAsGuest, DeleteAsGuest}
 
 // What the spec gives each role, written out here rather than taken from the package.
 var (
@@ -335,9 +343,10 @@ var (
 	// Downloading the top folder is the whole place as one zip.
 	ownerAtTop = []Action{List, Download, Upload, MakeFolder, SeeTrash}
 	// In a shared folder's top folder. Whoever may upload there may also move something in from their own My files.
-	viewerAtTop  = []Action{List, Download, SeeAccess}
-	editorAtTop  = append(slices.Clone(viewerAtTop), Upload, MakeFolder, SeeTrash, MoveIn)
-	managerAtTop = append(slices.Clone(editorAtTop), ManageAccess, DeleteSharedFolder)
+	viewerAtTop = []Action{List, Download, SeeAccess}
+	editorAtTop = append(slices.Clone(viewerAtTop), Upload, MakeFolder, SeeTrash, MoveIn)
+	// Its managers also switch sharing outside the project off for it, or back on.
+	managerAtTop = append(slices.Clone(editorAtTop), ManageAccess, SwitchSharingOutside, DeleteSharedFolder)
 	// At an item, in any place. Owners of a My files and managers of a shared folder are editors of every item in it.
 	viewerAtItem = []Action{List, Download, SeeAccess}
 	// An editor of the item who cannot add to the folder it is in: inside it, and sharing it (with members, with guests
@@ -385,6 +394,9 @@ func TestDecide(t *testing.T) {
 	for _, p := range []string{"member", "admin"} {
 		allow(p, "no place", Enter, SeeUsage, MakeSharedFolder)
 	}
+	// A project admin oversees what leaves the project and the space used, and switches sharing outside the project off
+	// for the whole project, or back on.
+	allow("admin", "no place", Oversee, SwitchSharingOutside)
 	// Anyone who is not a member asks for a code to sign in as a guest; a guest uses their own pages.
 	for _, p := range []string{"someone not in the member list", "no user id", "a guest", "another guest", "a guest with Réka's user id"} {
 		allow(p, "no place", SignInAsGuest)
@@ -460,6 +472,10 @@ func TestDecide(t *testing.T) {
 	allow("member", "Réka's My files › Offer.pdf, no sharing outside", without(ownerAtItem, outside...)...)
 	allow("member", "Bence's My files › Offer.pdf, Réka given editor on Clients, no sharing outside", without(editorInFolder, outside...)...)
 	allow("member", "a shared folder › Offer.pdf, given editor on it as a whole, no sharing outside", without(sharedAllAtItem, outside...)...)
+	// A top folder has no links and no guests, so nothing changes there: a manager still switches it back on.
+	allow("member", "a shared folder, given manager, no sharing outside", managerAtTop...)
+	allow("member", "a shared folder, given editor, no sharing outside", editorAtTop...)
+	allow("member", "Réka's My files, no sharing outside", ownerAtTop...)
 
 	// Invitations change nothing for members, but that the member may share what Anna was invited to: Réka in her own
 	// My files, and where she was given editor on Clients (and until her own end date).
@@ -540,9 +556,12 @@ func TestDecide(t *testing.T) {
 		}
 	}
 	// A shared folder in the trash can only be restored, as a whole, by its managers and the project admins.
+	// Not even switching sharing outside the project back on.
 	allow("member", "a deleted shared folder, given manager", RestoreSharedFolder)
+	allow("member", "a deleted shared folder, given manager, no sharing outside", RestoreSharedFolder)
 	for _, place := range []string{"a deleted shared folder, no role", "a deleted shared folder, given viewer",
-		"a deleted shared folder, given editor", "a deleted shared folder, given manager", "a deleted shared folder owned by Réka"} {
+		"a deleted shared folder, given editor", "a deleted shared folder, given manager", "a deleted shared folder owned by Réka",
+		"a deleted shared folder, given manager, no sharing outside"} {
 		allow("admin", place, RestoreSharedFolder)
 	}
 
@@ -675,10 +694,52 @@ func TestTheRulesHangTogether(t *testing.T) {
 			may := func(a Action) bool { return Decide(p, a, l) }
 			where := fmt.Sprintf("%s in %s", pn, ln)
 			// Nobody acts on what they cannot see.
-			for _, a := range []Action{Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, InviteGuest, ManageAccess, DeleteSharedFolder} {
-				if may(a) && !may(List) {
+			for _, a := range []Action{Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, InviteGuest, ManageAccess, SwitchSharingOutside, DeleteSharedFolder} {
+				if l != nil && may(a) && !may(List) {
 					t.Errorf("%s may %s but not list", where, a)
 				}
+			}
+			// Sharing outside the project switched off there takes away making links and inviting guests from members,
+			// what a link opens from visitors, and what an invitation lets a guest do, and nothing else; and it gives
+			// nobody anything. SwitchedOff says exactly when it is the only thing in the way.
+			if l != nil {
+				on, off := *l, *l
+				on.NoSharingOutside, off.NoSharingOutside = false, true
+				for _, a := range everyAction {
+					withOn, withOff := Decide(p, a, &on), Decide(p, a, &off)
+					if withOff && !withOn {
+						t.Errorf("%s: switching sharing outside off lets them %s", where, a)
+					}
+					stopped := withOn && !withOff
+					var stops bool
+					switch {
+					case p.Link != nil:
+						stops = slices.Contains(ThroughALink, a)
+					case p.Guest != nil:
+						stops = slices.Contains(AsAGuestAtAnItem, a)
+					default:
+						stops = a == MakeLink || a == InviteGuest
+					}
+					if stopped && !stops {
+						t.Errorf("%s: switching sharing outside off stops them doing %s", where, a)
+					}
+					if stops && withOn && withOff {
+						t.Errorf("%s may still %s with sharing outside switched off", where, a)
+					}
+					if SwitchedOff(p, a, &off) != stopped || SwitchedOff(p, a, &on) {
+						t.Errorf("%s: SwitchedOff for %s is %v off and %v on; switching it off stops it %v",
+							where, a, SwitchedOff(p, a, &off), SwitchedOff(p, a, &on), stopped)
+					}
+				}
+			}
+			// The project's own switch, and what an admin oversees, are a project admin's alone, whatever was given.
+			for _, a := range []Action{Oversee, SwitchSharingOutside} {
+				if l == nil && may(a) != (p.isMember() && p.Role == members.RoleAdmin) {
+					t.Errorf("%s: may %s for the whole project %v", where, a, may(a))
+				}
+			}
+			if l != nil && may(Oversee) {
+				t.Errorf("%s may oversee, which concerns no place, in a place", where)
 			}
 			for _, a := range AsAGuestAtAnItem {
 				if may(a) && !may(ListAsGuest) {
@@ -744,7 +805,7 @@ func TestTheRulesHangTogether(t *testing.T) {
 				if may(Upload) && !Decide(p, Delete, child) {
 					t.Errorf("%s may upload into it but not delete what is in it", where)
 				}
-				for _, a := range []Action{SeeTrash, ManageAccess, DeleteSharedFolder, RestoreSharedFolder} {
+				for _, a := range []Action{SeeTrash, ManageAccess, SwitchSharingOutside, DeleteSharedFolder, RestoreSharedFolder} {
 					if may(a) {
 						t.Errorf("%s may %s, which concerns a place as a whole, at an item", where, a)
 					}
@@ -765,6 +826,11 @@ func TestTheRulesHangTogether(t *testing.T) {
 				// Whoever may open the top folder may download it whole, as one zip.
 				if may(Download) != may(List) {
 					t.Errorf("%s: may list %v, may download %v: want both or neither", where, may(List), may(Download))
+				}
+				// Whoever switches sharing outside the project off for a shared folder decides who has access to it, and the
+				// other way round; a My files has no switch of its own.
+				if may(SwitchSharingOutside) != may(ManageAccess) || (may(SwitchSharingOutside) && l.Kind != SharedFolder) {
+					t.Errorf("%s: may switch sharing outside %v, may decide who has access %v", where, may(SwitchSharingOutside), may(ManageAccess))
 				}
 				// Whoever decides who has access to a shared folder, or may delete it, may do everything else in it.
 				if may(ManageAccess) || may(DeleteSharedFolder) {
@@ -1111,18 +1177,18 @@ func TestBelowAndUp(t *testing.T) {
 }
 
 func TestEveryActionIsInTheTable(t *testing.T) {
-	for _, a := range append(append(slices.Clone(InAPlace), ThroughALink...), AsAGuest...) {
+	for _, a := range append(append(append(slices.Clone(InAPlace), Nowhere...), ThroughALink...), AsAGuest...) {
 		if !slices.Contains(everyAction, a) {
 			t.Errorf("%q is an action that the table does not try", a)
 		}
 		kinds := 0
-		for _, list := range [][]Action{InAPlace, ThroughALink, AsAGuest} {
+		for _, list := range [][]Action{InAPlace, Nowhere, ThroughALink, AsAGuest} {
 			if slices.Contains(list, a) {
 				kinds++
 			}
 		}
 		if kinds != 1 {
-			t.Errorf("%q is an action of %d kinds of person (a member's, a visitor's, a guest's)", a, kinds)
+			t.Errorf("%q is an action of %d kinds (a member's in a place or in none, a visitor's, a guest's)", a, kinds)
 		}
 	}
 	for _, a := range AsAGuestAtAnItem {
@@ -1130,9 +1196,113 @@ func TestEveryActionIsInTheTable(t *testing.T) {
 			t.Errorf("%q is a guest's action at an item, but not among a guest's actions", a)
 		}
 	}
-	if len(everyAction) != len(InAPlace)+3+len(ThroughALink)+len(AsAGuest) {
-		t.Errorf("the table tries %d actions; the package has %d in a place, 3 in none, %d through a link and %d as a guest",
-			len(everyAction), len(InAPlace), len(ThroughALink), len(AsAGuest))
+	if len(everyAction) != len(InAPlace)+len(Nowhere)+len(ThroughALink)+len(AsAGuest) {
+		t.Errorf("the table tries %d actions; the package has %d in a place, %d in none, %d through a link and %d as a guest",
+			len(everyAction), len(InAPlace), len(Nowhere), len(ThroughALink), len(AsAGuest))
+	}
+}
+
+// SwitchedOff is true, for every person and place the table knows, only in switchedOff: where sharing outside the
+// project is off and is the only thing in the way. Written out here rather than worked out from the package: whoever
+// may share the item, for making a link and inviting a guest; a visitor whose link would count there; the guest an
+// invitation there would let in. Nobody else is ever told that sharing outside is off: not someone who could not do it
+// anyway, nor at a place's top folder, nor in a shared folder in the trash.
+func TestSwitchedOff(t *testing.T) {
+	switchedOff := map[string]bool{}
+	off := func(person, place string, actions ...Action) {
+		if l, ok := places[place]; !ok || !l.NoSharingOutside {
+			t.Fatalf("the table switches off something in %q, which is not a place it tries with sharing outside off", place)
+		}
+		for _, a := range actions {
+			switchedOff[fmt.Sprintf("%s %s %s", person, a, place)] = true
+		}
+	}
+	inShared := []string{"a visitor, link on Clients by Bence", "the admin, signed in, with a link on Clients by Bence",
+		"a guest with a link on Clients by Bence", "a visitor, link on Clients by Réka", "Réka, signed in, with her own link on Clients",
+		"a visitor, link on Clients by someone who left"}
+	byBence := []string{"a visitor, link on Clients by Bence", "the admin, signed in, with a link on Clients by Bence",
+		"a guest with a link on Clients by Bence"}
+	byReka := []string{"a visitor, link on Clients by Réka", "Réka, signed in, with her own link on Clients"}
+
+	off("member", "Réka's My files › Offer.pdf, no sharing outside", outside...)
+	for _, v := range byReka {
+		off(v, "Réka's My files › Offer.pdf, no sharing outside", throughALink...)
+	}
+	off("member", "Bence's My files › Offer.pdf, Réka given editor on Clients, no sharing outside", outside...)
+	for _, v := range append(append(slices.Clone(byBence), byReka...), "a visitor, link on Offer.pdf by Bence") {
+		off(v, "Bence's My files › Offer.pdf, Réka given editor on Clients, no sharing outside", throughALink...)
+	}
+	for _, p := range []string{"member", "admin"} {
+		off(p, "a shared folder › Offer.pdf, given editor on it as a whole, no sharing outside", outside...)
+	}
+	for _, v := range append(slices.Clone(inShared), "a visitor, link on Offer.pdf by Bence") {
+		off(v, "a shared folder › Offer.pdf, given editor on it as a whole, no sharing outside", throughALink...)
+	}
+	off("admin", "a shared folder › Clients, no role, no sharing outside", outside...)
+	for _, v := range inShared {
+		off(v, "a shared folder › Clients, no role, no sharing outside", throughALink...)
+	}
+	for _, g := range []string{"a guest", "a guest with Réka's user id"} {
+		off(g, "Bence's My files › Offer.pdf, the guest given editor on Clients by Bence, no sharing outside", guestEditorInFolder...)
+	}
+	for _, v := range append(slices.Clone(byBence), "a visitor, link on Offer.pdf by Bence") {
+		off(v, "Bence's My files › Offer.pdf, the guest given editor on Clients by Bence, no sharing outside", throughALink...)
+	}
+
+	tried := 0
+	for pn, p := range people {
+		for ln, l := range places {
+			for _, a := range everyAction {
+				key := fmt.Sprintf("%s %s %s", pn, a, ln)
+				if got := SwitchedOff(p, a, l); got != switchedOff[key] {
+					t.Errorf("%s: switched off %v, want %v", key, got, switchedOff[key])
+				}
+				delete(switchedOff, key)
+				tried++
+			}
+		}
+	}
+	for key := range switchedOff {
+		t.Errorf("the table switches off %q, which is not a combination the test tried", key)
+	}
+	if want := len(people) * len(places) * len(everyAction); tried != want {
+		t.Fatalf("tried %d combinations, want %d", tried, want)
+	}
+}
+
+// A project admin manages every shared folder and oversees the project, but may do nothing at all in anyone else's My
+// files, through any action, with sharing outside the project on or off, but what was shared with them (by name or with
+// everyone) on the way down to the item. Overseeing concerns no place.
+func TestAProjectAdminDoesNothingInAnotherPersonsMyFiles(t *testing.T) {
+	admin := people["admin"]
+	checked := 0
+	for ln, l := range places {
+		if l == nil || l.Kind != MyFiles || l.Owner == admin.UserID {
+			continue
+		}
+		shared := false
+		for _, g := range l.Grants {
+			shared = shared || (g.On != 0 && slices.Contains(l.Path, g.On) && (g.Everyone || g.Member == admin.UserID))
+		}
+		for _, sharing := range []bool{false, true} {
+			q := *l
+			q.NoSharingOutside = sharing
+			for _, a := range everyAction {
+				if Decide(admin, a, &q) && !(shared && slices.Contains(InAPlace, a)) {
+					t.Errorf("the admin may %s in %s (sharing outside off %v), where nothing was shared with them", a, ln, sharing)
+				}
+				if !shared && (a == List || a == Download) && Decide(admin, a, &q) {
+					t.Errorf("the admin may %s in %s", a, ln)
+				}
+			}
+			checked++
+		}
+	}
+	if checked < 40 {
+		t.Fatalf("only %d places in someone else's My files were tried", checked/2)
+	}
+	if Decide(admin, Oversee, &Place{Kind: MyFiles, Owner: "u-bence"}) || Decide(admin, Oversee, &Place{Kind: SharedFolder}) {
+		t.Fatal("overseeing was allowed in a place")
 	}
 }
 
