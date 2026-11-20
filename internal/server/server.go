@@ -441,7 +441,12 @@ func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, mess
 }
 
 // fail answers a request that went wrong on the Drive's side. The details go to the log, never to the person.
+// A request whose person has gone (their connection closed, and with it the request's context) is not the Drive's
+// failure: nobody is answered, and nothing is logged, so that nobody can fill the log by hanging up.
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+		return
+	}
 	s.log.Error("a request failed", "route", r.Pattern, "error", err)
 	s.refuse(w, r, http.StatusInternalServerError, "Something went wrong in the Drive. Try again in a moment.")
 }

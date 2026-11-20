@@ -603,6 +603,9 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request, c call) {
 
 // failed answers a request whose work went wrong: on the storage, or in the Drive itself.
 func (s *Server) failed(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+		return // the person has gone: see fail
+	}
 	if errors.Is(err, drive.ErrPlaceGone) {
 		// The shared folder went to the trash after guard found it: the same answer guard gives from now on.
 		s.refuse(w, r, http.StatusNotFound, notHere)
