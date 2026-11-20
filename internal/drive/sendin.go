@@ -56,7 +56,9 @@ func CheckSentName(name string) error {
 }
 
 // turnsText says whether r is one of the characters that embed, override or isolate the direction of text.
-func turnsText(r rune) bool { return (r >= '\u202A' && r <= '\u202E') || (r >= '\u2066' && r <= '\u2069') }
+func turnsText(r rune) bool {
+	return (r >= '\u202A' && r <= '\u202E') || (r >= '\u2066' && r <= '\u2069')
+}
 
 // keepFor keeps n bytes of what the link with id link may take in, for one file on its way: ErrLinkFull when what the
 // link has taken in, what is on its way and n would pass its limit. settle gives them back, counting them as taken in
