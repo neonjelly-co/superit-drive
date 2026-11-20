@@ -259,8 +259,8 @@ the mark is written back. Told about it in its settings, the Drive does more: se
 
 A project admin can put Superit's Drive storage back to one of its daily snapshots, from the dashboard: a rollback. The
 storage then holds the files as they were when the snapshot was taken, and everything written since is gone, the
-Drive's trash, uploads in progress and the copy of its index included. The index on the server is not put back: who has
-access to what stays as it was just before, except on what no longer exists. Whoever runs the Drive tells it in three
+Drive's trash and uploads in progress included. The index on the server is not put back: who has access to what stays
+as it was just before, except on what no longer exists. Whoever runs the Drive tells it in three
 settings, and the Drive does the rest (`internal/drive/rollback.go`). A self-hoster who puts their own WebDAV back can
 use them the same way.
 
@@ -313,8 +313,8 @@ on with them; a walk that could not, the next one, six hours later, begins with 
   before that does not, and the rollback says why: when the snapshot was taken before the Drive last wrote its mark (or,
   for an index made anew against a storage that held the mark, before the time the storage gives the mark) and the
   storage holds none, the Drive writes it back with the id its index keeps, logs it, and looks go on (what the Drive had
-  made since is then gone, as the admin was told). A mark with another id is never replaced, and a mark
-  missing from a snapshot taken after the Drive wrote it still stops every look, as without a rollback.
+  made since is then gone, as the admin was told). A mark with another id is never replaced, and a mark missing from a
+  snapshot taken after the Drive wrote it still stops every look, as without a rollback.
 - **Places made since** (a shared folder, a member's first My files) stay, emptied: a place is never removed for want of
   its top folder. A shared folder's managers can delete it.
 
@@ -328,8 +328,8 @@ by the Drive's clock), `GET /api/me` answers members with
 and the interface shows it above the list, in every view, as "The files were put back to 19 November at 04:00" (the
 time in the browser's time zone): "Réka Kovács put the Drive's files back to how they were then, on 20 November. Files
 added after that are gone, changes made after that are undone, and files deleted after that are back. Files that came
-back may need to be shared again." The name is shown as text. A member can close it: it stays closed in that browser, for that rollback,
-and nowhere else; a new rollback shows again. Visitors through a public link are told nothing: their pages say nothing
+back may need to be shared again." The name is shown as text. A member can close it: it stays closed in that browser,
+for that rollback, and nowhere else; a new rollback shows again. Visitors through a public link are told nothing: their pages say nothing
 about the project but who shared the item. Guests, when they come, will not be told either.
 
 **Connections to the storage.** A server closes a connection kept open between requests after a while, and can do so
