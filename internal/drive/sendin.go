@@ -147,10 +147,11 @@ func (d *Drive) sentInPlace(ctx context.Context, p index.Place, link int64, name
 	if !ok {
 		return index.Item{}, ErrGone
 	}
-	// Something put on the storage directly between the look and the move takes the name (the move never replaces it):
-	// the next free one, a few times at most.
+	// The move never replaces anything: something put on the storage directly, which the index does not know yet, makes
+	// it fail, and the next free name is tried, a few times at most.
+	from := 1
 	for range 3 {
-		free, release, err := d.firstFree(ctx, dir, name)
+		n, free, release, err := d.freeSentName(ctx, p, &folder, dir, name, from)
 		if err != nil {
 			return index.Item{}, err
 		}
@@ -159,6 +160,7 @@ func (d *Drive) sentInPlace(ctx context.Context, p index.Place, link int64, name
 		release()
 		var taken *Taken
 		if errors.As(err, &taken) {
+			from = n + 1
 			continue
 		}
 		return it, err
@@ -166,25 +168,38 @@ func (d *Drive) sentInPlace(ctx context.Context, p index.Place, link int64, name
 	return index.Item{}, &Taken{Name: name}
 }
 
-// firstFree is name, when nothing on the storage or on its way there has it in the folder at dir, or else the first free
-// name freeName finds; it holds the name until release is called. Whether name was free makes no other difference.
-func (d *Drive) firstFree(ctx context.Context, dir, name string) (free string, release func(), err error) {
-	p, ok := pathIn(dir, name)
-	if !ok {
-		return "", nil, &BadName{"This name cannot be used. Choose another name."}
-	}
-	if release, ok := d.claim(p); ok {
-		sctx, cancel := context.WithTimeout(ctx, storageTimeout)
-		_, err := d.storage.Stat(sctx, p)
-		cancel()
-		switch {
-		case errors.Is(err, storage.ErrNotFound):
-			return name, release, nil
-		case err != nil:
+// freeSentName is the first name, from the from-th on (1: name itself, n: name with " (n)" added, as keeping both
+// names it), that no item of the index has in the folder at dir (live, or missing from the storage) and no change on
+// its way there holds; it holds that name until release is called, and n says which it was.
+//
+// It asks the index and the Drive's own claims, never the storage: a look there takes a round trip for every name that
+// is taken, and how long a visitor's file took to be answered would tell them which names are in the folder. Asked of
+// the index, a taken name costs a lookup that is lost in the time any request takes. (A name only the storage has, put
+// there directly and not yet seen by a look, still costs the move that finds it: that is all a visitor could tell, and
+// only about such a file.)
+func (d *Drive) freeSentName(ctx context.Context, p index.Place, folder *index.Item, dir, name string, from int) (n int, free string, release func(), err error) {
+	for n = max(from, 1); n < 1000; n++ {
+		candidate := name
+		if n > 1 {
+			candidate = numbered(name, n, false)
+		}
+		path, ok := pathIn(dir, candidate)
+		if !ok {
+			continue
+		}
+		release, ok := d.claim(path)
+		if !ok {
+			continue
+		}
+		used, err := d.index.NameUsed(ctx, p.ID, folderID(folder), candidate)
+		if err != nil {
 			release()
-			return "", nil, storageError(err)
+			return 0, "", nil, err
+		}
+		if !used {
+			return n, candidate, release, nil
 		}
 		release()
 	}
-	return d.freeName(ctx, dir, name, false)
+	return 0, "", nil, &Taken{Name: name}
 }
