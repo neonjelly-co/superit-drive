@@ -3,7 +3,8 @@
 //
 //   - every connection's network buffers are capped at SocketBuffer, on the browser side (Listen) and on the storage
 //     side (Dial). Left alone, the kernel grows each one to several MiB while a transfer is in flight;
-//   - at most Slots transfers are in flight at once (Gate). Further ones wait their turn.
+//   - at most Slots transfers are in flight at once (Gate), of which outsiders (visitors with a public link) hold at
+//     most OutsiderSlots. Further ones wait their turn.
 //
 // A transfer is a request that moves a file's bytes: a download (of a file or a zip) or an upload (whole, or one part
 // of a resumable upload).
@@ -21,6 +22,9 @@ const SocketBuffer = 256 << 10
 
 // Slots is how many transfers may be in flight at once.
 const Slots = 32
+
+// OutsiderSlots is how many of the Slots outsiders may hold at once; members can always use the others.
+const OutsiderSlots = 8
 
 // Capped sets conn's send and receive buffers to SocketBuffer, if it is a TCP connection.
 func Capped(conn net.Conn) net.Conn {
