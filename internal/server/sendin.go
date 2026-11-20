@@ -109,8 +109,8 @@ func (s *Server) sendIn(w http.ResponseWriter, r *http.Request, c call) {
 		}
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": message, "full": full})
 	case errors.Is(err, drive.ErrCutOff) || r.Context().Err() != nil:
-		// The visitor's connection ended (or they stopped it); nothing was kept. Not the Drive's failure.
-		s.log.Info("a file sent through a link ended before it all arrived; nothing was kept", "error", err)
+		// The visitor's connection ended (or they stopped it); nothing was kept. Not the Drive's failure, and not logged:
+		// anyone with the address could fill the log by hanging up, as anyone can try tokens without a log line.
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": sendCutOff})
 	case errors.Is(err, errSwitchedOffNow):
 		s.switchedOff(w, r, c)
