@@ -116,8 +116,11 @@ func TestTheStorageIsAReadableTreeWithOneTopFolderPerMember(t *testing.T) {
 	if slices.Sort(rootNames); !slices.Equal(rootNames, []string{".superit-drive", "My files"}) {
 		t.Fatalf("the Drive's folder should hold only \"My files\" and \".superit-drive\", got %q", rootNames)
 	}
-	if hidden, _ := d.Storage.List(t, ".superit-drive"); len(hidden) != 1 || hidden[0].Name != "storage-id" {
-		t.Fatalf("the hidden folder holds %+v, want only the Drive's mark", hidden)
+	// (and, once a copy of the index was made after the first place, the folder of the copies: index_copy_test.go).
+	hidden, _ := d.Storage.List(t, ".superit-drive")
+	if !slices.ContainsFunc(hidden, func(e harness.Entry) bool { return e.Name == "storage-id" }) ||
+		slices.ContainsFunc(hidden, func(e harness.Entry) bool { return e.Name != "storage-id" && e.Name != "index" }) {
+		t.Fatalf("the hidden folder holds %+v, want only the Drive's mark and the copies of its index", hidden)
 	}
 	tops, _ := d.Storage.List(t, "My files")
 	var got []string
@@ -220,9 +223,10 @@ func TestTheIndexIsOneSQLiteFileInTheDataFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		// SQLite keeps its write-ahead log next to the file while the Drive runs.
-		if e.Name() != "index.sqlite" && e.Name() != "index.sqlite-wal" && e.Name() != "index.sqlite-shm" {
-			t.Errorf("the data folder holds %q; it should hold only the index", e.Name())
+		// SQLite keeps its write-ahead log next to the file while the Drive runs; backup/ holds the copy of the index a
+		// backup archives (index_copy_test.go).
+		if e.Name() != "index.sqlite" && e.Name() != "index.sqlite-wal" && e.Name() != "index.sqlite-shm" && e.Name() != "backup" {
+			t.Errorf("the data folder holds %q; it should hold only the index and its copy", e.Name())
 		}
 	}
 	head := make([]byte, 16)
