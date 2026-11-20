@@ -16,9 +16,11 @@ build: ui ## Build the Drive, interface included, into bin/
 	CGO_ENABLED=0 go build -trimpath -o $(BIN) ./cmd/superit-drive
 
 test: ## Run every test (needs Docker running)
+	cd web && bun test
 	go test ./...
 
 test-short: ## Run only the tests that need no Docker
+	cd web && bun test
 	go test -short ./...
 
 test-memory: ## Run the image in a 64 MiB container under 40 downloads and 10 uploads of 256 MiB at once (slow; needs Docker)
