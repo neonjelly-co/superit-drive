@@ -1,9 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Link2 } from "lucide-react";
 import { useId, useState } from "react";
-import { nameOf } from "../access";
-import { api, type PublicLink } from "../api";
-import { formatChangedFull } from "../format";
+import { LINK_KIND_MEANS, nameOf } from "../access";
+import { api, type LinkKind, type PublicLink } from "../api";
+import { formatCapacity, formatChangedFull, formatSize } from "../format";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
 
@@ -11,9 +11,12 @@ type Props = {
 	placeId: number;
 	itemId: number;
 	what: "file" | "folder";
-	/** True when the person may make a link here (not where sharing outside the project is off). */
+	/**
+	 * True when the person may make a link here, change what it lets visitors do, and make room in an upload-only one
+	 * (not where sharing outside the project is off).
+	 */
 	canMake: boolean;
-	/** Called after a link was made or removed, so the list and "who can see this" follow it. */
+	/** Called after a link was made, changed or removed, so the list and "who can see this" follow it. */
 	onChanged: () => void;
 };
 
@@ -24,10 +27,14 @@ type Props = {
 const madeHere = new Map<string, string>();
 const keyOf = (placeId: number, itemId: number, link: PublicLink) => `${placeId}/${itemId}/${link.made}`;
 
+type Asking = "remove" | "replace" | "show" | "reset";
+
 /**
  * "Public link", in the details panel, for whoever may share an item: making a link anyone can open without signing
  * in, its address (shown once, when it is made), who made it and how often it was used, and removing it or making a new
- * one in its place.
+ * one in its place. A folder's link either lets people open and download what is in it, or only send files into it
+ * (upload-only): chosen when it is made, and changed at the same address. An upload-only link says how much it has
+ * taken in; at its limit it takes no more until room is made.
  */
 export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }: Props) {
 	const queryClient = useQueryClient();
@@ -35,8 +42,9 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 	const link = useQuery({ queryKey: key, queryFn: () => api.link(placeId, itemId) });
 	const [busy, setBusy] = useState(false);
 	const [problem, setProblem] = useState<string>();
-	const [asking, setAsking] = useState<"remove" | "replace">();
+	const [asking, setAsking] = useState<Asking>();
 	const [copied, setCopied] = useState(false);
+	const [kind, setKind] = useState<LinkKind>("view");
 	const addressId = useId();
 
 	const change = async (run: () => Promise<PublicLink | null>) => {
@@ -57,8 +65,10 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 			setAsking(undefined);
 		}
 	};
-	const make = (replace: boolean) => change(() => api.makeLink(placeId, itemId, replace));
+	const make = (replace: boolean, as: LinkKind) => change(() => api.makeLink(placeId, itemId, replace, as));
 	const remove = () => change(() => api.removeLink(placeId, itemId).then(() => null));
+	const changeKind = (as: LinkKind) => change(() => api.setLinkKind(placeId, itemId, as));
+	const reset = () => change(() => api.resetLink(placeId, itemId));
 
 	const current = link.data;
 	const address = current ? (current.address ?? madeHere.get(keyOf(placeId, itemId, current))) : undefined;
@@ -76,12 +86,17 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 			) : !current ? (
 				<>
 					<p className="mt-0.5 text-sm text-muted-foreground">
-						Anyone with the link can open and download {reaches}, without signing in, until the link is removed.
+						{what === "folder"
+							? "Anyone with the link can use it without signing in, until the link is removed."
+							: `Anyone with the link can open and download ${reaches}, without signing in, until the link is removed.`}
 					</p>
 					{canMake ? (
-						<Button className="mt-3" disabled={busy} onClick={() => void make(false)}>
-							<Link2 aria-hidden /> Make a public link
-						</Button>
+						<>
+							{what === "folder" && <KindChoice name={`${addressId}-kind`} value={kind} disabled={busy} onChange={setKind} />}
+							<Button className="mt-3" disabled={busy} onClick={() => void make(false, what === "folder" ? kind : "view")}>
+								<Link2 aria-hidden /> Make a public link
+							</Button>
+						</>
 					) : (
 						<p className="mt-2 text-sm text-muted-foreground">Sharing outside the project is switched off here.</p>
 					)}
@@ -89,7 +104,9 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 			) : (
 				<>
 					<p className="mt-0.5 text-sm text-muted-foreground">
-						Anyone with the link can open and download {reaches}, without signing in.
+						{current.kind === "upload-only"
+							? "Anyone with the link can send files into this folder, without signing in. They cannot see what is in it."
+							: `Anyone with the link can open and download ${reaches}, without signing in.`}
 					</p>
 					{address ? (
 						<div className="mt-3">
@@ -123,6 +140,15 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 							a new link: the old address then stops working.
 						</p>
 					)}
+					{what === "folder" && canMake && (
+						<KindChoice
+							name={`${addressId}-change`}
+							value={current.kind}
+							disabled={busy}
+							// Showing the folder to everyone who has the address is asked first; hiding it is not.
+							onChange={(as) => (as === "view" ? setAsking("show") : void changeKind(as))}
+						/>
+					)}
 					<dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
 						<dt className="text-muted-foreground">Made</dt>
 						<dd>
@@ -135,7 +161,20 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 								? "Not yet"
 								: `${current.uses === 1 ? "Once" : `${current.uses} times`}, last on ${formatChangedFull(current.used ?? current.made)}`}
 						</dd>
+						{current.kind === "upload-only" && current.takenIn !== undefined && current.limit !== undefined && (
+							<>
+								<dt className="text-muted-foreground">Taken in</dt>
+								<dd>
+									<TakenIn takenIn={current.takenIn} limit={current.limit} />
+								</dd>
+							</>
+						)}
 					</dl>
+					{current.kind === "upload-only" && current.full && (
+						<p className="mt-2 text-sm text-attention">
+							It takes no more files until you make room. What was sent through it stays in the folder.
+						</p>
+					)}
 					{!current.works && (
 						<p className="mt-2 text-sm text-attention">
 							It opens nothing at the moment: whoever made it can no longer share this, or sharing outside the project
@@ -143,6 +182,11 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 						</p>
 					)}
 					<div className="mt-3 flex flex-wrap gap-2">
+						{canMake && current.kind === "upload-only" && (current.takenIn ?? 0) > 0 && (
+							<Button disabled={busy} onClick={() => setAsking("reset")}>
+								Make room for more
+							</Button>
+						)}
 						{canMake && (
 							<Button disabled={busy} onClick={() => setAsking("replace")}>
 								Make a new link
@@ -159,26 +203,112 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 					{problem}
 				</p>
 			)}
-			{asking && (
+			{asking && current && (
 				<Dialog
-					title={asking === "remove" ? "Remove the public link?" : "Make a new public link?"}
+					title={QUESTIONS[asking].title}
 					description={
-						asking === "remove"
-							? "Nobody can open it any more, and it cannot be brought back. A new link would get a new address."
-							: "The address you sent stops working for good. Only the new address opens it."
+						asking === "reset" && current.limit !== undefined
+							? `It takes in up to ${formatCapacity(current.limit)} again, counted from now. The files it took in stay where they are.`
+							: QUESTIONS[asking].description
 					}
 					onClose={() => setAsking(undefined)}
-					onSubmit={() => void (asking === "remove" ? remove() : make(true))}
+					onSubmit={() => {
+						if (asking === "remove") void remove();
+						else if (asking === "replace") void make(true, current.kind);
+						else if (asking === "show") void changeKind("view");
+						else void reset();
+					}}
 					footer={
 						<>
 							<Button onClick={() => setAsking(undefined)}>Cancel</Button>
 							<Button type="submit" variant={asking === "remove" ? "danger" : "primary"} disabled={busy}>
-								{asking === "remove" ? "Remove link" : "Make a new link"}
+								{QUESTIONS[asking].confirm}
 							</Button>
 						</>
 					}
 				/>
 			)}
 		</section>
+	);
+}
+
+/** What each change asks before it is made. A reset's description says the link's limit, so it is made there. */
+const QUESTIONS: Record<Asking, { title: string; description: string; confirm: string }> = {
+	remove: {
+		title: "Remove the public link?",
+		description: "Nobody can open it any more, and it cannot be brought back. A new link would get a new address.",
+		confirm: "Remove link",
+	},
+	replace: {
+		title: "Make a new public link?",
+		description: "The address you sent stops working for good. Only the new address opens it.",
+		confirm: "Make a new link",
+	},
+	show: {
+		title: "Let people with the link see this folder?",
+		description:
+			"Everyone who has the address can then open and download everything in this folder, including what others sent through it. The address stays the same.",
+		confirm: "Let them see it",
+	},
+	reset: { title: "Make room for more files?", description: "", confirm: "Make room" },
+};
+
+/** The choice of what a folder's public link lets people do. */
+function KindChoice({
+	name,
+	value,
+	disabled,
+	onChange,
+}: {
+	name: string;
+	value: LinkKind;
+	disabled: boolean;
+	onChange: (kind: LinkKind) => void;
+}) {
+	return (
+		<fieldset className="mt-3" disabled={disabled}>
+			<legend className="text-sm font-medium">People with the link can</legend>
+			{(["view", "upload-only"] as const).map((k) => (
+				<label key={k} className="flex cursor-pointer gap-2.5 rounded-md py-1.5 text-sm">
+					<input
+						type="radio"
+						name={name}
+						value={k}
+						checked={value === k}
+						onChange={() => onChange(k)}
+						className="mt-0.5 size-4 shrink-0 accent-foreground"
+					/>
+					<span>
+						<span className="font-medium">{LINK_KIND_MEANS[k].name}</span>
+						<span className="block text-muted-foreground">{LINK_KIND_MEANS[k].means}</span>
+					</span>
+				</label>
+			))}
+		</fieldset>
+	);
+}
+
+/** How much an upload-only link has taken in, against its limit. */
+function TakenIn({ takenIn, limit }: { takenIn: number; limit: number }) {
+	const share = limit > 0 ? Math.min(1, takenIn / limit) : 1;
+	const words = `${takenIn === 0 ? "Nothing yet" : formatSize(takenIn)} of ${formatCapacity(limit)}`;
+	return (
+		<>
+			<span>{words}</span>
+			<div
+				role="meter"
+				aria-label="Taken in through the link"
+				aria-valuemin={0}
+				aria-valuemax={limit}
+				aria-valuenow={Math.min(takenIn, limit)}
+				aria-valuetext={words}
+				className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted"
+			>
+				<div
+					className={`h-full ${share >= 1 ? "bg-attention" : "bg-foreground/60"}`}
+					style={{ width: `${Math.max(share * 100, takenIn > 0 ? 1 : 0)}%` }}
+				/>
+			</div>
+		</>
 	);
 }

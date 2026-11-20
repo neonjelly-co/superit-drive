@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link2, Mail, User, Users, X } from "lucide-react";
 import { useId, useState } from "react";
-import { GUEST_ROLE_MEANS, moreOf, nameOf, ROLE_MEANS, ROLE_NAME, whoOf, whyOf } from "../access";
+import { GUEST_ROLE_MEANS, moreOf, nameOf, ROLE_MEANS, ROLE_NAME, roleOf, whoOf, whyOf } from "../access";
 import { type Access, api, type Grantee, type Member, type Role } from "../api";
 import { Button } from "./button";
 
@@ -168,7 +168,7 @@ export function AccessSection({ placeId, itemId, what, canChange, canInvite, rol
 						// A guest's role and end date change only where a guest could be invited now.
 						const roleChangeable = changeable && !ownOnItem && (guestId === undefined || (canInvite && itemId !== null));
 						const Icon = a.link ? Link2 : a.everyone ? Users : a.guest ? Mail : User;
-						const said = [...(roleChangeable ? [] : [ROLE_NAME[a.role]]), ...(why ? [why] : []), ...moreOf(a)];
+						const said = [...(roleChangeable ? [] : [roleOf(a)]), ...(why ? [why] : []), ...moreOf(a)].filter(Boolean);
 						return (
 							// One person can have several lines, from several folders: the place in the list is the key.
 							<li key={i} className="flex items-center gap-2.5 border-b border-border py-2 last:border-0">

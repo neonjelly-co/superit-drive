@@ -246,7 +246,8 @@ function SharedOutsideList({ items }: { items: OutsideShare[] }) {
 								<p className="flex min-w-0 items-start gap-1.5">
 									{s.kind === "link" ? (
 										<>
-											<Link2 aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" /> Anyone with the link
+											<Link2 aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+											{s.linkKind === "upload-only" ? "Anyone with the upload-only link" : "Anyone with the link"}
 										</>
 									) : (
 										<>
@@ -256,7 +257,7 @@ function SharedOutsideList({ items }: { items: OutsideShare[] }) {
 									)}
 								</p>
 								<p className="text-muted-foreground">
-									{s.role === "editor" ? "Editor" : "Viewer"}
+									{s.linkKind === "upload-only" ? "Can only send files in" : s.role === "editor" ? "Editor" : "Viewer"}
 									{s.until ? `, until ${formatChanged(s.until)}` : ""}
 								</p>
 							</td>

@@ -84,7 +84,13 @@ export function DetailsPanel(props: Props) {
 					<>
 						<dt className="text-muted-foreground">Added by</dt>
 						<dd className="min-w-0 break-words">
-							A guest, <span className="font-mono">{item.addedBy.guest}</span>: from outside the project
+							{item.addedBy.guest ? (
+								<>
+									A guest, <span className="font-mono">{item.addedBy.guest}</span>: from outside the project
+								</>
+							) : (
+								"Someone with an upload-only link: from outside the project"
+							)}
 						</dd>
 					</>
 				)}
