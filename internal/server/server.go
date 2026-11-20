@@ -36,6 +36,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/mail"
 	"github.com/neonjelly-co/superit-drive/internal/members"
+	"github.com/neonjelly-co/superit-drive/internal/text"
 	"github.com/neonjelly-co/superit-drive/internal/transfers"
 )
 
@@ -80,7 +81,7 @@ type Server struct {
 	codeKey []byte
 	// codes are the addresses that asked for a code, waiting for SendCodes (guests.go); codesDropped is when asks were
 	// last dropped for want of room (Unix seconds), so that it is logged once a minute at most.
-	codes        chan string
+	codes        chan codeAsk
 	codesDropped atomic.Int64
 	// sendPolicy is the Content-Security-Policy of an upload-only link's page (sendin.go).
 	sendPolicy string
@@ -96,7 +97,7 @@ func New(c Config) *Server {
 		visitors: newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
 		guests:   newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
 		codeKey:  key.Sum(nil),
-		codes:    make(chan string, codesWaiting)}
+		codes:    make(chan codeAsk, codesWaiting)}
 	if c.Address != nil {
 		s.origin = originOf(c.Address)
 	}
@@ -399,12 +400,6 @@ func (s *Server) findWhere(w http.ResponseWriter, r *http.Request, rt route, c *
 	return true
 }
 
-// notHere is the one answer for a place, an item or an item in the trash that is not there, or that the person may not
-// do what they asked with.
-const notHere = "This is not in the Drive, or you have no access to it."
-
-const refusedOrigin = "This change did not come from the Drive's own page, so it was refused."
-
 // findPlace finds the place whose id is the path value name: one that is not in the trash, or, with inTrash, a shared
 // folder that is.
 func (s *Server) findPlace(r *http.Request, name string, inTrash bool) (index.Place, error) {
@@ -538,25 +533,34 @@ func personOf(m members.Member) access.Person {
 	return access.Person{UserID: m.UserID, Role: m.Role}
 }
 
-// refuse answers with an error the person can read: JSON for the API (the guests' too), a page under the public prefix
-// (where every "not here" is the one answer for a link that does not work), plain text otherwise.
-func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, message string) {
-	if strings.HasPrefix(r.URL.Path, GuestPrefix+"/api/") {
-		writeJSON(w, status, map[string]string{"error": message})
+// refuse answers with an error the person can read, in the request's language (text.Of), with values when the message
+// has verbs for them: JSON for the API (the guests' too), a page under the public prefix (where every "not here" is the
+// one answer for a link that does not work), plain text otherwise.
+func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, message text.Message, values ...any) {
+	if strings.HasPrefix(r.URL.Path, GuestPrefix+"/api/") || strings.HasPrefix(r.URL.Path, "/api/") {
+		refuseWith(w, r, status, nil, message, values...)
 		return
 	}
 	if underPublicPrefix(r.URL.Path) && !underGuestPrefix(r.URL.Path) {
-		s.visitorRefusal(w, status, message)
-		return
-	}
-	if strings.HasPrefix(r.URL.Path, "/api/") {
-		writeJSON(w, status, map[string]string{"error": message})
+		s.visitorRefusal(w, r, status, message, values...)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Language", text.Of(r).Code())
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(message + "\n"))
+	_, _ = w.Write([]byte(message.In(text.Of(r), values...) + "\n"))
+}
+
+// refuseWith answers with JSON that says why, in the request's language, as "error", and more besides. It is the one
+// place that writes "error": every text a person reads goes through text, in both languages.
+func refuseWith(w http.ResponseWriter, r *http.Request, status int, more map[string]any, message text.Message, values ...any) {
+	out := map[string]any{"error": message.In(text.Of(r), values...)}
+	for k, v := range more {
+		out[k] = v
+	}
+	w.Header().Set("Content-Language", text.Of(r).Code())
+	writeJSON(w, status, out)
 }
 
 // fail answers a request that went wrong on the Drive's side. The details go to the log, never to the person.
@@ -567,11 +571,11 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	}
 	s.log.Error("a request failed", "route", r.Pattern, "error", err)
-	s.refuse(w, r, http.StatusInternalServerError, "Something went wrong in the Drive. Try again in a moment.")
+	s.refuse(w, r, http.StatusInternalServerError, wentWrong)
 }
 
 func (s *Server) notFound(w http.ResponseWriter, r *http.Request, _ call) {
-	s.refuse(w, r, http.StatusNotFound, "There is nothing at this address.")
+	s.refuse(w, r, http.StatusNotFound, nothingHere)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

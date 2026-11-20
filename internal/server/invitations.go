@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -12,6 +11,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/mail"
 	"github.com/neonjelly-co/superit-drive/internal/members"
+	"github.com/neonjelly-co/superit-drive/internal/text"
 )
 
 // Inviting guests, from a member's "Give access": typing an address that is not a member's invites a guest to a file or
@@ -32,12 +32,6 @@ type invitationJSON struct {
 	Ends *time.Time `json:"ends"`
 }
 
-// cannotInvite says why guests cannot be invited, after why mail does not work.
-func cannotInvite(why string) string {
-	return "Inviting guests is unavailable: the Drive mails each guest an invitation and the codes they sign in with. " +
-		why + " Make a public link instead."
-}
-
 // invite gives access to a file or folder to whoever has the address typed in "Give access": a member, by name, as
 // giveAccess does; anyone else as a guest, invited by mail, as viewer or editor, until an end date if one is given. The
 // answer is who has access now, and whom it went to: "member", or "guest" (a new one is mailed an invitation).
@@ -54,11 +48,11 @@ func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 	if m, ok := s.members.Current().ByEmail(body.Address); ok {
 		// The address is a member's: an ordinary share with them, and never an end date.
 		if m.UserID == c.member.UserID {
-			s.refuse(w, r, http.StatusBadRequest, "You cannot give yourself access. Ask someone who may share it.")
+			s.refuse(w, r, http.StatusBadRequest, notToYourself)
 			return
 		}
 		if c.place.Kind == index.MyFiles && m.UserID == c.place.Owner {
-			s.refuse(w, r, http.StatusBadRequest, "This is in their own My files: they have it already.")
+			s.refuse(w, r, http.StatusBadRequest, theirOwnFiles)
 			return
 		}
 		if !access.Counts(c.access.Kind, access.Grant{On: c.item.ID, Member: m.UserID, Role: body.Role}) {
@@ -67,7 +61,7 @@ func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 		}
 		added, err := s.drive.Give(r.Context(), *c.place, c.item, index.Grantee{Member: m.UserID}, string(body.Role), c.member.UserID, nil)
 		if added {
-			s.tellShared(c, m, body.Role)
+			s.tellShared(c, m, body.Role, text.Of(r))
 		}
 		if err != nil {
 			s.changedAccess(w, r, c, err)
@@ -78,7 +72,7 @@ func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 	}
 	address, ok := guestAddress(body.Address)
 	if !ok {
-		s.refuse(w, r, http.StatusBadRequest, "This is not an email address the Drive can send mail to. Check it, and try again.")
+		s.refuse(w, r, http.StatusBadRequest, notAnEmail)
 		return
 	}
 	if !access.Decide(c.person, access.InviteGuest, c.access) {
@@ -90,7 +84,7 @@ func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 		return
 	}
 	if works, why := s.mail.Works(r.Context()); !works {
-		writeJSON(w, http.StatusConflict, map[string]any{"mail": false, "error": cannotInvite(why)})
+		refuseWith(w, r, http.StatusConflict, map[string]any{"mail": false}, cannotInvite, why.In(text.Of(r)))
 		return
 	}
 	guest, invited, err := s.drive.Invite(r.Context(), *c.place, *c.item, address, string(body.Role), ends, c.member.UserID)
@@ -99,7 +93,7 @@ func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 		return
 	}
 	if invited {
-		s.tellInvited(c, guest, body.Role, ends)
+		s.tellInvited(c, guest, body.Role, ends, text.Of(r))
 	}
 	s.answerAccess(w, r, c, map[string]any{"guest": guestJSON{ID: guest.ID, Address: guest.Address}, "invited": invited})
 }
@@ -108,13 +102,13 @@ func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 // false when the person was already answered.
 func (s *Server) invitationRules(w http.ResponseWriter, r *http.Request, c call, body invitationJSON) (ends time.Time, ok bool) {
 	if !access.Counts(c.access.Kind, access.Grant{On: c.item.ID, Guest: 1, Role: body.Role}) {
-		s.refuse(w, r, http.StatusBadRequest, "A guest is given a file or folder as viewer or editor.")
+		s.refuse(w, r, http.StatusBadRequest, guestRoles)
 		return time.Time{}, false
 	}
 	if body.Ends != nil {
 		ends = body.Ends.UTC().Truncate(time.Millisecond)
 		if !ends.After(s.drive.Now()) {
-			s.refuse(w, r, http.StatusBadRequest, "The end date has passed. Choose one that is still to come, or none.")
+			s.refuse(w, r, http.StatusBadRequest, endHasPassed)
 			return time.Time{}, false
 		}
 	}
@@ -204,26 +198,27 @@ func (s *Server) guestLink(place, item int64, address string) string {
 
 // tellInvited mails a guest that the person asking has just invited them: who, to what, in which project, what they
 // may do, until when, and the link to it. It returns at once: the mail is sent in the background. It never names a
-// folder above what was shared, nor the shared folder it is in.
-func (s *Server) tellInvited(c call, guest index.Guest, role access.Role, ends time.Time) {
-	what := "the file"
+// folder above what was shared, nor the shared folder it is in. It is in l, the language of the page the person
+// invited from: the Drive knows nothing else of a guest it has not met.
+func (s *Server) tellInvited(c call, guest index.Guest, role access.Role, ends time.Time, l text.Lang) {
+	what := invitedToFile
 	if c.item.Folder {
-		what = "the folder"
+		what = invitedToFolder
 	}
 	sharer, name := mail.Clean(nameOf(c.member)), mail.Clean(c.item.Name)
-	can := "You can open and download it."
+	can := canOpen.In(l)
 	if role == access.Editor && c.item.Folder {
-		can += " As an editor you can also upload, make folders, rename, move and delete inside it."
+		can += " " + guestCanEdit.In(l)
 	}
-	lines := []string{fmt.Sprintf("%s invited you to %s “%s” in the Drive of %s.", sharer, what, name, mail.Clean(s.project)), can}
+	lines := []string{what.In(l, sharer, name, mail.Clean(s.project)), can}
 	if !ends.IsZero() {
-		lines = append(lines, "You have access until "+ends.UTC().Format("2 January 2006, 15:04 MST")+".")
+		lines = append(lines, accessUntil.In(l, text.Moment(l, ends)))
 	}
-	body := strings.Join(lines, "\n") + "\n\nOpen it: " + s.guestLink(c.place.ID, c.item.ID, guest.Address) + "\n\n" +
-		"You will be asked to confirm your address with a code we mail to it. You need no account.\n"
+	body := strings.Join(lines, "\n") + "\n\n" + openIt.In(l, s.guestLink(c.place.ID, c.item.ID, guest.Address)) + "\n\n" +
+		confirmByCode.In(l) + "\n"
 	s.mail.Send(mail.Message{
 		To:      guest.Address,
-		Subject: fmt.Sprintf("%s invited you to “%s”", sharer, name),
+		Subject: invitedSubject.In(l, sharer, name),
 		Body:    body,
 		About:   []any{"mail", "invited", "guest", guest.ID, "place", c.place.ID, "item", c.item.ID},
 	})

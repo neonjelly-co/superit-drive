@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/mail"
+	"github.com/neonjelly-co/superit-drive/internal/text"
 )
 
 // The guests' part of the public prefix: signing in with a code mailed to them, their pages, and what they do with what
@@ -41,14 +41,6 @@ import (
 
 // codesWaiting is how many asks for a code wait for SendCodes; more are dropped, and answered the same.
 const codesWaiting = 64
-
-const (
-	codeAsked   = "If anything on this Drive is shared with this address, a code is on its way to it. It works for 10 minutes."
-	wrongCode   = "This code is not right, or it no longer works. Check it, or ask for a new one."
-	tooManyCode = "Too many wrong codes were tried on this Drive in the last hour. Try again later."
-	signInFirst = "Sign in to see this."
-	notAnEmail  = "This is not an email address the Drive can send mail to. Check it, and try again."
-)
 
 // guardGuest is guard for a route under the guests' prefix: only from the Drive's own pages for a change, then the guest
 // whose session the cookie names (or nobody, which only signing in allows), the place and the item the request is
@@ -82,7 +74,7 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 		s.clearGuestCookie(w)
 	}
 	if c.guest == nil && rt.action != access.SignInAsGuest {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": signInFirst, "signIn": true})
+		refuseWith(w, r, http.StatusUnauthorized, map[string]any{"signIn": true}, signInFirst)
 		return
 	}
 	if rt.place != "" && !s.findWhere(w, r, rt, &c) {
@@ -210,7 +202,7 @@ func (s *Server) toGuestPage(w http.ResponseWriter, r *http.Request, _ call) {
 //	GET /s/guest/[?place=…&item=…]
 func (s *Server) guestPage(w http.ResponseWriter, r *http.Request, _ call) {
 	if _, err := fs.Stat(s.ui, "guest.html"); err != nil {
-		s.refuse(w, r, http.StatusServiceUnavailable, "The interface was not built into this Drive. Build it with `make build`.")
+		s.refuse(w, r, http.StatusServiceUnavailable, noInterface)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-cache")
@@ -245,13 +237,13 @@ func (s *Server) askForCode(w http.ResponseWriter, r *http.Request, _ call) {
 		return
 	}
 	select {
-	case s.codes <- address:
+	case s.codes <- codeAsk{address, text.Of(r)}:
 	default:
 		if now := time.Now().Unix(); s.codesDropped.Swap(now) < now-60 {
 			s.log.Warn("asks for a code were dropped: too many are waiting")
 		}
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"message": codeAsked})
+	writeJSON(w, http.StatusAccepted, map[string]string{"message": codeAsked.In(text.Of(r))})
 }
 
 // signIn signs a guest in with a code mailed to their address, and keeps them signed in on this browser for
@@ -274,14 +266,14 @@ func (s *Server) signIn(w http.ResponseWriter, r *http.Request, _ call) {
 	}
 	code := strings.Join(strings.Fields(body.Code), "")
 	if len(code) != 6 || strings.Trim(code, "0123456789") != "" {
-		s.refuse(w, r, http.StatusBadRequest, "A code is six digits. Type it as the mail has it.")
+		s.refuse(w, r, http.StatusBadRequest, sixDigits)
 		return
 	}
 	g, token, ends, err := s.drive.SignIn(r.Context(), address, code, s.codeKey)
 	switch {
 	case errors.Is(err, drive.ErrTooManyTries):
 		w.Header().Set("Retry-After", "3600")
-		s.refuse(w, r, http.StatusTooManyRequests, tooManyCode)
+		s.refuse(w, r, http.StatusTooManyRequests, tooManyCodes)
 		return
 	case errors.Is(err, drive.ErrWrongCode):
 		s.refuse(w, r, http.StatusBadRequest, wrongCode)
@@ -437,7 +429,7 @@ func (s *Server) guestItem(w http.ResponseWriter, r *http.Request, c call) {
 //	GET /s/guest/api/places/{place}/items/{folder}/items[?wait]
 //	200 {"path", "role", "can", "checking", "items": [{"id", "name", "kind", "size", "changed", "opens", "can"}]}
 func (s *Server) guestItems(w http.ResponseWriter, r *http.Request, c call) {
-	folder, ok := s.folder(w, r, c, "This is a file, not a folder.")
+	folder, ok := s.folder(w, r, c, notAFolderToList)
 	if !ok {
 		return
 	}
@@ -474,7 +466,7 @@ func (s *Server) guestMove(w http.ResponseWriter, r *http.Request, c call) {
 	}
 	folderID, ok := anId(string(body.To))
 	if body.To == nil || !ok {
-		s.refuse(w, r, http.StatusBadRequest, "The Drive could not read this request.")
+		s.refuse(w, r, http.StatusBadRequest, unreadable)
 		return
 	}
 	var folder index.Item
@@ -506,7 +498,7 @@ func (s *Server) guestMove(w http.ResponseWriter, r *http.Request, c call) {
 		s.used(r, c)
 		writeJSON(w, http.StatusOK, itemOf(it))
 	case errors.As(err, &taken):
-		s.refuseTaken(w, r, taken, "There is already something called “"+taken.Name+"” in that folder. Rename one of them first.")
+		s.refuseTaken(w, r, taken, takenThere)
 	default:
 		s.changeFailed(w, r, err, c.item.Name)
 	}
@@ -536,15 +528,21 @@ func (s *Server) SendCodes(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case address := <-s.codes:
-			if err := s.sendCode(ctx, address); err != nil && ctx.Err() == nil {
+		case ask := <-s.codes:
+			if err := s.sendCode(ctx, ask.address, ask.lang); err != nil && ctx.Err() == nil {
 				s.log.Error("a guest's code could not be made", "error", err)
 			}
 		}
 	}
 }
 
-func (s *Server) sendCode(ctx context.Context, address string) error {
+// codeAsk is an address that asked for a code, and the language of the page that asked: the code's mail is in it.
+type codeAsk struct {
+	address string
+	lang    text.Lang
+}
+
+func (s *Server) sendCode(ctx context.Context, address string, l text.Lang) error {
 	if _, member := s.members.Current().ByEmail(address); member {
 		return nil
 	}
@@ -567,13 +565,11 @@ func (s *Server) sendCode(ctx context.Context, address string) error {
 		s.log.Info("a guest's code was not sent: too many codes were sent lately", "guest", g.ID)
 		return nil
 	}
-	project := mail.Clean(s.project)
 	_ = s.mail.Deliver(ctx, mail.Message{
 		To:      g.Address,
-		Subject: "Your code for the Drive of " + project,
-		Body: fmt.Sprintf("Your code is %s\n\nType it on the page where you asked for it. It works once, for 10 minutes.\n\n"+
-			"If you did not ask for it, you can ignore this mail: nobody can sign in without the code.\n", code),
-		About: []any{"mail", "code", "guest", g.ID},
+		Subject: codeSubject.In(l, mail.Clean(s.project)),
+		Body:    codeBody.In(l, code),
+		About:   []any{"mail", "code", "guest", g.ID},
 	})
 	return nil
 }

@@ -85,9 +85,6 @@ func linkWorks(l index.Link, where *access.Place, list *members.List) bool {
 	return access.Decide(visitorOf(l, list), access.EnterThroughLink, where)
 }
 
-// fileLinkKind is the answer to an upload-only link asked for on a file.
-const fileLinkKind = "Only a folder's link can be upload-only. A file's link lets people open and download it."
-
 // linkKindOf reads the kind of link a request asks for: "view" (the default) or "upload-only". ok is false when the
 // person was already answered.
 func (s *Server) linkKindOf(w http.ResponseWriter, r *http.Request, kind string) (string, bool) {
@@ -97,7 +94,7 @@ func (s *Server) linkKindOf(w http.ResponseWriter, r *http.Request, kind string)
 	case index.UploadLink:
 		return kind, true
 	}
-	s.refuse(w, r, http.StatusBadRequest, "A public link is either “view” or “upload-only”.")
+	s.refuse(w, r, http.StatusBadRequest, linkKinds)
 	return "", false
 }
 
@@ -117,7 +114,7 @@ func (s *Server) makeLink(w http.ResponseWriter, r *http.Request, c call) {
 		Kind    string `json:"kind"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-		s.refuse(w, r, http.StatusBadRequest, "The Drive could not read this request.")
+		s.refuse(w, r, http.StatusBadRequest, unreadable)
 		return
 	}
 	kind, ok := s.linkKindOf(w, r, body.Kind)
@@ -130,10 +127,7 @@ func (s *Server) makeLink(w http.ResponseWriter, r *http.Request, c call) {
 		s.refuse(w, r, http.StatusBadRequest, fileLinkKind)
 		return
 	case errors.Is(err, index.ErrLinkExists):
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":  "This already has a public link. Make a new one in its place to change its address.",
-			"exists": true,
-		})
+		refuseWith(w, r, http.StatusConflict, map[string]any{"exists": true}, linkExists)
 		return
 	case errors.Is(err, index.ErrNoItem), errors.Is(err, drive.ErrPlaceGone):
 		// It went to the trash after guard found it: the same answer guard gives from now on.
@@ -163,7 +157,7 @@ func (s *Server) setLinkKind(w http.ResponseWriter, r *http.Request, c call) {
 		return
 	}
 	if body.Kind == "" {
-		s.refuse(w, r, http.StatusBadRequest, "A public link is either “view” or “upload-only”.")
+		s.refuse(w, r, http.StatusBadRequest, linkKinds)
 		return
 	}
 	kind, ok := s.linkKindOf(w, r, body.Kind)
@@ -191,7 +185,7 @@ func (s *Server) changedLink(w http.ResponseWriter, r *http.Request, c call, l i
 	case errors.Is(err, index.ErrLinkKind):
 		s.refuse(w, r, http.StatusBadRequest, fileLinkKind)
 	case errors.Is(err, index.ErrNoLink):
-		s.refuse(w, r, http.StatusConflict, "This has no public link. Make one first.")
+		s.refuse(w, r, http.StatusConflict, noLinkYet)
 	case errors.Is(err, index.ErrNoItem), errors.Is(err, drive.ErrPlaceGone):
 		s.refuse(w, r, http.StatusNotFound, notHere)
 	case err != nil:

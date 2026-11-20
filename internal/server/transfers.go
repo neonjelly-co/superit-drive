@@ -36,9 +36,6 @@ const (
 	stall = 2 * time.Minute
 	// busyRetry is when an upload refused for want of a slot should be sent again, in seconds.
 	busyRetry = "2"
-
-	busyMessage    = "The Drive is busy with other uploads and downloads. This one waits its turn."
-	restartMessage = "The Drive storage cannot continue an upload where it stopped, so this upload starts again from the beginning."
 )
 
 // classOf is whose line a transfer waits in: an outsider's (a visitor's or a guest's), for one of the few slots they
@@ -66,11 +63,11 @@ func (s *Server) waitTurn(w http.ResponseWriter, r *http.Request, c call) (relea
 
 // tryTurn takes a transfer slot if it is the upload's turn (key keeps its place in line), or answers 503. A guest's
 // upload is in the outsiders' line.
-func (s *Server) tryTurn(w http.ResponseWriter, c call, key string) (release func(), ok bool) {
+func (s *Server) tryTurn(w http.ResponseWriter, r *http.Request, c call, key string) (release func(), ok bool) {
 	release, ok = s.slots.Try(classOf(c), key)
 	if !ok {
 		w.Header().Set("Retry-After", busyRetry)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": busyMessage, "busy": true})
+		refuseWith(w, r, http.StatusServiceUnavailable, map[string]any{"busy": true}, busyMessage)
 	}
 	return release, ok
 }
@@ -142,7 +139,7 @@ func (d deadlineReader) Read(p []byte) (int, error) {
 //	If-Range: "…" | <date>                                  (optional)
 func (s *Server) download(w http.ResponseWriter, r *http.Request, c call) {
 	if c.item.Folder {
-		s.refuse(w, r, http.StatusNotFound, "This is a folder. Download it as a zip instead.")
+		s.refuse(w, r, http.StatusNotFound, aFolderToZip)
 		return
 	}
 	s.sendFile(w, r, c, false)
@@ -156,7 +153,7 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request, c call) {
 //	GET /api/places/{place}/items/{item}/open
 func (s *Server) open(w http.ResponseWriter, r *http.Request, c call) {
 	if c.item.Folder {
-		s.refuse(w, r, http.StatusNotFound, "This is a folder. Open it in the list instead.")
+		s.refuse(w, r, http.StatusNotFound, aFolderToOpen)
 		return
 	}
 	s.sendFile(w, r, c, true)
@@ -177,10 +174,10 @@ func (s *Server) sendFile(w http.ResponseWriter, r *http.Request, c call, inline
 		if past.Size >= 0 {
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", past.Size))
 		}
-		s.refuse(w, r, http.StatusRequestedRangeNotSatisfiable, "This part of the file starts after its end.")
+		s.refuse(w, r, http.StatusRequestedRangeNotSatisfiable, pastTheEnd)
 		return
 	case errors.Is(err, drive.ErrGone):
-		s.refuse(w, r, http.StatusNotFound, "This file is no longer on the Drive storage. Reload the page to see what is there now.")
+		s.refuse(w, r, http.StatusNotFound, fileGone)
 		return
 	case err != nil:
 		s.failed(w, r, err)
@@ -289,7 +286,7 @@ func disposition(kind, name string) string {
 // An item that is not directly in the folder is answered as one that does not exist. A folder with more than
 // drive.MaxZipEntries files and folders is refused (400): download the folders inside it instead.
 func (s *Server) zip(w http.ResponseWriter, r *http.Request, c call) {
-	folder, ok := s.folder(w, r, c, "Only a folder downloads as a zip. Download the file itself instead.")
+	folder, ok := s.folder(w, r, c, onlyFoldersZip)
 	if !ok {
 		return
 	}
@@ -299,7 +296,7 @@ func (s *Server) zip(w http.ResponseWriter, r *http.Request, c call) {
 		for _, v := range raw {
 			id, err := strconv.ParseInt(v, 10, 64)
 			if err != nil || id <= 0 {
-				s.refuse(w, r, http.StatusBadRequest, "The Drive could not read this request.")
+				s.refuse(w, r, http.StatusBadRequest, unreadable)
 				return
 			}
 			only = append(only, id)
@@ -350,10 +347,9 @@ func (s *Server) zip(w http.ResponseWriter, r *http.Request, c call) {
 	case errors.Is(err, index.ErrNoItem):
 		s.refuse(w, r, http.StatusNotFound, notHere)
 	case errors.Is(err, drive.ErrTooMany):
-		s.refuse(w, r, http.StatusBadRequest, fmt.Sprintf("This holds more than %d files and folders, too many for one zip. "+
-			"Download the folders inside it one at a time.", drive.MaxZipEntries))
+		s.refuse(w, r, http.StatusBadRequest, tooManyForAZip, drive.MaxZipEntries)
 	case errors.Is(err, drive.ErrGone):
-		s.refuse(w, r, http.StatusNotFound, "This folder is no longer on the Drive storage. Go up a level to see what is there now.")
+		s.refuse(w, r, http.StatusNotFound, folderGoneGoUp)
 	default:
 		s.failed(w, r, err)
 	}
@@ -385,12 +381,12 @@ type uploadJSON struct {
 // When it is not its turn for a transfer slot, the answer is 503 with "busy" and Retry-After, before any of the body is
 // read: send it again with the same turn, which keeps its place in line.
 func (s *Server) upload(w http.ResponseWriter, r *http.Request, c call) {
-	folder, ok := s.folder(w, r, c, "Files can only be uploaded into a folder.")
+	folder, ok := s.folder(w, r, c, onlyIntoFolders)
 	if !ok {
 		return
 	}
 	if r.ContentLength < 0 {
-		s.refuse(w, r, http.StatusLengthRequired, "The upload did not say how large the file is, so nothing was stored. Try again.")
+		s.refuse(w, r, http.StatusLengthRequired, uploadNoLength)
 		return
 	}
 	name := r.URL.Query().Get("name")
@@ -398,7 +394,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, c call) {
 	if !ok {
 		return
 	}
-	release, ok := s.tryTurn(w, c, turnKey(r, c))
+	release, ok := s.tryTurn(w, r, c, turnKey(r, c))
 	if !ok {
 		return
 	}
@@ -413,7 +409,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, c call) {
 	case errors.Is(err, drive.ErrCutOff) || r.Context().Err() != nil:
 		// The person's connection ended (or they cancelled); nothing was stored. Not the Drive's failure.
 		s.log.Info("an upload ended before the whole file arrived; nothing was stored", "error", err)
-		s.refuse(w, r, http.StatusBadRequest, "The upload stopped before the whole file arrived, so nothing was stored. Try again.")
+		s.refuse(w, r, http.StatusBadRequest, uploadCutOff)
 	default:
 		s.uploadFailed(w, r, err, name, existing)
 	}
@@ -423,7 +419,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, c call) {
 func (s *Server) existing(w http.ResponseWriter, r *http.Request) (drive.Existing, bool) {
 	existing := drive.Existing(r.URL.Query().Get("existing"))
 	if existing != drive.Ask && existing != drive.Replace && existing != drive.KeepBoth {
-		s.refuse(w, r, http.StatusBadRequest, "The upload asked for something the Drive does not do with a name that is taken.")
+		s.refuse(w, r, http.StatusBadRequest, uploadExisting)
 		return "", false
 	}
 	return existing, true
@@ -435,19 +431,19 @@ func (s *Server) uploadFailed(w http.ResponseWriter, r *http.Request, err error,
 	var taken *drive.Taken
 	switch {
 	case errors.As(err, &bad):
-		s.refuse(w, r, http.StatusBadRequest, bad.Error())
+		s.refuse(w, r, http.StatusBadRequest, bad.Why)
 	case errors.As(err, &taken) && taken.Folder && existing == drive.Replace:
-		s.refuseTaken(w, r, taken, "There is a folder called “"+taken.Name+"” here, and a file cannot replace a folder. Keep both instead.")
+		s.refuseTaken(w, r, taken, fileOverFolder)
 	case errors.As(err, &taken) && taken.Folder:
-		s.refuseTaken(w, r, taken, "There is already a folder called “"+taken.Name+"” here.")
+		s.refuseTaken(w, r, taken, folderTaken)
 	case errors.As(err, &taken):
-		s.refuseTaken(w, r, taken, "There is already a file called “"+taken.Name+"” here.")
+		s.refuseTaken(w, r, taken, fileTaken)
 	case errors.Is(err, drive.ErrBusy):
-		s.refuse(w, r, http.StatusConflict, "“"+name+"” is being uploaded or changed right now. Try again when that is done.")
+		s.refuse(w, r, http.StatusConflict, beingChanged, name)
 	case errors.Is(err, drive.ErrGone):
-		s.refuse(w, r, http.StatusConflict, "This folder is no longer on the Drive storage. Reload the page and try again.")
+		s.refuse(w, r, http.StatusConflict, folderGoneReload)
 	case errors.Is(err, drive.ErrFull):
-		s.refuse(w, r, http.StatusInsufficientStorage, "The Drive storage is full, so this file was not uploaded.")
+		s.refuse(w, r, http.StatusInsufficientStorage, fullNotUploaded)
 	default:
 		s.failed(w, r, err)
 	}
@@ -490,14 +486,14 @@ func (s *Server) sessionOf(u index.Upload, offset int64, resumable bool) session
 // The name is looked at now, so that a person is asked before the file travels: when it is taken and existing does
 // not say what to do, the answer is 409 with "exists", as for an upload in one request.
 func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, c call) {
-	folder, ok := s.folder(w, r, c, "Files can only be uploaded into a folder.")
+	folder, ok := s.folder(w, r, c, onlyIntoFolders)
 	if !ok {
 		return
 	}
 	name := r.URL.Query().Get("name")
 	size, err := strconv.ParseInt(r.URL.Query().Get("size"), 10, 64)
 	if err != nil || size <= 0 {
-		s.refuse(w, r, http.StatusBadRequest, "The upload did not say how large the file is.")
+		s.refuse(w, r, http.StatusBadRequest, uploadNoSize)
 		return
 	}
 	existing, ok := s.existing(w, r)
@@ -552,15 +548,15 @@ func (s *Server) uploadState(w http.ResponseWriter, r *http.Request, c call) {
 // A part cut off keeps what arrived, where the upload is resumable: ask where it stands, and go on from there.
 func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, c call) {
 	if r.ContentLength < 0 {
-		s.refuse(w, r, http.StatusLengthRequired, "The part did not say how large it is, so nothing was stored. Try again.")
+		s.refuse(w, r, http.StatusLengthRequired, partNoLength)
 		return
 	}
 	offset, err := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
 	if err != nil || offset < 0 || r.ContentLength == 0 {
-		s.refuse(w, r, http.StatusBadRequest, "The Drive could not read this request.")
+		s.refuse(w, r, http.StatusBadRequest, unreadable)
 		return
 	}
-	release, ok := s.tryTurn(w, c, turnKey(r, c))
+	release, ok := s.tryTurn(w, r, c, turnKey(r, c))
 	if !ok {
 		return
 	}
@@ -573,18 +569,18 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, c call) {
 	case err == nil:
 		writeJSON(w, http.StatusOK, map[string]int64{"offset": end, "size": c.upload.Size})
 	case errors.As(err, &wrong):
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "This part does not follow on from what has arrived.", "offset": wrong.Offset})
+		refuseWith(w, r, http.StatusConflict, map[string]any{"offset": wrong.Offset}, partNotNext)
 	case errors.Is(err, drive.ErrRestart):
-		writeJSON(w, http.StatusConflict, map[string]any{"error": restartMessage, "offset": 0, "resumable": false})
+		refuseWith(w, r, http.StatusConflict, map[string]any{"offset": 0, "resumable": false}, restartMessage)
 	case errors.Is(err, drive.ErrBadPart):
-		s.refuse(w, r, http.StatusBadRequest, "This part does not fit the file.")
+		s.refuse(w, r, http.StatusBadRequest, partDoesNotFit)
 	case errors.Is(err, drive.ErrBusy):
-		s.refuse(w, r, http.StatusConflict, "Another part of this upload is still on its way. Ask where it stands, and go on from there.")
+		s.refuse(w, r, http.StatusConflict, partOnItsWay)
 	case errors.Is(err, drive.ErrCutOff) || r.Context().Err() != nil:
 		s.log.Info("a part of an upload ended before it all arrived", "error", err)
-		s.refuse(w, r, http.StatusBadRequest, "The part stopped before it all arrived. Ask where the upload stands, and go on from there.")
+		s.refuse(w, r, http.StatusBadRequest, partCutOff)
 	case errors.Is(err, drive.ErrFull):
-		s.refuse(w, r, http.StatusInsufficientStorage, "The Drive storage is full, so this file was not uploaded.")
+		s.refuse(w, r, http.StatusInsufficientStorage, fullNotUploaded)
 	default:
 		s.failed(w, r, err)
 	}
@@ -607,7 +603,7 @@ func (s *Server) finishUpload(w http.ResponseWriter, r *http.Request, c call) {
 		s.used(r, c)
 		writeJSON(w, http.StatusCreated, uploadJSON{itemJSON: itemOf(up.Item), Replaced: up.Replaced != nil})
 	case errors.As(err, &incomplete):
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "Not all of the file has arrived yet.", "offset": incomplete.Offset})
+		refuseWith(w, r, http.StatusConflict, map[string]any{"offset": incomplete.Offset}, notAllArrived)
 	default:
 		s.uploadFailed(w, r, err, c.upload.Name, existing)
 	}

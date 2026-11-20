@@ -590,19 +590,27 @@ func TestTheSendPagesPolicyAllowsOnlyItsOwnScript(t *testing.T) {
 			t.Errorf("the send page's policy allows %q", loose)
 		}
 	}
-	rec := httptest.NewRecorder()
-	s.renderVisitor(rec, http.StatusOK, visitorView{Name: "Invoices", By: "Shared by Bence", Folder: true, Send: true})
-	if got := rec.Header().Get("Content-Security-Policy"); got != s.sendPolicy {
-		t.Fatalf("the send page went out with the policy %q", got)
-	}
-	page := rec.Body.String()
-	scripts := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(page, -1)
-	styles := regexp.MustCompile(`(?s)<style>(.*?)</style>`).FindAllStringSubmatch(page, -1)
-	if len(scripts) != 1 || styleHash(scripts[0][1]) != styleHash(sendScript) || len(styles) != 1 || styleHash(styles[0][1]) != styleHash(visitorStyle) {
-		t.Fatalf("the send page's script and style do not match their hashes:\n%s", page)
-	}
-	if strings.Count(page, "<script") != 1 || strings.Contains(page, "<form") || strings.Contains(page, " on") && regexp.MustCompile(` on[a-z]+=`).MatchString(page) {
-		t.Fatalf("the send page has more than its one script, or a form, or an inline handler:\n%s", page)
+	// One script, and one hash, in every language: the words are in the page (data-words), not in the script.
+	for _, lang := range []string{"en", "hu"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/s/token", nil)
+		req.Header.Set("Accept-Language", lang)
+		s.renderVisitor(rec, req, http.StatusOK, visitorView{Name: "Invoices", By: "Shared by Bence", Folder: true, Send: true})
+		if got := rec.Header().Get("Content-Security-Policy"); got != s.sendPolicy {
+			t.Fatalf("the send page in %s went out with the policy %q", lang, got)
+		}
+		page := rec.Body.String()
+		scripts := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(page, -1)
+		styles := regexp.MustCompile(`(?s)<style>(.*?)</style>`).FindAllStringSubmatch(page, -1)
+		if len(scripts) != 1 || styleHash(scripts[0][1]) != styleHash(sendScript) || len(styles) != 1 || styleHash(styles[0][1]) != styleHash(visitorStyle) {
+			t.Fatalf("the send page's script and style in %s do not match their hashes:\n%s", lang, page)
+		}
+		if strings.Count(page, "<script") != 1 || strings.Contains(page, "<form") || strings.Contains(page, " on") && regexp.MustCompile(` on[a-z]+=`).MatchString(page) {
+			t.Fatalf("the send page in %s has more than its one script, or a form, or an inline handler:\n%s", lang, page)
+		}
+		if !strings.Contains(page, `<html lang="`+lang+`">`) || !strings.Contains(page, `data-words="`) {
+			t.Fatalf("the send page in %s does not say its language, or holds no words for its script:\n%s", lang, page)
+		}
 	}
 	// Without the Drive's address, the page's own origin.
 	if p := sendPolicyFor(""); !strings.Contains(p, "connect-src 'self';") {
@@ -613,8 +621,8 @@ func TestTheSendPagesPolicyAllowsOnlyItsOwnScript(t *testing.T) {
 		"a view link's page":                  {Name: "Invoices", By: "Shared by Bence", Folder: true},
 		"the page of a full upload-only link": {Name: "Invoices", By: "Shared by Bence", Folder: true, Send: true, Full: true},
 	} {
-		rec = httptest.NewRecorder()
-		s.renderVisitor(rec, http.StatusOK, v)
+		rec := httptest.NewRecorder()
+		s.renderVisitor(rec, httptest.NewRequest(http.MethodGet, "/s/token", nil), http.StatusOK, v)
 		if strings.Contains(rec.Body.String(), "<script") || rec.Header().Get("Content-Security-Policy") != "" {
 			t.Fatalf("%s has a script, or a policy of its own: %q", what, rec.Header().Get("Content-Security-Policy"))
 		}

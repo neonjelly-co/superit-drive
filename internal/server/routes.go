@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/members"
 	"github.com/neonjelly-co/superit-drive/internal/storage"
+	"github.com/neonjelly-co/superit-drive/internal/text"
 )
 
 // routes is every route the Drive answers. Add new ones here, each with the action it is. A route that takes a place
@@ -185,9 +185,11 @@ type rollbackJSON struct {
 // admin oversees, and switches sharing outside the project), and, for seven days after the storage was put back to a
 // snapshot, that it was (rollback): who did it, and to when. Only members are told; visitors and guests never ask here.
 func (s *Server) me(w http.ResponseWriter, r *http.Request, c call) {
-	invite, why := s.mail.Known()
+	invite, mailWhy := s.mail.Known()
+	why := ""
 	if !invite {
-		why = cannotInvite(why)
+		l := text.Of(r)
+		why = cannotInvite.In(l, mailWhy.In(l))
 	}
 	sw, err := s.drive.ProjectOutsideOff(r.Context())
 	if err != nil {
@@ -365,7 +367,7 @@ func pathOf(folders []index.Item) []folderJSON {
 
 // folder is the folder a request in a place is about: the item, which must be a folder, or the place's top folder
 // (nil) when the route has no item. ok is false when the person was already answered.
-func (s *Server) folder(w http.ResponseWriter, r *http.Request, c call, notAFolder string) (folder *index.Item, ok bool) {
+func (s *Server) folder(w http.ResponseWriter, r *http.Request, c call, notAFolder text.Message) (folder *index.Item, ok bool) {
 	if c.item == nil {
 		return nil, true
 	}
@@ -453,7 +455,7 @@ const recheckWait = 10 * time.Second
 //	GET /api/places/{place}/items[?wait]
 //	GET /api/places/{place}/items/{folder}/items[?wait]
 func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
-	folder, ok := s.folder(w, r, c, "This is a file, not a folder.")
+	folder, ok := s.folder(w, r, c, notAFolderToList)
 	if !ok {
 		return
 	}
@@ -627,19 +629,19 @@ func (s *Server) openFolders(ctx context.Context, who access.Person, p index.Pla
 	return pathOf(open), nil
 }
 
-// refuseTaken answers 409 for a name that is taken, saying what kind of item has it.
-func (s *Server) refuseTaken(w http.ResponseWriter, r *http.Request, taken *drive.Taken, message string) {
+// refuseTaken answers 409 for a name that is taken, saying what kind of item has it. message says it with the name.
+func (s *Server) refuseTaken(w http.ResponseWriter, r *http.Request, taken *drive.Taken, message text.Message) {
 	kind := "file"
 	if taken.Folder {
 		kind = "folder"
 	}
-	writeJSON(w, http.StatusConflict, map[string]string{"error": message, "exists": kind, "name": taken.Name})
+	refuseWith(w, r, http.StatusConflict, map[string]any{"exists": kind, "name": taken.Name}, message, taken.Name)
 }
 
 // readBody reads a small JSON body into v. ok is false when the person was already answered.
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(v); err != nil {
-		s.refuse(w, r, http.StatusBadRequest, "The Drive could not read this request.")
+		s.refuse(w, r, http.StatusBadRequest, unreadable)
 		return false
 	}
 	return true
@@ -650,7 +652,7 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request, v any) bool {
 //	POST /api/places/{place}/folders               {"name": "Invoices"}
 //	POST /api/places/{place}/items/{folder}/folders
 func (s *Server) newFolder(w http.ResponseWriter, r *http.Request, c call) {
-	folder, ok := s.folder(w, r, c, "A folder can only be made inside a folder.")
+	folder, ok := s.folder(w, r, c, notAFolderToMake)
 	if !ok {
 		return
 	}
@@ -696,24 +698,24 @@ func (s *Server) changeFailed(w http.ResponseWriter, r *http.Request, err error,
 	var taken *drive.Taken
 	switch {
 	case errors.As(err, &bad):
-		s.refuse(w, r, http.StatusBadRequest, bad.Error())
+		s.refuse(w, r, http.StatusBadRequest, bad.Why)
 	case errors.As(err, &taken):
-		s.refuseTaken(w, r, taken, "There is already something called “"+taken.Name+"” here. Choose another name.")
+		s.refuseTaken(w, r, taken, takenHere)
 	case errors.Is(err, drive.ErrBusy):
-		s.refuse(w, r, http.StatusConflict, "“"+name+"”, or something in it, is being uploaded or changed right now. Try again when that is done.")
+		s.refuse(w, r, http.StatusConflict, beingChangedInside, name)
 	case errors.Is(err, drive.ErrIntoItself):
-		s.refuse(w, r, http.StatusConflict, "A folder cannot be moved into itself, or into a folder inside it.")
+		s.refuse(w, r, http.StatusConflict, intoItself)
 	case errors.Is(err, drive.ErrNotAFolder):
-		s.refuse(w, r, http.StatusBadRequest, "Things can only be moved into a folder.")
+		s.refuse(w, r, http.StatusBadRequest, onlyIntoAFolder)
 	case errors.Is(err, drive.ErrTooDeep):
-		s.refuse(w, r, http.StatusBadRequest, "Folders can go at most "+strconv.Itoa(index.MaxDepth-1)+" deep.")
+		s.refuse(w, r, http.StatusBadRequest, tooDeep, index.MaxDepth-1)
 	case errors.Is(err, drive.ErrGone):
-		s.refuse(w, r, http.StatusNotFound, "This is no longer on the Drive storage. Reload the page to see what is there now.")
+		s.refuse(w, r, http.StatusNotFound, goneFromStorage)
 	case errors.Is(err, index.ErrNoItem):
 		// It went to the trash, or somewhere else, after guard found it: the same answer guard gives from now on.
 		s.refuse(w, r, http.StatusNotFound, notHere)
 	case errors.Is(err, drive.ErrFull):
-		s.refuse(w, r, http.StatusInsufficientStorage, "The Drive storage is full.")
+		s.refuse(w, r, http.StatusInsufficientStorage, storageFull)
 	default:
 		s.failed(w, r, err)
 	}
@@ -822,11 +824,11 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request, c call) {
 		return nil
 	})
 	if errors.Is(err, errCannotGoBack) {
-		s.refuse(w, r, http.StatusConflict, "This cannot go back: the folder it was deleted from is gone, or you can no longer add to it.")
+		s.refuse(w, r, http.StatusConflict, cannotGoBack)
 		return
 	}
 	if errors.Is(err, drive.ErrGone) {
-		s.refuse(w, r, http.StatusNotFound, "This is no longer in the trash on the Drive storage.")
+		s.refuse(w, r, http.StatusNotFound, goneFromTrash)
 		return
 	}
 	if err != nil {
@@ -856,9 +858,9 @@ func (s *Server) failed(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	}
 	s.log.Error("the storage could not answer", "route", r.Pattern, "error", err)
-	message := "The Drive storage did not answer. Try again in a moment."
+	message := storageSilent
 	if errors.Is(err, storage.ErrUnauthorized) {
-		message = "The Drive storage refused the Drive's login. The storage settings need checking."
+		message = storageRefusedLogin
 	}
 	s.refuse(w, r, http.StatusBadGateway, message)
 }
@@ -866,7 +868,7 @@ func (s *Server) failed(w http.ResponseWriter, r *http.Request, err error) {
 // serveInterface serves the interface's page.
 func (s *Server) serveInterface(w http.ResponseWriter, r *http.Request, _ call) {
 	if _, err := fs.Stat(s.ui, "index.html"); err != nil {
-		s.refuse(w, r, http.StatusServiceUnavailable, "The interface was not built into this Drive. Build it with `make build`.")
+		s.refuse(w, r, http.StatusServiceUnavailable, noInterface)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-cache")

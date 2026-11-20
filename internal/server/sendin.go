@@ -9,6 +9,7 @@ import (
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
+	"github.com/neonjelly-co/superit-drive/internal/text"
 )
 
 // Sending files in through an upload-only public link: its page, and the one route under the public prefix that
@@ -28,14 +29,6 @@ import (
 // and one large file cut off would lose all the others with it. One request per file, its length in Content-Length, is
 // the shape a member's upload in one request already has, bounded the same way.
 
-const (
-	linkFull      = "This link has taken in all it can for now. Ask whoever sent it to you to make room for more."
-	linkTooSmall  = "This file is larger than this link can still take in. Smaller files may still fit."
-	sendCutOff    = "The file stopped before it all arrived, so nothing was kept. Send it again."
-	sendNoLength  = "The file did not say how large it is, so nothing was kept. Send it again."
-	sendFolderNow = "The folder changed while the file arrived, so nothing was kept. Send it again."
-)
-
 // errNoLongerThroughLink and errSwitchedOffNow say why a file that arrived whole was not kept: the link no longer lets
 // files in there (removed, made a view link, its folder in the trash or gone, its maker no longer able to share it), or
 // sharing outside the project was switched off there meanwhile.
@@ -49,7 +42,7 @@ var (
 // may, it says so instead of offering to send, and has no script.
 func (s *Server) sendInPage(w http.ResponseWriter, r *http.Request, c call) {
 	full := c.link.TakenIn >= s.drive.LinkLimit()
-	s.renderVisitor(w, http.StatusOK, visitorView{Name: c.item.Name, By: s.sharer(*c.link), Folder: true, Send: true, Full: full})
+	s.renderVisitor(w, r, http.StatusOK, visitorView{Name: c.item.Name, By: s.sharer(*c.link, text.Of(r)), Folder: true, Send: true, Full: full})
 	s.used(r, c)
 }
 
@@ -75,15 +68,16 @@ func (s *Server) sendInPage(w http.ResponseWriter, r *http.Request, c call) {
 // counting meanwhile keeps nothing, and answers as such a link does.
 func (s *Server) sendIn(w http.ResponseWriter, r *http.Request, c call) {
 	if r.ContentLength < 0 {
-		writeJSON(w, http.StatusLengthRequired, map[string]any{"error": sendNoLength})
+		refuseWith(w, r, http.StatusLengthRequired, nil, sendNoLength)
 		return
 	}
 	name := r.URL.Query().Get("name")
-	if err := drive.CheckSentName(name); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+	var bad *drive.BadName
+	if err := drive.CheckSentName(name); errors.As(err, &bad) {
+		refuseWith(w, r, http.StatusBadRequest, nil, bad.Why)
 		return
 	}
-	release, ok := s.tryTurn(w, c, turnKey(r, c))
+	release, ok := s.tryTurn(w, r, c, turnKey(r, c))
 	if !ok {
 		return
 	}
@@ -92,7 +86,6 @@ func (s *Server) sendIn(w http.ResponseWriter, r *http.Request, c call) {
 	defer done()
 	_, err := s.drive.SendIn(r.Context(), *c.place, c.link.ID, name, body, r.ContentLength,
 		func(ctx context.Context) (index.Place, index.Item, error) { return s.stillSendingIn(ctx, c) })
-	var bad *drive.BadName
 	switch {
 	case err == nil:
 		s.used(r, c)
@@ -107,23 +100,23 @@ func (s *Server) sendIn(w http.ResponseWriter, r *http.Request, c call) {
 		if full {
 			message = linkFull
 		}
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": message, "full": full})
+		refuseWith(w, r, http.StatusRequestEntityTooLarge, map[string]any{"full": full}, message)
 	case errors.Is(err, drive.ErrCutOff) || r.Context().Err() != nil:
 		// The visitor's connection ended (or they stopped it); nothing was kept. Not the Drive's failure, and not logged:
 		// anyone with the address could fill the log by hanging up, as anyone can try tokens without a log line.
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": sendCutOff})
+		refuseWith(w, r, http.StatusBadRequest, nil, sendCutOff)
 	case errors.Is(err, errSwitchedOffNow):
 		s.switchedOff(w, r, c)
 	case errors.Is(err, errNoLongerThroughLink), errors.Is(err, index.ErrNoItem), errors.Is(err, index.ErrNoLink),
 		errors.Is(err, drive.ErrPlaceGone):
 		s.refuse(w, r, http.StatusNotFound, notHere)
 	case errors.As(err, &bad):
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": bad.Error()})
+		refuseWith(w, r, http.StatusBadRequest, nil, bad.Why)
 	case errors.Is(err, drive.ErrGone), errors.As(err, new(*drive.Taken)):
 		// Its folder moved or went from the storage meanwhile; or (after hundreds of files of one name) no free name.
-		writeJSON(w, http.StatusConflict, map[string]any{"error": sendFolderNow})
+		refuseWith(w, r, http.StatusConflict, nil, sendFolderNow)
 	case errors.Is(err, drive.ErrFull):
-		writeJSON(w, http.StatusInsufficientStorage, map[string]any{"error": "There is no room for more files at the moment."})
+		refuseWith(w, r, http.StatusInsufficientStorage, nil, sendNoRoom)
 	default:
 		s.failed(w, r, err)
 	}
@@ -196,22 +189,27 @@ func sendPolicyFor(origin string) string {
 
 // sendScript is an upload-only link's page's script: it takes the files chosen (the file field) or dropped (on the
 // place for it, without folders, which cannot be sent), and sends each one, one after another, as the body of a POST to
-// the page's own address + "/files", with its name (in Unicode's composed form, as the members' interface sends names)
-// and a turn of its own. It shows how far each has gone; one the Drive says is not its turn waits Retry-After and goes
-// again with the same turn; one whose connection is lost goes again from its start, with the same turn, for a few
-// minutes. A link that no longer works, is not available or is full stops them all, with the Drive's words.
+// the page's own address + "/files", with its name (in Unicode's composed form, as the members' interface sends names),
+// a turn of its own, and the page's language (so the Drive's answers are in it too). It shows how far each has gone;
+// one the Drive says is not its turn waits Retry-After and goes again with the same turn; one whose connection is lost
+// goes again from its start, with the same turn, for a few minutes. A link that no longer works, is not available or
+// is full stops them all, with the Drive's words.
+//
+// Everything it says is in the page, in the page's language (data-words on #sending, sendWordsOf): the script holds no
+// words, so that one script, and one hash in the policy, serves every language.
 const sendScript = `(function () {
 "use strict";
 var input = document.getElementById("files"), drop = document.getElementById("drop"), list = document.getElementById("chosen"),
-	go = document.getElementById("send"), said = document.getElementById("said");
+	go = document.getElementById("send"), said = document.getElementById("said"),
+	words = JSON.parse(document.getElementById("sending").getAttribute("data-words")),
+	lang = document.documentElement.lang;
 var to = location.pathname.replace(/\/+$/, "") + "/files", files = [], busy = false;
-var stops = {404: "This link does not work any more. Ask whoever sent it to you for a new one.",
-	403: "This link is not available at the moment. Try again later."};
+var stops = {404: words.gone, 403: words.off};
 function size(n) {
 	if (n < 1000) return n + " B";
 	var units = ["KB", "MB", "GB", "TB"], v = n / 1000, u = 0;
 	while (u < units.length - 1 && v + 0.5 >= 1000) { v /= 1000; u++; }
-	return (v < 9.95 ? v.toFixed(1) : v.toFixed(0)) + " " + units[u];
+	return (v < 9.95 ? v.toFixed(1).replace(".", words.decimal) : v.toFixed(0)) + " " + units[u];
 }
 function turn() {
 	var b = new Uint8Array(12), t = "";
@@ -223,7 +221,7 @@ function left() { return files.filter(function (f) { return !f.sent; }).length; 
 function ready() {
 	var n = left();
 	go.disabled = busy || n === 0;
-	go.textContent = n > 1 ? "Send " + n + " files" : "Send";
+	go.textContent = n > 1 ? words.sendN.replace("{n}", n) : words.send;
 }
 function show(f, text, kind) { f.state.textContent = text; f.state.className = "state" + (kind ? " " + kind : ""); }
 function add(chosen) {
@@ -256,7 +254,7 @@ drop.addEventListener("drop", function (e) {
 		else chosen.push(all[i]);
 	}
 	add(chosen);
-	if (folders) said.textContent = "Folders cannot be sent here. Send the files in them instead.";
+	if (folders) said.textContent = words.folders;
 });
 go.addEventListener("click", function () { busy = true; said.textContent = ""; ready(); next(); });
 function next() {
@@ -267,28 +265,28 @@ function finish(why) {
 	var sent = files.filter(function (f) { return f.sent; }).length, n = left();
 	files.forEach(function (f) { f.failed = false; f.tries = 0; });
 	busy = false;
-	said.textContent = why || (n === 0 ? (sent === 1 ? "The file was sent." : "All " + sent + " files were sent.") :
-		(n === 1 ? "One file was not sent." : n + " files were not sent.") + " Send again to try once more.");
+	said.textContent = why || (n === 0 ? (sent === 1 ? words.sentOne : words.sentAll.replace("{n}", sent)) :
+		(n === 1 ? words.failedOne : words.failedN.replace("{n}", n)) + " " + words.again);
 	ready();
 }
 function send(f) {
 	var x = new XMLHttpRequest();
-	x.open("POST", to + "?name=" + encodeURIComponent(f.file.name.normalize("NFC")) + "&turn=" + f.turn);
+	x.open("POST", to + "?name=" + encodeURIComponent(f.file.name.normalize("NFC")) + "&turn=" + f.turn + "&lang=" + lang);
 	x.upload.onprogress = function (e) {
 		if (e.lengthComputable && e.total > 0) show(f, Math.floor(e.loaded * 100 / e.total) + "%", "");
 	};
 	x.onload = function () {
 		var answer = {};
 		try { answer = JSON.parse(x.responseText); } catch (e) {}
-		if (x.status === 201) { f.sent = true; show(f, "Sent", "done"); next(); return; }
+		if (x.status === 201) { f.sent = true; show(f, words.sent, "done"); next(); return; }
 		if (x.status === 503) {
 			var after = parseInt(x.getResponseHeader("Retry-After"), 10);
-			show(f, "Waiting for its turn", "");
+			show(f, words.waiting, "");
 			setTimeout(function () { send(f); }, (after > 0 ? after : 2) * 1000);
 			return;
 		}
-		var why = answer.error || stops[x.status] || "This file was not sent.";
-		if (stops[x.status] || answer.full || x.status === 507) { show(f, "Not sent", "bad"); finish(why); return; }
+		var why = answer.error || stops[x.status] || words.failed;
+		if (stops[x.status] || answer.full || x.status === 507) { show(f, words.notSent, "bad"); finish(why); return; }
 		f.failed = true;
 		show(f, why, "bad");
 		next();
@@ -297,12 +295,12 @@ function send(f) {
 		// A connection lost, or the Drive's answer that it was not this file's turn arriving as one: again, with the same
 		// turn, often enough to keep its place in line (the Drive forgets a turn not asked about for a minute).
 		if (++f.tries <= 20) {
-			show(f, "Connection lost: trying again", "");
+			show(f, words.retrying, "");
 			setTimeout(function () { send(f); }, Math.min(2000 * f.tries, 15000));
 			return;
 		}
 		f.failed = true;
-		show(f, "Stopped before it all arrived", "bad");
+		show(f, words.stopped, "bad");
 		next();
 	};
 	x.send(f.file);

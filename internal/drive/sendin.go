@@ -50,7 +50,7 @@ func CheckSentName(name string) error {
 		return err
 	}
 	if strings.ContainsFunc(name, turnsText) {
-		return &BadName{"This name holds characters that change the direction of text. Rename the file and send it again."}
+		return &BadName{nameTurns}
 	}
 	return nil
 }
@@ -113,7 +113,7 @@ func (d *Drive) SendIn(ctx context.Context, p index.Place, link int64, name stri
 		return index.Item{}, err
 	}
 	if _, ok := pathIn("x", name); !ok {
-		return index.Item{}, &BadName{"This name cannot be used. Choose another name."} // CheckName refuses these first
+		return index.Item{}, &BadName{nameUnusable} // CheckName refuses these first
 	}
 	settle, err := d.keepFor(ctx, link, size)
 	if err != nil {

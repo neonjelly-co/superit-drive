@@ -238,10 +238,10 @@ func TestWithoutAMailServerNothingIsSent(t *testing.T) {
 func TestWhetherMailWorks(t *testing.T) {
 	off := New(settings.Mail{}, "files.example.com", slog.New(slog.DiscardHandler))
 	if ok, why := off.Works(context.Background()); ok || why != whyOff {
-		t.Fatalf("without a mail server: %v %q", ok, why)
+		t.Fatalf("without a mail server: %v %q", ok, why.English())
 	}
 	if ok, why := off.Known(); ok || why != whyOff {
-		t.Fatalf("without a mail server, known: %v %q", ok, why)
+		t.Fatalf("without a mail server, known: %v %q", ok, why.English())
 	}
 
 	server, client := tlsPair(t)
@@ -251,8 +251,8 @@ func TestWhetherMailWorks(t *testing.T) {
 	if ok, _ := m.Known(); !ok {
 		t.Fatal("before anything is known, mail is taken to work")
 	}
-	if ok, why := m.Works(context.Background()); !ok || why != "" {
-		t.Fatalf("a mail server that works: %v %q", ok, why)
+	if ok, why := m.Works(context.Background()); !ok || !why.IsZero() {
+		t.Fatalf("a mail server that works: %v %q", ok, why.English())
 	}
 	if got := smtp.Messages(); len(got) != 0 {
 		t.Fatalf("a check sent %d messages", len(got))
@@ -262,10 +262,10 @@ func TestWhetherMailWorks(t *testing.T) {
 	wrong.Password = "wrong"
 	w, l := running(t, wrong, client, 5*time.Second)
 	if ok, why := w.Works(context.Background()); ok || why != whyLogin {
-		t.Fatalf("a mail server that refuses the login: %v %q", ok, why)
+		t.Fatalf("a mail server that refuses the login: %v %q", ok, why.English())
 	}
 	if ok, why := w.Known(); ok || why != whyLogin {
-		t.Fatalf("known after the check: %v %q", ok, why)
+		t.Fatalf("known after the check: %v %q", ok, why.English())
 	}
 	if strings.Contains(l.String(), "wrong") {
 		t.Fatalf("the log holds the password: %s", l)
@@ -278,7 +278,7 @@ func TestWhetherMailWorks(t *testing.T) {
 	gone.Port = port
 	g, _ := running(t, gone, client, 5*time.Second)
 	if ok, why := g.Works(context.Background()); ok || why != whyUnreachable {
-		t.Fatalf("a mail server that is not there: %v %q", ok, why)
+		t.Fatalf("a mail server that is not there: %v %q", ok, why.English())
 	}
 
 	// A message that could not be sent says so too; one sent says it works again.

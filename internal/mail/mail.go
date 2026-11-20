@@ -34,6 +34,7 @@ import (
 	"unicode"
 
 	"github.com/neonjelly-co/superit-drive/internal/settings"
+	"github.com/neonjelly-co/superit-drive/internal/text"
 )
 
 // A Message is one mail to one person. Subject and Body are plain text, as people should read them; Body's lines are
@@ -73,7 +74,7 @@ type health struct {
 	mu sync.Mutex
 	// known is false until a message was sent or a check made; working and why say what came of the last.
 	known, working bool
-	why            string
+	why            text.Message
 	at             time.Time
 	// checking is closed when the check under way ends; nil when none is.
 	checking chan struct{}
@@ -89,24 +90,24 @@ const (
 )
 
 // Why mail does not work, as members read it.
-const (
-	whyOff         = "This Drive has no mail settings, so it cannot send mail."
-	whyUnreachable = "The Drive could not reach its mail server."
-	whyEncryption  = "The Drive's mail server could not be reached safely (TLS)."
-	whyLogin       = "The Drive's mail server refused the Drive's login."
-	whyRefused     = "The Drive's mail server did not take the Drive's mail."
+var (
+	whyOff         = text.M("This Drive has no mail settings, so it cannot send mail.", "Ennek a Drive-nak nincsenek levelezési beállításai, ezért nem tud e-mailt küldeni.")
+	whyUnreachable = text.M("The Drive could not reach its mail server.", "A Drive nem érte el a levelezőszerverét.")
+	whyEncryption  = text.M("The Drive's mail server could not be reached safely (TLS).", "A Drive levelezőszerverét nem lehetett biztonságosan (TLS-sel) elérni.")
+	whyLogin       = text.M("The Drive's mail server refused the Drive's login.", "A Drive levelezőszervere nem fogadta el a Drive belépését.")
+	whyRefused     = text.M("The Drive's mail server did not take the Drive's mail.", "A Drive levelezőszervere nem vette át a Drive levelét.")
 )
 
 // failure is an error that says, for people, which part of sending failed.
 type failure struct {
-	why string
+	why text.Message
 	err error
 }
 
 func (f *failure) Error() string { return f.err.Error() }
 func (f *failure) Unwrap() error { return f.err }
 
-func failed(why string, err error) error { return &failure{why, err} }
+func failed(why text.Message, err error) error { return &failure{why, err} }
 
 // New makes a Mailer that sends through the mail server s; hello is the name the Drive gives itself to it (the host of
 // DRIVE_ADDRESS). Run must run for anything to be sent.
@@ -183,7 +184,7 @@ func (m *Mailer) Deliver(ctx context.Context, msg Message) error {
 // Works says whether the Drive's mail works, and why not: off without a mail server; otherwise what the last message
 // sent or the last check came to, while it stands (trustWorking, trustFailing), and a new check (at most checkTimeout,
 // one at a time) when it no longer does.
-func (m *Mailer) Works(ctx context.Context) (ok bool, why string) {
+func (m *Mailer) Works(ctx context.Context) (ok bool, why text.Message) {
 	if !m.On() {
 		return false, whyOff
 	}
@@ -228,7 +229,7 @@ func (m *Mailer) Works(ctx context.Context) (ok bool, why string) {
 
 // Known says what the Drive last found out about its mail, without asking the mail server: off without one, not
 // working when the last message or check failed, and working otherwise (also before it found out anything).
-func (m *Mailer) Known() (ok bool, why string) {
+func (m *Mailer) Known() (ok bool, why text.Message) {
 	if !m.On() {
 		return false, whyOff
 	}
@@ -237,14 +238,14 @@ func (m *Mailer) Known() (ok bool, why string) {
 	if m.health.known && !m.health.working {
 		return false, m.health.why
 	}
-	return true, ""
+	return true, text.Message{}
 }
 
 // found records what a message sent or a check came to.
 func (m *Mailer) found(err error) {
 	m.health.mu.Lock()
 	defer m.health.mu.Unlock()
-	m.health.known, m.health.working, m.health.why, m.health.at = true, err == nil, "", time.Now()
+	m.health.known, m.health.working, m.health.why, m.health.at = true, err == nil, text.Message{}, time.Now()
 	if err != nil {
 		var f *failure
 		m.health.why = whyRefused
