@@ -268,6 +268,54 @@ func TestAClearedCopyHoldsNoTraceOfWhatWasCleared(t *testing.T) {
 	}
 }
 
+// Clearing can raise the number of a copy's last copy, never lower it: an index made from it numbers its next copy after
+// the higher of the two. A value the copy keeps in drive_state reads back as it was set.
+func TestClearingRaisesTheCopysNumber(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	if _, err := x.AddStorageID(ctx, "0123abcd"); err != nil {
+		t.Fatal(err)
+	}
+	writeCopy(t, x)
+	writeCopy(t, x)
+	file, info := writeCopy(t, x) // number 3
+	if err := ClearCopy(ctx, file, Clearing{SeqAtLeast: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := CheckCopy(ctx, file, anywhere); err != nil || got.Seq != info.Seq {
+		t.Fatalf("a copy numbered %d, raised to at least 2: %+v %v", info.Seq, got, err)
+	}
+	if err := ClearCopy(ctx, file, Clearing{SeqAtLeast: 41, Set: map[string]string{"left_alone": "copy-41.sqlite"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := CheckCopy(ctx, file, anywhere); err != nil || got.Seq != 41 {
+		t.Fatalf("a copy raised to at least 41: %+v %v", got, err)
+	}
+	if v, err := CopyState(ctx, file, "left_alone"); err != nil || v != "copy-41.sqlite" {
+		t.Fatalf("the copy's left_alone: %q %v", v, err)
+	}
+	if v, err := CopyState(ctx, file, "no_such_key"); err != nil || v != "" {
+		t.Fatalf("a key the copy does not keep: %q %v", v, err)
+	}
+	if err := ClearCopy(ctx, file, Clearing{SeqAtLeast: MaxCopySeq + 1}); err == nil {
+		t.Fatal("a copy was raised past the highest number a copy may have")
+	}
+
+	// Opened as an index, its next copy is numbered after it.
+	dir := t.TempDir()
+	if err := os.Rename(file, filepath.Join(dir, FileName)); err != nil {
+		t.Fatal(err)
+	}
+	y, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer y.Close()
+	if _, next := writeCopy(t, y); next.Seq != 42 {
+		t.Fatalf("the next copy of an index made from a copy raised to 41 is number %d", next.Seq)
+	}
+}
+
 // alter changes a copy in place, as someone with write access to the storage could.
 func alter(t *testing.T, file string, statements ...string) {
 	t.Helper()

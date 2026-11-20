@@ -144,6 +144,7 @@ Shared folders/
     index/
         1a5ff6fe…73/                        the copies of the index whose storage id this is (the mark's)
             copy-000000000042.sqlite        the latest copy of the index (see "The copy of the index")
+            refused-…, newer-version-…      copies the Drive set aside, and keeps (see "Starting from a copy")
     storage-id                              the Drive's mark: the id of the storage, which the index keeps too
 ```
 
@@ -395,19 +396,20 @@ storage does not take a copy (it does not answer, or does not hold the Drive's m
 written all the same, and the storage is asked again every five minutes: once it answers and holds the mark, a new copy
 goes there.
 
-**On the storage, safely.** A copy is written under a name of its own (`upload-<random>.part`, one `PUT`), then moved
-to its name (`MOVE`, never replacing anything), and only then is the copy before it removed: a whole copy is there
+**On the storage, safely.** A copy is written under a name of its own (`upload-<random>.part`, one `PUT`), then moved to
+its name (`MOVE`, never replacing anything), and only then is the copy before it removed: a whole copy is there
 throughout, and a copy cut off midway never has a copy's name. Each copy has the number after the last, kept in the
-index; the folder holds one copy, two for a moment. A copy goes on the storage only while the storage holds the Drive's
-mark with the id its index keeps: never onto a storage that is empty, mounted wrongly or someone else's, and the folder
-is named after that id, so the copies of another index are never removed. Making a copy streams from disk to disk, and
-putting it on the storage streams from the file, over one connection with the capped buffers every connection to the
-storage has: it takes no transfer slot (as the walk takes none), so it never makes anyone wait their turn, and its
-memory does not grow with the index ([measured](#large-transfers-and-the-memory-figure)). The copy for the storage is
-copied, put on the storage, and (when a Drive starts from it) read back four MiB at a time, each part synced to disk and
-let go of by the page cache before the next: the kernel's page cache counts against the container's memory too, and a
-copy of 33 MB written in one go stopped the whole Drive for minutes in the memory test. Its temporary files are made in
-the data folder, which is on disk, never in `/tmp`, which can be memory.
+index; the folder holds one copy, two for a moment, besides the copies the Drive set aside (see [Starting from a
+copy](#starting-from-a-copy)), which it never removes. A copy goes on the storage only while the storage holds the
+Drive's mark with the id its index keeps: never onto a storage that is empty, mounted wrongly or someone else's, and the
+folder is named after that id, so the copies of another index are never removed. Making a copy streams from disk to
+disk, and putting it on the storage streams from the file, over one connection with the capped buffers every connection
+to the storage has: it takes no transfer slot (as the walk takes none), so it never makes anyone wait their turn, and
+its memory does not grow with the index ([measured](#large-transfers-and-the-memory-figure)). The copy for the storage
+is copied, put on the storage, and (when a Drive starts from it) read back four MiB at a time, each part synced to disk
+and let go of by the page cache before the next: the kernel's page cache counts against the container's memory too, and
+a copy of 33 MB written in one go stopped the whole Drive for minutes in the memory test. Its temporary files are made
+in the data folder, which is on disk, never in `/tmp`, which can be memory.
 
 **What the copy on the storage leaves out.** Whoever has the storage login can read it, so it holds nothing that lets
 anyone in by itself, and nothing that only one server can honour:
@@ -426,9 +428,10 @@ invitations with their end dates), public links (by their token's SHA-256: the a
 link by itself, and the same address works again on a new server), with their kind and what an upload-only link took in
 (as of the copy: taking files in is no access change), guests by address, the switches of sharing outside
 the project, the record of acts on held My files (and an act under way, which a Drive started from the copy finishes),
-how often links and invitations were used, the storage's id, and what the Drive knows of rollbacks (`rollback`,
+how often links and invitations were used, the storage's id, what the Drive knows of rollbacks (`rollback`,
 `rollback_walk`, `storage_marked`): a Drive started from the copy knows a rollback it was told about is old news, and
-goes on with the walk after one that was under way.
+goes on with the walk after one that was under way; and the copies made by a newer version that it has still to move
+aside (`newer_copies`, below), which a Drive started from the copy moves aside in its turn.
 
 ### Starting from a copy
 
@@ -439,7 +442,9 @@ when there is one:
   Drive](#backing-up-the-drive));
 - the latest copy on the storage, in the folder of the id in the storage's mark, and only one whose index keeps that
   same id. When the data folder's copy belongs to that storage too, the newer of the two (by number) is taken, the data
-  folder's when they are the same copy.
+  folder's when they are the same copy. The number decides whichever versions made them, as long as this Drive knows
+  both schemas: after an upgrade to a version of the same schema that failed and was undone, the newer version's copy
+  on the storage is taken (see [An upgrade that failed](#an-upgrade-that-failed)).
 
 A copy becomes the index only once it passes a check: SQLite's integrity and foreign key checks; a schema exactly what
 this Drive's migrations make for its version (so no table, index, trigger or view of its own); every place's top
@@ -455,7 +460,17 @@ brought; guests sign in again with a new code.
 
 - **A copy made by a newer Drive** (its schema is newer than this one's): the Drive does not start, and says so. An
   index built without it would soon put a copy without the shares in its place. Start a version as new as the one that
-  made it.
+  made it. The one exception is a newer copy on the storage when the data folder holds a copy that passes the check,
+  belongs to that storage and is of this Drive's own schema, as after an upgrade that failed and was undone (see [An
+  upgrade that failed](#an-upgrade-that-failed)): the Drive then makes its index from the data folder's copy and starts,
+  and says so loudly (`level=ERROR`, `THE COPY OF THE INDEX ON THE STORAGE IS LEFT ALONE`): what changed in the index
+  under the newer version is not in its index. The newer copy is neither removed nor replaced. The Drive numbers its own
+  copies after it, so they are the ones adopted from then on, by this version or a newer one; once its first copy is on
+  the storage, it moves the newer copy aside, to `newer-version-<when>-<its name>`, and keeps it. A Drive that dies
+  before that, or one started from its copy on a new server, moves it aside in its turn (the index, and its copies, keep
+  which copies are still to be moved, as `newer_copies`); a move the storage refuses is tried again after the next copy,
+  and the newer copy stays where it is meanwhile. One whose number is past any a copy reaches (2⁵², by its name) is not
+  left alone: the Drive does not start.
 - **A damaged copy**, or **one of another storage's index**: not adopted. It is moved aside on the storage, to
   `refused-<when>-<its name>` (or beside the data folder's copy, as `index.sqlite.refused-<when>`), and kept; the Drive
   builds its index from the files, and the log says so loudly (`level=ERROR`, in capitals). One larger than 4 GiB (no
@@ -485,16 +500,19 @@ is there. Through a copy they planted or changed, they can give more than the fi
 - sharing outside the project switched back on, where it was off;
 - an act under way that hands over or deletes a held My files (it changes only what is in the Drive's folder), and a
   record of acts that never happened, or without those that did;
-- a copy that keeps a Drive from starting (one that claims a newer schema), or one that is refused (the Drive starts with
-  no shares).
+- a copy that keeps a Drive from starting (one that claims a newer schema), or one that is refused (the Drive starts
+  with no shares); a copy that claims a newer schema makes a Drive whose data folder holds its own copy (a backup put
+  back) start from that copy, not from a later one on the storage, as removing the later one would. Such a copy is moved
+  aside and kept, never adopted.
 
 They cannot: add members or project admins (the member list comes from the platform); sign anyone in as a guest
-(sessions and codes are cleared); reach outside the Drive's folder, or into its hidden folder (the check); or put code
-into the index (no trigger or view of its own). What bounds it: a copy is adopted only with an empty data folder; the
-check; the log line that counts what it brought; and project admins see every public link and every guest's invitation
-in "Shared outside the project". Nothing prevents it: a copy signed with a key made from `DRIVE_HEADER_SECRET` would
-not open on a new server, whose daemon makes a new secret. The storage login opens the sharing as well as the files;
-Superit gives customers no login to the Storage Box.
+(sessions and codes are cleared); reach outside the Drive's folder, or into its hidden folder (the check); put code into
+the index (no trigger or view of its own); or, through the copies a copy says are still to be moved aside, have the
+Drive move anything but a copy numbered before its own latest, which it would otherwise remove. What bounds it: a copy
+is adopted only with an empty data folder; the check; the log line that counts what it brought; and project admins see
+every public link and every guest's invitation in "Shared outside the project". Nothing prevents it: a copy signed with
+a key made from `DRIVE_HEADER_SECRET` would not open on a new server, whose daemon makes a new secret. The storage login
+opens the sharing as well as the files; Superit gives customers no login to the Storage Box.
 
 ### Backing up the Drive
 
@@ -520,11 +538,42 @@ The data folder holds:
   Never put an archived `index.sqlite` back, nor a copy at `index.sqlite` while an `index.sqlite-wal` is there.
 - **A new server without a backup**: start the Drive with an empty data folder and the same storage settings: it makes
   its index from the copy on the storage.
+- **An upgrade that fails**: stop the newer version, put the snapshot back as for a restore, and start the older version
+  with the same settings. What it then keeps and loses depends on the newer version's schema: see [An upgrade that
+  failed](#an-upgrade-that-failed).
 - **The upgrade test** (snapshot, wipe, restore, check that a share is there and a file downloads) passes with the above
   as it is: the share is in `backup/index.sqlite` once the copy after it has been written, 30 seconds after the share (or
-  at once when the Drive is stopped and started again before the snapshot).
+  at once when the Drive is stopped and started again before the snapshot). After an upgrade that failed, it can check
+  that the older version starts, that what was shared before the upgrade is there, and that a file put on the storage
+  under the newer version is still there (the storage is not put back). A share or a link made under the newer version
+  is gone only when the newer version has a newer schema; with the same schema, it stays.
 
 Running the Drive yourself, back up `backup/index.sqlite` the same way, and restore it as above.
+
+### An upgrade that failed
+
+The Superit agent upgrades the Drive by stopping it (it copies its index as it stops), taking a snapshot of its data
+folder (`backup/index.sqlite`, never the live index), and starting the newer version with the data folder as it is. The
+newer version brings the index up to its schema and copies it, into the data folder and onto the storage, as it starts
+(numbered after the snapshot's copy) and after access changes. When a step fails, the agent stops the newer version,
+puts the snapshot back as the data folder and starts the older version. Neither the files on the storage nor the copies
+there are put back: the older Drive starts with no index, its own copy in the data folder, and a later copy on the
+storage, made by the newer version (see [Starting from a copy](#starting-from-a-copy)).
+
+| The newer version's schema | The older Drive starts from | Kept | Lost |
+|---|---|---|---|
+| Newer (a migration the older version lacks) | The data folder's copy: the snapshot, the index as the older version left it when it stopped for the upgrade. The log says `THE COPY OF THE INDEX ON THE STORAGE IS LEFT ALONE` (`level=ERROR`). | Everything in the index from before the upgrade, guests' sessions included. The files on the storage as the newer version left them, taken in by the walk as after any start from a copy: a file added under it has the access of its folder, and one deleted under it is in the trash as itself. | What changed in the index under the newer version: shares, links, guests' invitations and sessions, shared folders and their managers, switches, acts on held My files. A file moved or renamed under it loses what was given on it: it is a new item at its new place, with the access of its folder. All of it but guests' sessions is in the newer copy, which the Drive moves aside on the storage, as `newer-version-<when>-copy-<number>.sqlite`, and keeps. |
+| The same | The newer version's last copy on the storage, numbered after the snapshot's. The log says the Drive made its index from the copy on the storage. | What changed in the index under the newer version, up to its last copy (the copy it makes as it stops holds every change, unless it was killed). The files on the storage, as above. | Guests' sessions (a copy on the storage holds none: guests sign in again, with a new code), and, when the newer version was killed rather than stopped, what changed after its last copy. |
+
+With the same schema the later copy wins, not the snapshot's, because the files on the storage were not put back
+either: the later copy's sharing is on the files as they are.
+
+The upgrade tried again starts the newer version with the older version's index: it adopts nothing, numbers its copies
+after the older version's, and leaves a copy set aside where it is.
+
+Versions up to 0.2.0 do not leave a newer copy alone: after an upgrade from one of them to a newer schema fails, the
+older version does not start. Starting the newer version again on the restored data folder does: it makes its index
+from its own copy on the storage, which holds what changed under it.
 
 ### Shared folders, sharing and who may do what
 

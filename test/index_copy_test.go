@@ -125,6 +125,12 @@ func alterStoredCopy(t *testing.T, d *harness.Drive, change func(db *sql.DB)) {
 	if !ok {
 		t.Fatalf("no copy at %s", at)
 	}
+	d.Storage.Replace(t, at, altered(t, data, change))
+}
+
+// altered is data, a copy of the index, as change leaves it: changed as someone holding the file could change it.
+func altered(t *testing.T, data []byte, change func(db *sql.DB)) []byte {
+	t.Helper()
 	file := filepath.Join(t.TempDir(), "copy.sqlite")
 	if err := os.WriteFile(file, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -139,7 +145,23 @@ func alterStoredCopy(t *testing.T, d *harness.Drive, change func(db *sql.DB)) {
 	if data, err = os.ReadFile(file); err != nil {
 		t.Fatal(err)
 	}
-	d.Storage.Replace(t, at, data)
+	return data
+}
+
+// putBack replaces the stopped Drive's whole data folder with one that holds only backup, as its copy of the index: a
+// backup or a snapshot of the data folder put back, which never holds the live index.
+func putBack(t *testing.T, d *harness.Drive, backup []byte) {
+	t.Helper()
+	if err := os.RemoveAll(d.DataDir); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(d.DataDir, "backup", "index.sqlite")
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, backup, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // run runs a statement on a copy, and fails the test when it fails.
@@ -422,37 +444,7 @@ func TestAnOlderCopyIsAdoptedAndBroughtUpToDate(t *testing.T) {
 	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora}, Env: copiesSoon("300ms", "2s")})
 	x, _, notesPage := sharedBeforeTheCopy(t, d)
 	d.Stop(t)
-	// As a Drive whose index was at migration 0011 made it, before upload-only links: its links of one kind, without
-	// what each took in, and its files without the label of those that came through a link. (The table is made again
-	// as 0006 made it; renaming it into place quotes its name, which 0006 did not.)
-	alterStoredCopy(t, d, func(db *sql.DB) {
-		for _, statement := range []string{
-			`CREATE TABLE links_0011 (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    item_id    INTEGER NOT NULL UNIQUE REFERENCES items (id) ON DELETE CASCADE,
-    token_hash BLOB    NOT NULL UNIQUE CHECK (length(token_hash) = 32),
-    kind       TEXT    NOT NULL CHECK (kind IN ('view')),
-    made_at    INTEGER NOT NULL, -- unix milliseconds
-    made_by    TEXT    NOT NULL,
-    uses       INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
-    used_at    INTEGER
-)`,
-			"INSERT INTO links_0011 SELECT id, item_id, token_hash, kind, made_at, made_by, uses, used_at FROM links",
-			"DROP TABLE links",
-			"ALTER TABLE links_0011 RENAME TO links",
-			"PRAGMA writable_schema = ON",
-			`UPDATE sqlite_schema SET sql = replace(sql, 'CREATE TABLE "links"', 'CREATE TABLE links') WHERE type = 'table' AND name = 'links'`,
-			"PRAGMA writable_schema = OFF",
-			"CREATE TRIGGER access_changes_links_insert AFTER INSERT ON links BEGIN UPDATE access_changes SET n = n + 1; END",
-			"CREATE TRIGGER access_changes_links_delete AFTER DELETE ON links BEGIN UPDATE access_changes SET n = n + 1; END",
-			`CREATE TRIGGER access_changes_links_update AFTER UPDATE OF item_id, token_hash, kind, made_at, made_by ON links
-    BEGIN UPDATE access_changes SET n = n + 1; END`,
-			"ALTER TABLE items DROP COLUMN added_through_link",
-			"PRAGMA user_version = 11",
-		} {
-			run(t, db, statement)
-		}
-	})
+	alterStoredCopy(t, d, func(db *sql.DB) { madeByVersion11(t, db) })
 
 	d.OnANewServer(t, nil)
 	adopted(t, d, "storage")
@@ -468,6 +460,39 @@ func TestAnOlderCopyIsAdoptedAndBroughtUpToDate(t *testing.T) {
 	before := len(copiesMade(d))
 	ok(t, "sharing Notes.txt with Dóra", share(t, d.As(bence), x.place, x.notes.ID, dora, "viewer"))
 	copiesSettled(t, d, before)
+}
+
+// madeByVersion11 makes a copy of the index into one a Drive whose index was at migration 0011 made, before upload-only
+// links: its links of one kind, without what each took in, and its files without the label of those that came through
+// a link. (The table is made again as 0006 made it; renaming it into place quotes its name, which 0006 did not.)
+func madeByVersion11(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, statement := range []string{
+		`CREATE TABLE links_0011 (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id    INTEGER NOT NULL UNIQUE REFERENCES items (id) ON DELETE CASCADE,
+    token_hash BLOB    NOT NULL UNIQUE CHECK (length(token_hash) = 32),
+    kind       TEXT    NOT NULL CHECK (kind IN ('view')),
+    made_at    INTEGER NOT NULL, -- unix milliseconds
+    made_by    TEXT    NOT NULL,
+    uses       INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
+    used_at    INTEGER
+)`,
+		"INSERT INTO links_0011 SELECT id, item_id, token_hash, kind, made_at, made_by, uses, used_at FROM links",
+		"DROP TABLE links",
+		"ALTER TABLE links_0011 RENAME TO links",
+		"PRAGMA writable_schema = ON",
+		`UPDATE sqlite_schema SET sql = replace(sql, 'CREATE TABLE "links"', 'CREATE TABLE links') WHERE type = 'table' AND name = 'links'`,
+		"PRAGMA writable_schema = OFF",
+		"CREATE TRIGGER access_changes_links_insert AFTER INSERT ON links BEGIN UPDATE access_changes SET n = n + 1; END",
+		"CREATE TRIGGER access_changes_links_delete AFTER DELETE ON links BEGIN UPDATE access_changes SET n = n + 1; END",
+		`CREATE TRIGGER access_changes_links_update AFTER UPDATE OF item_id, token_hash, kind, made_at, made_by ON links
+    BEGIN UPDATE access_changes SET n = n + 1; END`,
+		"ALTER TABLE items DROP COLUMN added_through_link",
+		"PRAGMA user_version = 11",
+	} {
+		run(t, db, statement)
+	}
 }
 
 // What changed on the storage after the copy was made comes in once it is adopted: a file put there is seen, with the
@@ -712,15 +737,7 @@ func TestTheDataFolderAlwaysHoldsACopyABackupCanArchive(t *testing.T) {
 	}
 	// The server's data put back from the backup: the copy, not the live index.
 	d.Stop(t)
-	if err := os.RemoveAll(d.DataDir); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(backup), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(backup, archive, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	putBack(t, d, archive)
 	d.Restart(t, nil)
 	adopted(t, d, "data folder")
 	if got := sharedNames(t, d.As(dora)); !slices.Contains(got, entry("Clients", x.place)) {
