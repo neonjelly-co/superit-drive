@@ -110,7 +110,7 @@ func Adopt(ctx context.Context, dataDir string, s *storage.Client, log *slog.Log
 	if chosen.storage == "" {
 		// The data folder keeps its copy: the index is made from a copy of it.
 		file = temporary(dataDir)
-		if err := index.CopyFile(chosen.file, file); err != nil {
+		if err := copyFile(chosen.file, file); err != nil {
 			return err
 		}
 	}
@@ -294,7 +294,7 @@ func foreignCopies(ctx context.Context, s *storage.Client, log *slog.Logger) {
 // takes, and a bound on what a file planted there can fill the server's disk with.
 const maxCopy = 4 << 30
 
-// download reads the file at p on the storage into a new file at to, synced to disk.
+// download reads the file at p on the storage into a new file at to, chunk by chunk, synced to disk (copies.go).
 func download(ctx context.Context, s *storage.Client, p, to string) error {
 	f, err := s.Open(ctx, p)
 	if err != nil {
@@ -305,7 +305,8 @@ func download(ctx context.Context, s *storage.Client, p, to string) error {
 	if err != nil {
 		return err
 	}
-	n, err := io.Copy(out, io.LimitReader(f.Body, maxCopy+1))
+	w := &syncingWriter{f: out}
+	n, err := io.Copy(w, io.LimitReader(f.Body, maxCopy+1))
 	switch {
 	case err != nil:
 	case n > maxCopy:
@@ -314,7 +315,7 @@ func download(ctx context.Context, s *storage.Client, p, to string) error {
 		err = fmt.Errorf("read %d bytes of %d", n, f.Size)
 	}
 	if err == nil {
-		err = out.Sync()
+		err = w.flush()
 	}
 	if cerr := out.Close(); err == nil {
 		err = cerr

@@ -198,12 +198,22 @@ chown -R www-data:www-data /var/storage/files`
 		t.Fatalf("sharing Ügyfél 0 with everyone: %d %v", status, err)
 	}
 	began = time.Now()
+	sampler.mark()
+	var loadOnly sample
 	line = ""
 	for deadline := time.Now().Add(5 * time.Minute); line == ""; time.Sleep(time.Second) {
 		if time.Now().After(deadline) {
-			t.Fatal("the index was not copied within five minutes of a share")
+			// What the Drive was doing: Go prints every goroutine's stack when it gets SIGQUIT.
+			t.Logf("memory now: %s", sampler.latest())
+			_ = exec.Command("docker", "kill", "-s", "QUIT", driveID).Run()
+			time.Sleep(15 * time.Second)
+			dump, _ := exec.Command("docker", "logs", driveID).CombinedOutput()
+			t.Fatalf("the index was not copied within five minutes of a share; the Drive's goroutines:\n%s", dump)
 		}
 		logs, _ := exec.Command("docker", "logs", driveID).CombinedOutput()
+		if loadOnly == (sample{}) && time.Since(began) > 25*time.Second {
+			loadOnly = sampler.mark() // the copy comes 30 seconds after the share: until now, people's use alone
+		}
 		if all := copied.FindAllString(string(logs), -1); len(all) > copiesBefore {
 			line = all[len(all)-1]
 		}
@@ -243,6 +253,7 @@ chown -R www-data:www-data /var/storage/files`
 	t.Logf("peak (cgroup memory.peak, the whole run, the walk included): %s", mib(peak))
 	t.Logf("highest during the walk of %d files:        %s", copyItems, walking)
 	t.Logf("highest before the copy, uploading Seed.bin: %s", before)
+	t.Logf("highest while people used the Drive, before the copy: %s", loadOnly)
 	t.Logf("highest while people used the Drive and it copied its index: %s", copying)
 	t.Logf("memory.events: %s", strings.Join(strings.Fields(cg["memory.events"]), " "))
 }

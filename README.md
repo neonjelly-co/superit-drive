@@ -368,16 +368,18 @@ The index alone holds who has access to what, and it lives on one server. So the
 
 **When.** Both together: when the Drive starts; soon after access changes; every night at 03:00 UTC, whatever
 changed; and as the Drive stops (after the last request is answered), when access changed since the last copy, so that
-a snapshot of the data folder taken once it has stopped, as before an upgrade, holds every change. An access change is anything that changes who may reach what: a share given, changed or taken away; a public
-link made, replaced or removed; a guest invited, their invitation changed, or gone with it; a shared folder made,
-deleted, restored or removed for good, and its managers; a switch of sharing outside the project; a held My files
-handed over or deleted; and an item renamed, moved, deleted or restored (what was given on it, and on what is in it,
-hangs on its id, which an older copy would not find where the storage now has it). The index counts them itself, in
-the transaction that makes them (migration `0011`: triggers on its tables), so none is missed, whatever makes it: a
-look at the storage that drops something shared counts too. A burst of them makes one copy: it is written once nothing
-changed for 30 seconds, and no change waits more than five minutes for its copy, however much changes meanwhile. Files
-added, folders made and how often links and invitations were used are not access changes: a copy older than them
-finds the files on the storage, with the access of their folder, and the counts are a night behind at most.
+a snapshot of the data folder taken once it has stopped, as before an upgrade, holds every change.
+
+An access change is anything that changes who may reach what: a share given, changed or taken away; a public link made,
+replaced or removed; a guest invited, their invitation changed, or gone with it; a shared folder made, deleted,
+restored or removed for good, and its managers; a switch of sharing outside the project; a held My files handed over
+or deleted; and an item renamed, moved, deleted or restored (what was given on it, and on what is in it, hangs on its
+id, which an older copy would not find where the storage now has it). The index counts them itself, in the transaction
+that makes them (migration `0011`: triggers on its tables), so none is missed, whatever makes it: a look at the storage
+that drops something shared counts too. A burst of them makes one copy: it is written once nothing changed for 30
+seconds, and no change waits more than five minutes for its copy, however much changes meanwhile. Files added, folders
+made and how often links and invitations were used are not access changes: a copy older than them finds the files on
+the storage, with the access of their folder, and the counts are a night behind at most.
 
 **How fresh.** At any moment both copies hold every access change made more than five minutes before (and every one
 made more than 30 seconds before a pause in them), and everything else as it was at the last copy: the last access

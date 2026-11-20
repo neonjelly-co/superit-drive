@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -272,7 +273,7 @@ func (k *keeper) toStorage(ctx context.Context, info index.CopyInfo) (string, er
 	}
 	tmp := temporary(k.dir)
 	defer os.Remove(tmp)
-	if err := index.CopyFile(index.BackupFile(k.dir), tmp); err != nil {
+	if err := copyFile(index.BackupFile(k.dir), tmp); err != nil {
 		return "", err
 	}
 	if err := index.ClearCopy(ctx, tmp, index.Clearing{Outsiders: true, State: walkState}); err != nil {
@@ -302,7 +303,7 @@ func (k *keeper) toStorage(ctx context.Context, info index.CopyInfo) (string, er
 	}
 	// At least 256 KiB a second, and two minutes besides.
 	uctx, cancel := context.WithTimeout(ctx, 2*time.Minute+time.Duration(st.Size()>>18)*time.Second)
-	err = d.storage.Put(uctx, part, f, st.Size())
+	err = d.storage.Put(uctx, part, &droppingReader{f: f}, st.Size())
 	cancel()
 	if err != nil {
 		k.removeOnStorage(part)
@@ -368,6 +369,81 @@ func removeTemporary(dataDir string) {
 	for _, f := range left {
 		os.Remove(f)
 	}
+}
+
+// The copies are tens of megabytes for a large index, in a container whose memory the kernel's page cache counts against
+// too. A copy written in one go leaves all of it dirty in the page cache at once; in a container near its limit, the
+// kernel then cannot take memory back until it is written, and everything the Drive does waits (in the memory test, a
+// copy of 33 MB made in one go, with copy_file_range, stopped the whole Drive for minutes while people used it). So a
+// copy is written, and read for the storage, chunk by chunk: each chunk synced to disk and let go of before the next.
+const chunk = 4 << 20
+
+// copyFile copies the file at from to a new file at to, chunk by chunk, synced to disk.
+func copyFile(from, to string) error {
+	in, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	w := &syncingWriter{f: out}
+	_, err = io.CopyBuffer(struct{ io.Writer }{w}, &droppingReader{f: in}, make([]byte, 128<<10)) // never copy_file_range
+	if err == nil {
+		err = w.flush()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(to)
+	}
+	return err
+}
+
+// A syncingWriter writes to a file, and every chunk syncs it to disk and lets the page cache go of what it wrote.
+type syncingWriter struct {
+	f            *os.File
+	written, due int64
+}
+
+func (w *syncingWriter) Write(p []byte) (int, error) {
+	n, err := w.f.Write(p)
+	w.written += int64(n)
+	w.due += int64(n)
+	if err == nil && w.due >= chunk {
+		err = w.flush()
+	}
+	return n, err
+}
+
+// flush syncs what was written and lets the page cache go of it.
+func (w *syncingWriter) flush() error {
+	w.due = 0
+	if err := w.f.Sync(); err != nil {
+		return err
+	}
+	dropRange(w.f, 0, w.written)
+	return nil
+}
+
+// A droppingReader reads a file, and every chunk lets the page cache go of what it read.
+type droppingReader struct {
+	f         *os.File
+	read, due int64
+}
+
+func (r *droppingReader) Read(p []byte) (int, error) {
+	n, err := r.f.Read(p)
+	r.read += int64(n)
+	r.due += int64(n)
+	if r.due >= chunk || err != nil {
+		r.due = 0
+		dropRange(r.f, 0, r.read)
+	}
+	return n, err
 }
 
 // syncFile writes what the file system holds of a file to disk.

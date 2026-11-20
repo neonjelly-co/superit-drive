@@ -14,5 +14,11 @@ func dropCached(file string) {
 		return
 	}
 	defer f.Close()
-	_ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED)
+	dropRange(f, 0, 0)
+}
+
+// dropRange asks the kernel to let go of what it caches of the bytes of f from offset, length of them (0: to its end).
+// Only what is on disk already goes: dirty pages are written first by a sync.
+func dropRange(f *os.File, offset, length int64) {
+	_ = unix.Fadvise(int(f.Fd()), offset, length, unix.FADV_DONTNEED)
 }

@@ -414,27 +414,3 @@ func freshSchema(ctx context.Context, version int) ([]string, error) {
 	}
 	return schemaOf(ctx, conn)
 }
-
-// CopyFile copies the file at from to a new file at to, synced to disk.
-func CopyFile(from, to string) error {
-	in, err := os.Open(from)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := out.ReadFrom(in); err != nil {
-		out.Close()
-		os.Remove(to)
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		os.Remove(to)
-		return err
-	}
-	return out.Close()
-}
