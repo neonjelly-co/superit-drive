@@ -592,6 +592,87 @@ func TestSharedWithMe(t *testing.T) {
 	}
 }
 
+// A search finds, for every person and place the table knows, only the items in found: whatever they may open, written
+// out here rather than worked out from the package. Never a top folder, nothing in a held My files or in a shared folder
+// in the trash, nothing beside, above or outside what was given, nothing given to someone else or that counts for
+// nothing, and nothing at all for someone who is not a member.
+func TestFinds(t *testing.T) {
+	found := map[string]bool{}
+	for _, place := range []string{
+		// Her own My files, whatever was given to whom.
+		"Réka's My files › Offer.pdf",
+		"Réka's My files › Offer.pdf, shared with the admin",
+		// What was shared with her in Bence's My files, through a folder above it or on the item itself, by name or to
+		// everyone. (Items in the trash are never asked about: no route finds them, and a search walks around the trash.)
+		"Bence's My files › Offer.pdf, Réka given viewer on Clients",
+		"Bence's My files › Offer.pdf, Réka given editor on Clients",
+		"Bence's My files › Clients, Réka given editor on Clients",
+		"Bence's My files › 2026, Réka given viewer on Clients",
+		"Bence's My files › Offer.pdf, Réka given viewer on Offer.pdf",
+		"Bence's My files › Offer.pdf, Réka given viewer on Clients and editor on Offer.pdf",
+		"Bence's My files › Offer.pdf, Réka given editor on Clients and viewer on Offer.pdf",
+		"Bence's My files › Offer.pdf, everyone given viewer on Bakery",
+		"Bence's My files › Offer.pdf, everyone given editor on Offer.pdf",
+		"Bence's My files › Offer.pdf, everyone given viewer on Clients and Réka editor on Bakery",
+		"Réka's My files › Offer.pdf in the trash, deleted by the admin",
+		"Bence's My files › Offer.pdf in the trash, deleted by Réka, Réka given editor on Clients",
+		"Bence's My files › Offer.pdf in the trash, deleted by Bence, Réka given editor on Clients",
+		"Bence's My files › Offer.pdf in the trash, deleted by Réka, Réka given editor on Offer.pdf",
+		// In a shared folder: by a role on it as a whole, or on the way down to the item.
+		"a shared folder › Offer.pdf, given viewer on it as a whole",
+		"a shared folder › Offer.pdf, given editor on it as a whole",
+		"a shared folder › Offer.pdf, given manager on it as a whole",
+		"a shared folder › Offer.pdf, given viewer on it as a whole and editor on Bakery",
+		"a shared folder › Offer.pdf, given editor on it as a whole and viewer on Offer.pdf",
+		"a shared folder › Offer.pdf, given editor on Bakery",
+		"a shared folder › Bakery, given editor on Bakery",
+		"a shared folder › Offer.pdf, given viewer on Offer.pdf",
+		"a shared folder › Offer.pdf, everyone given viewer on Clients",
+		"a shared folder › Offer.pdf, everyone given viewer on it as a whole",
+		"a shared folder › Offer.pdf in the trash, deleted by Bence, given editor on it as a whole",
+		"a shared folder › Offer.pdf in the trash, deleted by Réka, given editor on Bakery",
+	} {
+		found["member "+place] = true
+	}
+	for _, place := range []string{
+		"Réka's My files › Offer.pdf, shared with the admin",
+		"Réka's My files › Offer.pdf in the trash, deleted by the admin",
+		"Bence's My files › Offer.pdf, everyone given viewer on Bakery",
+		"Bence's My files › Offer.pdf, everyone given editor on Offer.pdf",
+		"Bence's My files › Offer.pdf, everyone given viewer on Clients and Réka editor on Bakery",
+		"Bence's My files › Offer.pdf, the admin given editor on Clients",
+	} {
+		found["admin "+place] = true
+	}
+	// A project admin manages every shared folder, and so finds everything in it.
+	for name, place := range places {
+		if place != nil && place.Kind == SharedFolder && !place.Deleted && len(place.Path) > 0 {
+			found["admin "+name] = true
+		}
+	}
+	tried := 0
+	for pn, p := range people {
+		for ln, l := range places {
+			key := pn + " " + ln
+			if got := Finds(p, l); got != found[key] {
+				t.Errorf("%s: found %v, want %v", key, got, found[key])
+			}
+			// Whatever is found, they may open; and what they may open below a top folder, they find.
+			if l != nil && !l.Deleted && len(l.Path) > 0 && Finds(p, l) != Decide(p, List, l) {
+				t.Errorf("%s: found %v, may open %v", key, Finds(p, l), Decide(p, List, l))
+			}
+			delete(found, key)
+			tried++
+		}
+	}
+	for key := range found {
+		t.Errorf("the table finds %q, which is not a combination the test tried", key)
+	}
+	if want := len(people) * len(places); tried != want {
+		t.Fatalf("tried %d combinations, want %d", tried, want)
+	}
+}
+
 func TestCounts(t *testing.T) {
 	cases := []struct {
 		kind PlaceKind

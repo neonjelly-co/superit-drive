@@ -2,7 +2,10 @@ module github.com/neonjelly-co/superit-drive
 
 go 1.27.4
 
-require modernc.org/sqlite v1.62.0
+require (
+	golang.org/x/text v0.44.0
+	modernc.org/sqlite v1.62.0
+)
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect

@@ -44,6 +44,9 @@ func Open(ctx context.Context, dataDir string) (*Index, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("making the data folder: %w", err)
 	}
+	if err := registerSearchFunctions(); err != nil {
+		return nil, fmt.Errorf("preparing the index's search: %w", err)
+	}
 	file := filepath.Join(dataDir, FileName)
 	pragmas := url.Values{}
 	for _, p := range []string{"journal_mode(WAL)", "busy_timeout(5000)", "foreign_keys(1)", "synchronous(NORMAL)"} {
