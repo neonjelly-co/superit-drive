@@ -36,11 +36,61 @@ func place(t *testing.T, x *Index, owner string) Place {
 
 func put(t *testing.T, x *Index, p Place, folderID int64, name string, folder bool, size int64) Item {
 	t.Helper()
-	it, err := x.PutItem(context.Background(), p.ID, folderID, Seen{Name: name, Folder: folder, Size: size, Changed: time.Now()})
+	it, err := x.PutItem(context.Background(), p.ID, folderID, Seen{Name: name, Folder: folder, Size: size, Changed: time.Now()}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return it
+}
+
+// look is one look at a folder of the place on the Drive's own storage (folderID 0: its top folder, path the names down
+// to it), made at the time given, that found seen: what has been missing for ten minutes and is not seen is taken as
+// found gone at a second look too, as the Drive's Stat would.
+func look(t *testing.T, x *Index, p Place, folderID int64, path []string, seen []Seen, at time.Time) Outcome {
+	t.Helper()
+	ctx := context.Background()
+	old := at.Add(-10 * time.Minute)
+	gone, err := x.MissingIn(ctx, p.ID, folderID, old, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed := map[int64]time.Time{}
+	for _, m := range gone {
+		if !slices.ContainsFunc(seen, func(s Seen) bool { return s.Name == m.Name }) {
+			confirmed[m.ID] = m.Since
+		}
+	}
+	never := func() bool { return false }
+	o, err := x.Reconcile(ctx, p.ID, folderID, Reread{Path: path, Seen: seen, Leave: func(string) bool { return false },
+		Busy: never, Stale: never, At: at, Hide: true, Old: old, Confirmed: confirmed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return o
+}
+
+// missingNamed finds the missing item called name in the place's top folder.
+func missingNamed(t *testing.T, x *Index, p Place, name string) Missing {
+	t.Helper()
+	all, err := x.MissingIn(context.Background(), p.ID, 0, time.Now().Add(24*time.Hour), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range all {
+		if m.Name == name {
+			return m
+		}
+	}
+	t.Fatalf("no missing item called %q", name)
+	return Missing{}
+}
+
+// gone is what the Drive does with what the storage no longer shows in a folder: one look marks it missing, and a
+// second look, more than ten minutes later, drops it.
+func gone(t *testing.T, x *Index, p Place, folderID int64, path []string, seen []Seen) {
+	t.Helper()
+	look(t, x, p, folderID, path, seen, time.Now())
+	look(t, x, p, folderID, path, seen, time.Now().Add(11*time.Minute))
 }
 
 // An index made before folders and the trash keeps its items and their ids, and new ids follow the old ones.
@@ -266,11 +316,9 @@ func TestAnIdIsNeverGivenToASecondItem(t *testing.T) {
 	if b := put(t, x, p, 0, "a.txt", false, 1); b.ID == a.ID {
 		t.Fatalf("the id %d was given to a second item", a.ID)
 	}
-	// Nor when a listing drops an item the storage no longer has.
+	// Nor when an item the storage no longer has is dropped.
 	c := put(t, x, p, 0, "c.txt", false, 1)
-	if err := x.SetChildren(ctx, p.ID, 0, nil, func(string) bool { return false }, func() bool { return false }); err != nil {
-		t.Fatal(err)
-	}
+	gone(t, x, p, 0, nil, nil)
 	if d := put(t, x, p, 0, "d.txt", false, 1); d.ID == c.ID {
 		t.Fatalf("the id %d was given to a second item", c.ID)
 	}
@@ -357,39 +405,148 @@ func TestRemovingAFolderForGoodLeavesWhatWasDeletedOutOfItEarlier(t *testing.T) 
 	}
 }
 
-func TestAListingLeavesTheIndexAloneWhenTheFolderChangedMeanwhile(t *testing.T) {
+func TestALookLeavesTheIndexAloneWhenTheFolderChangedMeanwhile(t *testing.T) {
 	ctx := context.Background()
 	x := open(t)
 	p := place(t, x, "u-reka")
 	a := put(t, x, p, 0, "a.txt", false, 1)
+	drafts := put(t, x, p, 0, "Drafts", true, 0)
 	seen := []Seen{{Name: "b.txt", Size: 2}}
-	if err := x.SetChildren(ctx, p.ID, 0, seen, func(string) bool { return false }, func() bool { return true }); err != nil {
-		t.Fatal(err)
+	never := func() bool { return false }
+	always := func() bool { return true }
+	none := func(string) bool { return false }
+	for what, r := range map[string]Reread{
+		"stale": {Seen: seen, Leave: none, Busy: never, Stale: always, At: time.Now(), Hide: true},
+		"busy":  {Seen: seen, Leave: none, Busy: always, Stale: never, At: time.Now(), Hide: true},
+	} {
+		if _, err := x.Reconcile(ctx, p.ID, 0, r); !errors.Is(err, ErrChanged) {
+			t.Fatalf("%s: %v, want ErrChanged", what, err)
+		}
+	}
+	// A folder no longer at the path the look read is left alone.
+	if _, err := x.Reconcile(ctx, p.ID, drafts.ID, Reread{Path: []string{"Old name"}, Seen: seen, Leave: none, Busy: never,
+		Stale: never, At: time.Now(), Hide: true}); !errors.Is(err, ErrChanged) {
+		t.Fatalf("a folder renamed meanwhile: %v, want ErrChanged", err)
+	}
+	if items, _ := x.Children(ctx, p.ID, drafts.ID); len(items) != 0 {
+		t.Fatalf("a stale look changed Drafts: %+v", items)
 	}
 	items, _ := x.Children(ctx, p.ID, 0)
-	if len(items) != 1 || items[0].ID != a.ID {
-		t.Fatalf("a stale listing changed the folder: %+v", items)
+	if len(items) != 2 || items[1].ID != a.ID {
+		t.Fatalf("a stale look changed the folder: %+v", items)
 	}
 	// Names being written are left alone; the rest follows the storage.
-	keep := func(name string) bool { return name == "a.txt" }
-	if err := x.SetChildren(ctx, p.ID, 0, seen, keep, func() bool { return false }); err != nil {
+	keep := func(name string) bool { return name == "a.txt" || name == "Drafts" }
+	if _, err := x.Reconcile(ctx, p.ID, 0, Reread{Seen: seen, Leave: keep, Busy: never, Stale: never, At: time.Now(), Hide: true}); err != nil {
 		t.Fatal(err)
 	}
 	items, _ = x.Children(ctx, p.ID, 0)
-	var names []string
-	for _, it := range items {
-		names = append(names, it.Name)
-	}
-	if !slices.Equal(names, []string{"a.txt", "b.txt"}) || items[0].ID != a.ID {
+	if got := namesOf(items); !slices.Equal(got, []string{"Drafts", "a.txt", "b.txt"}) || items[1].ID != a.ID {
 		t.Fatalf("got %+v", items)
 	}
 	// A folder where a file was is a new item, with a new id.
-	if err := x.SetChildren(ctx, p.ID, 0, []Seen{{Name: "a.txt", Folder: true}}, func(string) bool { return false }, func() bool { return false }); err != nil {
+	look(t, x, p, 0, nil, []Seen{{Name: "a.txt", Folder: true}, {Name: "Drafts", Folder: true}}, time.Now())
+	items, _ = x.Children(ctx, p.ID, 0)
+	if len(items) != 2 || items[1].Name != "a.txt" || !items[1].Folder || items[1].ID == a.ID {
+		t.Fatalf("got %+v", items)
+	}
+}
+
+// What a look does not find is hidden at once, but dropped only by a look at least ten minutes later that confirms it;
+// found again before, exactly as it was, it is back with its id. Anything else under its name, and what the Drive
+// itself puts there, is a new item.
+func TestAnItemGoneFromTheStorageIsHiddenThenDropped(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	p := place(t, x, "u-reka")
+	t0 := time.Now()
+	changed := t0.Add(-time.Hour).Truncate(time.Second)
+	both := []Seen{{Name: "Drafts", Folder: true, Changed: changed}, {Name: "Notes.txt", Size: 5, Changed: changed}}
+	look(t, x, p, 0, nil, both, t0)
+	top, _ := x.Children(ctx, p.ID, 0)
+	drafts, notes := top[0], top[1]
+	offer := put(t, x, p, drafts.ID, "Offer.pdf", false, 84)
+	if _, err := x.Give(ctx, p.ID, notes.ID, Grantee{Everyone: true}, "viewer", time.Now(), "u-reka", nil); err != nil {
 		t.Fatal(err)
 	}
-	items, _ = x.Children(ctx, p.ID, 0)
-	if len(items) != 1 || !items[0].Folder || items[0].ID == a.ID {
-		t.Fatalf("got %+v", items)
+
+	// Drafts is gone: hidden, and so is everything in it, but kept.
+	if o := look(t, x, p, 0, nil, both[1:], t0); o.Hidden != 1 || o.Dropped != 0 {
+		t.Fatalf("first look: %+v", o)
+	}
+	for _, id := range []int64{drafts.ID, offer.ID} {
+		if _, err := x.Item(ctx, p.ID, id); !errors.Is(err, ErrNoItem) {
+			t.Errorf("item %d of a missing folder is found: %v", id, err)
+		}
+	}
+	if got, _ := x.Children(ctx, p.ID, 0); len(got) != 1 || got[0].ID != notes.ID {
+		t.Fatalf("the top folder lists %+v", got)
+	}
+	// Seen again five minutes later, as it was: back, the same items.
+	if o := look(t, x, p, 0, nil, both, t0.Add(5*time.Minute)); o.Back != 1 {
+		t.Fatalf("Drafts back: %+v", o)
+	}
+	if got, err := x.Item(ctx, p.ID, offer.ID); err != nil || got.Above[0].ID != drafts.ID {
+		t.Fatalf("Offer.pdf after Drafts came back: %+v, %v", got, err)
+	}
+	// A folder of that name made anew (it changed since) is another folder; the missing one is dropped in its time.
+	look(t, x, p, 0, nil, both[1:], t0.Add(6*time.Minute))
+	remade := []Seen{{Name: "Drafts", Folder: true, Changed: changed.Add(time.Hour)}, both[1]}
+	if o := look(t, x, p, 0, nil, remade, t0.Add(7*time.Minute)); o.Back != 0 || o.Added != 1 {
+		t.Fatalf("Drafts made anew: %+v", o)
+	}
+	if _, err := x.Item(ctx, p.ID, offer.ID); !errors.Is(err, ErrNoItem) {
+		t.Fatalf("Offer.pdf is found in the new Drafts: %v", err)
+	}
+	if o := look(t, x, p, 0, nil, remade, t0.Add(17*time.Minute)); o.Dropped != 1 {
+		t.Fatalf("the old Drafts, ten minutes on: %+v", o)
+	}
+	both[0] = remade[0]
+
+	// Notes.txt gone, then a look nine minutes later: still kept, with its grant.
+	look(t, x, p, 0, nil, both[:1], t0.Add(time.Minute))
+	if o := look(t, x, p, 0, nil, both[:1], t0.Add(10*time.Minute)); o.Dropped != 0 {
+		t.Fatalf("dropped after nine minutes: %+v", o)
+	}
+	if got, _ := x.GrantsOn(ctx, p.ID, []int64{notes.ID}); len(got) != 1 {
+		t.Fatalf("the grant on Notes.txt while it is missing: %+v", got)
+	}
+	// The Drive uploads a new Notes.txt there meanwhile: a new item, with nothing given on it.
+	fresh := put(t, x, p, 0, "Notes.txt", false, 9)
+	if fresh.ID == notes.ID {
+		t.Fatal("an upload took over a missing item's id")
+	}
+	if got, _ := x.GrantsOn(ctx, p.ID, []int64{fresh.ID}); len(got) != 0 {
+		t.Fatalf("the new Notes.txt has %+v", got)
+	}
+	// Eleven minutes on: the missing one is dropped, with its grant; the new one stays.
+	if o := look(t, x, p, 0, nil, []Seen{both[0], {Name: "Notes.txt", Size: 9, Changed: fresh.Changed}}, t0.Add(12*time.Minute)); o.Dropped != 1 {
+		t.Fatalf("a look eleven minutes on: %+v", o)
+	}
+	var grants int
+	if err := x.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM grants WHERE item_id = ?", notes.ID).Scan(&grants); err != nil || grants != 0 {
+		t.Fatalf("%d grants outlived the dropped item (%v)", grants, err)
+	}
+	if got, _ := x.Children(ctx, p.ID, 0); len(got) != 2 || got[1].ID != fresh.ID {
+		t.Fatalf("the top folder lists %+v", got)
+	}
+
+	// Without a second look that confirms it, a missing item is never dropped, however long it has been missing.
+	notesNow := []Seen{{Name: "Notes.txt", Size: 9, Changed: fresh.Changed}}
+	look(t, x, p, 0, nil, notesNow, t0.Add(18*time.Minute)) // the new Drafts missing
+	newDrafts := missingNamed(t, x, p, "Drafts")
+	never := func() bool { return false }
+	if o, err := x.Reconcile(ctx, p.ID, 0, Reread{Seen: notesNow, Leave: func(string) bool { return false },
+		Busy: never, Stale: never, At: t0.Add(time.Hour), Hide: true, Old: t0.Add(50 * time.Minute)}); err != nil || o.Dropped != 0 {
+		t.Fatalf("unconfirmed: %+v, %v", o, err)
+	}
+	// Nor when the storage may not be the Drive's own (Hide false): nothing is hidden or dropped then.
+	if o, err := x.Reconcile(ctx, p.ID, 0, Reread{Leave: func(string) bool { return false }, Busy: never, Stale: never,
+		At: t0.Add(2 * time.Hour), Old: t0.Add(time.Hour), Confirmed: map[int64]time.Time{newDrafts.ID: t0.Add(18 * time.Minute)}}); err != nil || o != (Outcome{}) {
+		t.Fatalf("an untrusted look: %+v, %v", o, err)
+	}
+	if got, _ := x.Children(ctx, p.ID, 0); len(got) != 1 || got[0].ID != fresh.ID {
+		t.Fatalf("the top folder lists %+v", got)
 	}
 }
 
@@ -499,9 +656,7 @@ func TestAGrantOnAnItemLivesAndGoesWithIt(t *testing.T) {
 	if err := x.RemoveFromTrash(ctx, bence.ID, offer.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := x.SetChildren(ctx, bence.ID, 0, []Seen{{Name: "Notes.txt", Size: 5}}, func(string) bool { return false }, func() bool { return false }); err != nil {
-		t.Fatal(err)
-	}
+	gone(t, x, bence, 0, nil, []Seen{{Name: "Notes.txt", Size: 5}})
 	if got, _ := x.GrantsOn(ctx, bence.ID, []int64{clients.ID, offer.ID}); len(got) != 0 {
 		t.Fatalf("grants outlived their items: %+v", got)
 	}
@@ -536,9 +691,12 @@ func TestAnUploadIsOnlyItsMembersAndGoesWithItsFolder(t *testing.T) {
 		t.Fatalf("the upload into the top folder: %+v, %v", got, err)
 	}
 	for what, find := range map[string]func() error{
-		"by another member":       func() error { _, err := x.UploadOf(ctx, bence.ID, into.ID, "u-reka"); return err },
-		"through another place":   func() error { _, err := x.UploadOf(ctx, reka.ID, into.ID, "u-bence"); return err },
-		"an id that is not there": func() error { _, err := x.UploadOf(ctx, bence.ID, "00000000000000000000000000000000", "u-bence"); return err },
+		"by another member":     func() error { _, err := x.UploadOf(ctx, bence.ID, into.ID, "u-reka"); return err },
+		"through another place": func() error { _, err := x.UploadOf(ctx, reka.ID, into.ID, "u-bence"); return err },
+		"an id that is not there": func() error {
+			_, err := x.UploadOf(ctx, bence.ID, "00000000000000000000000000000000", "u-bence")
+			return err
+		},
 	} {
 		if err := find(); !errors.Is(err, ErrNoUpload) {
 			t.Errorf("finding it %s: %v, want ErrNoUpload", what, err)
@@ -702,10 +860,14 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 	never := func(string) bool { return false }
 	for what, err := range map[string]error{
 		"an upload into Bakery, through Bence's My files": func() error {
-			_, err := x.PutItem(ctx, bence.ID, bakery.ID, Seen{Name: "Late.txt"})
+			_, err := x.PutItem(ctx, bence.ID, bakery.ID, Seen{Name: "Late.txt"}, now)
 			return err
 		}(),
-		"a listing of Bakery, through Bence's My files": x.SetChildren(ctx, bence.ID, bakery.ID, []Seen{{Name: "Late.txt"}}, never, func() bool { return false }),
+		"a listing of Bakery, through Bence's My files": func() error {
+			_, err := x.Reconcile(ctx, bence.ID, bakery.ID, Reread{Path: []string{"Clients", "Bakery"}, Seen: []Seen{{Name: "Late.txt"}},
+				Leave: never, Busy: func() bool { return false }, Stale: func() bool { return false }, At: now, Hide: true})
+			return err
+		}(),
 		"a move into Bakery, inside Bence's My files": func() error {
 			_, err := x.Relocate(ctx, bence.ID, notes.ID, bakery.ID, "Notes.txt")
 			return err
@@ -848,9 +1010,7 @@ func TestALinkLivesAndGoesWithItsItem(t *testing.T) {
 	if err := x.RemoveFromTrash(ctx, shared.ID, clients.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := x.SetChildren(ctx, bence.ID, 0, nil, func(string) bool { return false }, func() bool { return false }); err != nil {
-		t.Fatal(err)
-	}
+	gone(t, x, bence, 0, nil, nil)
 	var left int
 	if err := x.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM links").Scan(&left); err != nil || left != 0 {
 		t.Fatalf("%d links outlived their items (%v)", left, err)
@@ -871,5 +1031,139 @@ func TestFirstChildren(t *testing.T) {
 	}
 	if got, more, _ := x.FirstChildren(ctx, p.ID, 0, 4); more || len(got) != 4 {
 		t.Fatalf("all 4: %d, more %v", len(got), more)
+	}
+	// Page after page, the whole list in the same order, each once: folders first, then files.
+	put(t, x, p, 0, "A", true, 0)
+	all, _ := x.Children(ctx, p.ID, 0)
+	var paged []string
+	var after *Item
+	for {
+		page, more, err := x.ChildrenAfter(ctx, p.ID, 0, after, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		paged = append(paged, namesOf(page)...)
+		if !more {
+			break
+		}
+		after = &page[len(page)-1]
+	}
+	if want := namesOf(all); !slices.Equal(paged, want) || !slices.Equal(want, []string{"A", "B", "a.txt", "b.txt", "c.txt"}) {
+		t.Fatalf("page by page: %q, all at once: %q", paged, want)
+	}
+}
+
+// The trash follows the storage by entry: an item whose entry is gone is hidden, and dropped only when a later look
+// confirms it; an entry the index does not know, holding one item, is adopted as an item deleted that day.
+func TestTheTrashFollowsTheStorageByEntry(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	p := place(t, x, "u-reka")
+	a := put(t, x, p, 0, "a.txt", false, 1)
+	b := put(t, x, p, 0, "b.txt", false, 2)
+	t0 := time.Now()
+	for _, it := range []struct {
+		Item
+		entry string
+	}{{a, "2026-11-01 aaaaaaaa"}, {b, "2026-11-02 bbbbbbbb"}} {
+		if err := x.Trash(ctx, p.ID, it.ID, t0, it.entry, "u-reka"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	never := func() bool { return false }
+	none := func(string) bool { return false }
+	present := func(entries ...string) func(string) bool {
+		return func(e string) bool { return slices.Contains(entries, e) }
+	}
+	day := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
+	adopt := []Adopted{{Entry: "2026-11-03 cccccccc", Item: Seen{Name: "c.txt", Size: 3}, Deleted: day}}
+
+	o, err := x.ReconcileTrash(ctx, p.ID, TrashReread{Present: present("2026-11-02 bbbbbbbb", "2026-11-03 cccccccc"), Leave: none,
+		Stale: never, At: t0, Hide: true, Old: t0.Add(-10 * time.Minute), Adopt: adopt})
+	if err != nil || o.Hidden != 1 || o.Added != 1 {
+		t.Fatalf("first look: %+v, %v", o, err)
+	}
+	trash, _ := x.TrashItems(ctx, p.ID)
+	if len(trash) != 2 || trash[0].ID != b.ID || trash[1].Name != "c.txt" || !trash[1].Deleted.Equal(day) || trash[1].DeletedBy != "" || trash[1].RestoreTo != 0 {
+		t.Fatalf("the trash: %+v", trash)
+	}
+	if _, err := x.TrashItem(ctx, p.ID, a.ID); !errors.Is(err, ErrNoItem) {
+		t.Fatalf("a.txt, whose entry is gone, is found: %v", err)
+	}
+	// Adopting again changes nothing; a later look without confirmation drops nothing; one with it drops a.txt.
+	o, _ = x.ReconcileTrash(ctx, p.ID, TrashReread{Present: present("2026-11-02 bbbbbbbb", "2026-11-03 cccccccc"), Leave: none,
+		Stale: never, At: t0.Add(time.Hour), Hide: true, Old: t0.Add(50 * time.Minute), Adopt: adopt})
+	if o != (Outcome{}) {
+		t.Fatalf("a look without confirmation: %+v", o)
+	}
+	missing, _ := x.TrashMissing(ctx, p.ID, t0.Add(50*time.Minute), 10)
+	if len(missing) != 1 || missing[0].ID != a.ID || missing[0].Entry != "2026-11-01 aaaaaaaa" || missing[0].Name != "a.txt" {
+		t.Fatalf("missing from the trash: %+v", missing)
+	}
+	o, _ = x.ReconcileTrash(ctx, p.ID, TrashReread{Present: present("2026-11-02 bbbbbbbb", "2026-11-03 cccccccc"), Leave: none,
+		Stale: never, At: t0.Add(time.Hour), Hide: true, Old: t0.Add(50 * time.Minute),
+		Confirmed: map[int64]time.Time{a.ID: missing[0].Since}})
+	if o.Dropped != 1 {
+		t.Fatalf("a confirmed look: %+v", o)
+	}
+	// An entry found again before that is back.
+	x.ReconcileTrash(ctx, p.ID, TrashReread{Present: present("2026-11-03 cccccccc"), Leave: none, Stale: never, At: t0, Hide: true})
+	if _, err := x.TrashItem(ctx, p.ID, b.ID); !errors.Is(err, ErrNoItem) {
+		t.Fatal("b.txt's entry went, but it is still in the trash")
+	}
+	if o, _ := x.ReconcileTrash(ctx, p.ID, TrashReread{Present: present("2026-11-02 bbbbbbbb", "2026-11-03 cccccccc"), Leave: none,
+		Stale: never, At: t0, Hide: true}); o.Back != 1 {
+		t.Fatalf("b.txt's entry back: %+v", o)
+	}
+}
+
+// The walk visits each place's trash, then its top folder, then its folders by id, skipping what is in the trash or
+// missing; a folder made meanwhile is reached.
+func TestTheWalkOrder(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	reka, bence := place(t, x, "u-reka"), place(t, x, "u-bence")
+	a := put(t, x, reka, 0, "A", true, 0)
+	b := put(t, x, reka, a.ID, "B", true, 0)
+	put(t, x, reka, 0, "file.txt", false, 1)
+	c := put(t, x, bence, 0, "C", true, 0)
+	trashed := put(t, x, bence, 0, "Trashed", true, 0)
+	if err := x.Trash(ctx, bence.ID, trashed.ID, time.Now(), "e", "u-bence"); err != nil {
+		t.Fatal(err)
+	}
+	var steps []WalkStep
+	for s, ok := (WalkStep{}), true; ; {
+		var err error
+		s, ok, err = x.NextWalkStep(ctx, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			break
+		}
+		steps = append(steps, s)
+		if s == (WalkStep{Place: reka.ID, Folder: a.ID}) {
+			put(t, x, reka, b.ID, "Made meanwhile", true, 0)
+		}
+	}
+	got := make([]string, 0, len(steps))
+	for _, s := range steps {
+		got = append(got, s.String())
+	}
+	want := []string{
+		fmt.Sprintf("%d:-1", reka.ID), fmt.Sprintf("%d:0", reka.ID), fmt.Sprintf("%d:%d", reka.ID, a.ID), fmt.Sprintf("%d:%d", reka.ID, b.ID),
+		fmt.Sprintf("%d:%d", reka.ID, trashed.ID+1),
+		fmt.Sprintf("%d:-1", bence.ID), fmt.Sprintf("%d:0", bence.ID), fmt.Sprintf("%d:%d", bence.ID, c.ID),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if s, ok := ParseWalkStep(steps[2].String()); !ok || s != steps[2] {
+		t.Fatalf("a step read back: %+v, %v", s, ok)
+	}
+	for _, bad := range []string{"", "1", "a:b", "1:-2", "-1:0"} {
+		if _, ok := ParseWalkStep(bad); ok {
+			t.Errorf("%q read as a step", bad)
+		}
 	}
 }

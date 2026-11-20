@@ -10,6 +10,15 @@
 // a trailing slash; without it Apache answers with a redirect. The client never follows a redirect: Go would turn a
 // redirected PUT into a GET. Nothing the client does replaces anything already on the storage: PUT sends
 // If-None-Match: *, MOVE sends Overwrite: F, and MKCOL never replaces by its nature.
+//
+// A listing is read as it arrives, one entry at a time, so a folder of any size costs the Drive no more memory than the
+// entries it keeps (List stops at the most it is asked to read; Each keeps none).
+//
+// A server may close an idle connection just as the client sends a request on it (its keep-alive time ran out). The
+// client then cannot tell whether the server acted on the request, so it sends again only what is safe to send twice:
+// reading (GET, PROPFIND), which Go sends again by itself on a new connection. Every request that changes the storage
+// (PUT, MKCOL, MOVE, DELETE) goes on a new connection of its own instead, which a server never closes for being idle,
+// and is never sent twice.
 package storage
 
 import (
@@ -40,6 +49,8 @@ var (
 	ErrBadPath = errors.New(`a path on the storage cannot contain "." or ".."`)
 	// ErrNoRanges is returned by OpenPart when the server sends the whole file instead of the part asked for.
 	ErrNoRanges = errors.New("the storage sent the whole file instead of part of it")
+	// ErrTooMany is returned by List when a folder holds more than the most it was asked to read.
+	ErrTooMany = errors.New("the folder holds more than the Drive reads at once")
 )
 
 // A StatusError is an answer from the storage that has no meaning of its own here, such as 403 Forbidden.
@@ -64,28 +75,35 @@ type Client struct {
 	root     []string // escaped path segments of the Drive's folder on the server
 	user     string
 	password string
-	http     *http.Client
+	// http reads (GET, PROPFIND) over connections kept open between requests; change sends every request that changes
+	// the storage on a new connection of its own (see the package's comment).
+	http, change *http.Client
 }
+
+// idleFor is how long a connection to the storage is kept open between requests. It is shorter than the keep-alive
+// time of Apache (5 seconds by default), so the Drive itself usually closes a connection before the server does.
+const idleFor = 4 * time.Second
 
 // New makes a client for the Drive's folder (folder, such as "/" or "/drive") on the WebDAV server at address.
 func New(address *url.URL, user, password, folder string) *Client {
 	server := &url.URL{Scheme: address.Scheme, Host: address.Host}
 	root := escapeSegments(path.Join(address.Path, folder))
 
-	// One transport for every call to the storage. Each connection's network buffers are capped, to hold the Drive's
-	// memory figure (package transfers).
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = transfers.Dial(30 * time.Second)
-	transport.MaxIdleConnsPerHost = 8
-	transport.ResponseHeaderTimeout = time.Minute
+	// Each connection's network buffers are capped, to hold the Drive's memory figure (package transfers).
+	reading := http.DefaultTransport.(*http.Transport).Clone()
+	reading.DialContext = transfers.Dial(30 * time.Second)
+	reading.MaxIdleConnsPerHost = 8
+	reading.IdleConnTimeout = idleFor
+	reading.ResponseHeaderTimeout = time.Minute
+	changing := reading.Clone()
+	changing.DisableKeepAlives = true
 
-	client := &http.Client{
-		Transport: transport,
-		// Answer every redirect as it is. Apache redirects a folder's address without the trailing slash, and Go would
-		// follow a redirected PUT or PROPFIND as a GET and report that GET's answer instead.
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	return &Client{server: server, root: root, user: user, password: password, http: client}
+	// Answer every redirect as it is. Apache redirects a folder's address without the trailing slash, and Go would
+	// follow a redirected PUT or PROPFIND as a GET and report that GET's answer instead.
+	noRedirects := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &Client{server: server, root: root, user: user, password: password,
+		http:   &http.Client{Transport: reading, CheckRedirect: noRedirects},
+		change: &http.Client{Transport: changing, CheckRedirect: noRedirects}}
 }
 
 // Address is the address of the Drive's folder on the storage, for log lines. It holds no login.
@@ -99,64 +117,155 @@ type Entry struct {
 	Changed time.Time
 }
 
-// List returns what is directly inside the folder at dir ("" is the Drive's own folder). It returns ErrNotFound when
-// the folder does not exist.
-func (c *Client) List(ctx context.Context, dir string) ([]Entry, error) {
+// List returns what is directly inside the folder at dir ("" is the Drive's own folder), at most max entries: a folder
+// holding more is ErrTooMany, after reading no more than that. It returns ErrNotFound when the folder does not exist.
+func (c *Client) List(ctx context.Context, dir string, max int) ([]Entry, error) {
+	var entries []Entry
+	err := c.each(ctx, dir, int64(max)*maxEntryBytes+maxListingOverhead, func(e Entry) error {
+		if len(entries) >= max {
+			return fmt.Errorf("listing %q: %w", dir, ErrTooMany)
+		}
+		entries = append(entries, e)
+		return nil
+	})
+	return entries, err
+}
+
+// Each calls each for every entry directly inside the folder at dir, as the listing arrives, and keeps none of them:
+// for a folder of any size, such as the hidden uploads folder, that is looked through rather than kept. An error from
+// each stops the listing and is returned. It returns ErrNotFound when the folder does not exist.
+func (c *Client) Each(ctx context.Context, dir string, each func(Entry) error) error {
+	return c.each(ctx, dir, -1, each)
+}
+
+// How many bytes of a listing List reads at most: maxEntryBytes per entry it may keep (Apache sends about 600 for one,
+// and under 2,000 for one with a name of 255 bytes of accented letters), and maxListingOverhead for the rest.
+const (
+	maxEntryBytes      = 8 << 10
+	maxListingOverhead = 64 << 10
+)
+
+// each reads the listing of dir as it arrives, at most limit bytes of it (-1: no limit), and calls each for every entry
+// directly inside it.
+func (c *Client) each(ctx context.Context, dir string, limit int64, each func(Entry) error) error {
 	if err := checkPath(dir); err != nil {
-		return nil, err
+		return err
 	}
 	target := c.folderURL(dir)
-	ms, res, err := c.propfind(ctx, target, "1")
-	if err != nil {
-		return nil, fmt.Errorf("listing %q on the storage: %w", dir, err)
-	}
-	if ms == nil {
-		return nil, statusError("listing", dir, res)
-	}
 	self := segments(target.EscapedPath())
-	entries := make([]Entry, 0, len(ms.Responses))
-	for _, r := range ms.Responses {
+	res, err := c.propfind(ctx, target, "1", limit, func(r response) error {
 		u, err := target.Parse(r.Href)
 		if err != nil {
-			continue
+			return nil
 		}
 		segs := segments(u.EscapedPath())
 		if equal(segs, self) || len(segs) != len(self)+1 || !equal(segs[:len(self)], self) {
-			continue // the folder itself, or something that is not directly inside it
+			return nil // the folder itself, or something that is not directly inside it
 		}
-		e, ok := r.entry(segs[len(segs)-1])
-		if ok {
-			entries = append(entries, e)
+		if e, ok := r.entry(segs[len(segs)-1]); ok {
+			return each(e)
 		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, ErrTooMany):
+		return err
+	case err != nil:
+		return fmt.Errorf("listing %q on the storage: %w", dir, err)
+	case res != nil:
+		return statusError("listing", dir, res)
 	}
-	return entries, nil
+	return nil
 }
 
+// errListingTooLong stops reading a listing longer than its limit.
+var errListingTooLong = errors.New("the listing is longer than the Drive reads")
+
 // propfind asks for the properties the Drive reads, at depth "0" (the item itself) or "1" (and what is directly
-// inside). On a 207 answer it returns the decoded listing; on any other it returns a nil listing and the answer, whose
-// body is already closed, for the caller to tell what it means.
-func (c *Client) propfind(ctx context.Context, target *url.URL, depth string) (*multistatus, *http.Response, error) {
+// inside), and on a 207 answer calls each for every response in it as it is read, reading at most limit bytes (-1: no
+// limit); a listing cut short, or longer than that, is an error. On any other answer it returns that answer, whose body
+// is already closed, for the caller to tell what it means.
+//
+// Reading changes nothing, so Go may send it again by itself on a new connection when the server closed the one it was
+// sent on before answering (Idempotency-Key, never sent, marks it so).
+func (c *Client) propfind(ctx context.Context, target *url.URL, depth string, limit int64, each func(response) error) (*http.Response, error) {
 	const body = `<?xml version="1.0" encoding="utf-8"?>` +
 		`<D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:getcontentlength/><D:getlastmodified/></D:prop></D:propfind>`
 	req, err := c.request(ctx, "PROPFIND", target, strings.NewReader(body))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	req.Header.Set("Depth", depth)
 	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+	req.Header["Idempotency-Key"] = nil
 	res, err := c.http.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer drain(res)
 	if res.StatusCode != http.StatusMultiStatus {
-		return nil, res, nil
+		return res, nil
 	}
-	var ms multistatus
-	if err := xml.NewDecoder(res.Body).Decode(&ms); err != nil {
-		return nil, nil, fmt.Errorf("the answer is not a WebDAV listing: %w", err)
+	var in io.Reader = res.Body
+	if limit >= 0 {
+		in = &limitedListing{r: res.Body, left: limit}
 	}
-	return &ms, res, nil
+	dec := xml.NewDecoder(in)
+	multistatus := false
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if errors.Is(err, errListingTooLong) {
+				return nil, fmt.Errorf("%w: %w", ErrTooMany, err)
+			}
+			return nil, fmt.Errorf("the answer is not a whole WebDAV listing: %w", err)
+		}
+		start, ok := tok.(xml.StartElement)
+		if !ok || start.Name.Space != "DAV:" {
+			continue
+		}
+		switch start.Name.Local {
+		case "multistatus":
+			multistatus = true
+		case "response":
+			var r response
+			if err := dec.DecodeElement(&r, &start); err != nil {
+				if errors.Is(err, errListingTooLong) {
+					return nil, fmt.Errorf("%w: %w", ErrTooMany, err)
+				}
+				return nil, fmt.Errorf("the answer is not a whole WebDAV listing: %w", err)
+			}
+			if err := each(r); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if !multistatus {
+		return nil, errors.New("the answer is not a WebDAV listing")
+	}
+	return nil, nil
+}
+
+// limitedListing reads at most left bytes of a listing, then fails with errListingTooLong (where io.LimitReader would
+// end it quietly, as if it were whole).
+type limitedListing struct {
+	r    io.Reader
+	left int64
+}
+
+func (l *limitedListing) Read(p []byte) (int, error) {
+	if l.left <= 0 {
+		return 0, errListingTooLong
+	}
+	if int64(len(p)) > l.left {
+		p = p[:l.left]
+	}
+	n, err := l.r.Read(p)
+	l.left -= int64(n)
+	return n, err
 }
 
 // Stat returns what is at p, without a trailing slash. It returns ErrNotFound when nothing is. A folder there is
@@ -166,22 +275,24 @@ func (c *Client) Stat(ctx context.Context, p string) (Entry, error) {
 		return Entry{}, err
 	}
 	name := path.Base("/" + p)
-	ms, res, err := c.propfind(ctx, c.fileURL(p), "0")
-	if err != nil {
+	var found *Entry
+	res, err := c.propfind(ctx, c.fileURL(p), "0", maxEntryBytes+maxListingOverhead, func(r response) error {
+		if e, ok := r.entry(name); ok && found == nil {
+			found = &e
+		}
+		return nil
+	})
+	switch {
+	case err != nil:
 		return Entry{}, fmt.Errorf("looking up %q on the storage: %w", p, err)
-	}
-	if ms == nil {
-		if isRedirect(res.StatusCode) {
-			return Entry{Name: name, Folder: true}, nil
-		}
+	case res != nil && isRedirect(res.StatusCode):
+		return Entry{Name: name, Folder: true}, nil
+	case res != nil:
 		return Entry{}, statusError("looking up", p, res)
+	case found == nil:
+		return Entry{}, fmt.Errorf("looking up %q on the storage: the answer holds no properties", p)
 	}
-	for _, r := range ms.Responses {
-		if e, ok := r.entry(name); ok {
-			return e, nil
-		}
-	}
-	return Entry{}, fmt.Errorf("looking up %q on the storage: the answer holds no properties", p)
+	return *found, nil
 }
 
 // Put writes a new file at p from body, which must hold exactly size bytes, in one request. The server writes the
@@ -208,7 +319,7 @@ func (c *Client) Put(ctx context.Context, p string, body io.Reader, size int64) 
 	req.ContentLength = size
 	req.Header.Set("If-None-Match", "*")
 	req.Header.Set("Content-Type", "application/octet-stream")
-	res, err := c.http.Do(req)
+	res, err := c.change.Do(req)
 	if err != nil {
 		return fmt.Errorf("writing %q on the storage: %w", p, err)
 	}
@@ -244,7 +355,7 @@ func (c *Client) PutPart(ctx context.Context, p string, offset int64, body io.Re
 	req.ContentLength = size
 	req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+size-1, total))
 	req.Header.Set("Content-Type", "application/octet-stream")
-	res, err := c.http.Do(req)
+	res, err := c.change.Do(req)
 	if err != nil {
 		return fmt.Errorf("writing part of %q on the storage: %w", p, err)
 	}
@@ -491,7 +602,7 @@ func (c *Client) move(ctx context.Context, from, to string, source *url.URL) err
 	}
 	req.Header.Set("Destination", c.fileURL(to).String())
 	req.Header.Set("Overwrite", "F")
-	res, err := c.http.Do(req)
+	res, err := c.change.Do(req)
 	if err != nil {
 		return fmt.Errorf("moving %q on the storage: %w", from, err)
 	}
@@ -547,7 +658,7 @@ func (c *Client) delete(ctx context.Context, p string, u *url.URL) error {
 	if err != nil {
 		return err
 	}
-	res, err := c.http.Do(req)
+	res, err := c.change.Do(req)
 	if err != nil {
 		return fmt.Errorf("deleting %q on the storage: %w", p, err)
 	}
@@ -591,7 +702,7 @@ func (c *Client) CreateFolder(ctx context.Context, dir string) error {
 	if err != nil {
 		return err
 	}
-	res, err := c.http.Do(req)
+	res, err := c.change.Do(req)
 	if err != nil {
 		return fmt.Errorf("making the folder %q on the storage: %w", dir, err)
 	}
@@ -615,7 +726,7 @@ func (c *Client) makeOne(ctx context.Context, u *url.URL) error {
 	if err != nil {
 		return err
 	}
-	res, err := c.http.Do(req)
+	res, err := c.change.Do(req)
 	if err != nil {
 		return fmt.Errorf("making the folder %q on the storage: %w", u.Path, err)
 	}
@@ -728,11 +839,7 @@ func drain(res *http.Response) {
 	_ = res.Body.Close()
 }
 
-// The parts of a WebDAV multistatus answer the Drive reads.
-type multistatus struct {
-	Responses []response `xml:"DAV: response"`
-}
-
+// The parts of one response in a WebDAV multistatus answer that the Drive reads.
 type response struct {
 	Href     string     `xml:"DAV: href"`
 	Propstat []propstat `xml:"DAV: propstat"`

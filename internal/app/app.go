@@ -53,6 +53,7 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 		log.Warn("this is a test build: its clock is moved forward", "by", shift.String())
 	}
 	d := drive.New(x, store, drive.Options{Now: clock.Now, Log: log})
+	defer d.Stop() // the looks at folders under way in the background end, before the index closes
 
 	// Sends the Drive's own mail in the background, so a request never waits for the mail server; none without one.
 	mailer := mail.New(s.Mail, s.Address.Hostname(), log)
@@ -85,6 +86,20 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 		d.Tidy(tidyCtx, time.Hour)
 	}()
 	defer func() { stopTidy(); <-tidyDone }() // before the index closes
+
+	// Walks through the storage now and then, and brings the index in step with what was changed there directly.
+	walking := drive.DefaultWalking
+	if every, pause, ok := clock.Walk(); ok {
+		walking = drive.Walking{First: every, Every: every, Pause: pause}
+		log.Warn("this is a test build: the walk through the storage runs at the pace the test sets", "every", every.String(), "pause", pause.String())
+	}
+	walkCtx, stopWalk := context.WithCancel(ctx)
+	walkDone := make(chan struct{})
+	go func() {
+		defer close(walkDone)
+		d.Walk(walkCtx, walking)
+	}()
+	defer func() { stopWalk(); <-walkDone }() // before the index closes
 
 	// Writes how often each public link was used, counted in memory as visitors use them: every half minute, and once
 	// more when the Drive stops (after the last request, before the index closes).

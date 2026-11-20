@@ -114,8 +114,17 @@ export type FolderRef = { id: number; name: string };
 /**
  * What is in a folder, and the folders down to it that the person can open (empty for the top folder): from the place's
  * top folder when `fromTop`, otherwise from the folder they were given. `role` and `can` are theirs in this folder.
+ * The list is the Drive's index at once; `checking` says the Drive is looking at the folder on the Drive storage in the
+ * background, and asking again with `wait` answers once it has.
  */
-export type Listing = { items: Item[]; path: FolderRef[]; fromTop: boolean; role: RoleAt | ""; can: Action[] };
+export type Listing = {
+	items: Item[];
+	path: FolderRef[];
+	fromTop: boolean;
+	role: RoleAt | "";
+	can: Action[];
+	checking?: boolean;
+};
 
 /** An item in the trash. */
 export type TrashItem = {
@@ -379,8 +388,12 @@ export const api = {
 	/** Removes the public link on an item: its address stops working for good. */
 	removeLink: (placeId: number, itemId: number) => call<null>("DELETE", `/api/places/${placeId}/items/${itemId}/link`),
 	usage: () => call<Usage>("GET", "/api/usage"),
-	/** What is in a folder of a place (null: its top folder). */
-	list: (placeId: number, folderId: number | null) => call<Listing>("GET", `${inFolder(placeId, folderId)}/items`),
+	/**
+	 * What is in a folder of a place (null: its top folder), from the Drive's index; opening it also has it looked at on
+	 * the storage. With wait, the list once that look is done (the Drive waits up to ten seconds for it).
+	 */
+	list: (placeId: number, folderId: number | null, wait?: boolean) =>
+		call<Listing>("GET", `${inFolder(placeId, folderId)}/items${wait ? "?wait" : ""}`),
 	newFolder: (placeId: number, folderId: number | null, name: string) =>
 		call<Item>("POST", `${inFolder(placeId, folderId)}/folders`, { name }),
 	rename: (placeId: number, itemId: number, name: string) =>

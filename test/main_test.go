@@ -5,6 +5,7 @@
 package test
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -20,6 +21,40 @@ var (
 	bence = harness.Member{UserID: "a93b77d1-bence", Email: "bence@example.com", DisplayName: "Bence Tóth", Role: "member"}
 	dora  = harness.Member{UserID: "c4d2e9f0-dora", Email: "dora@example.com", DisplayName: "Dóra Nagy", Role: "member"}
 )
+
+// notHere is the one answer for a place or an item that is not there, or that the person has no access to.
+const notHere = "This is not in the Drive, or you have no access to it."
+
+// nextSecond waits until the storage's own clock, and this computer's, are past the second they were in. The storage
+// keeps the time a file or folder last changed to the second, and the Drive takes an item that went from the storage and
+// came back exactly as it was (the same name, kind, size and time) for the same item: something made anew a second
+// later, as it would be outside a test, is not. The storage's clock (in its container) can differ from this computer's.
+func nextSecond(t *testing.T, d *harness.Drive) {
+	t.Helper()
+	here := time.Now().Truncate(time.Second)
+	var first time.Time
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		probe := fmt.Sprintf("clock probe %d", time.Now().UnixNano())
+		d.Storage.Put(t, probe, "")
+		var at time.Time
+		entries, _ := d.Storage.List(t, "")
+		for _, e := range entries {
+			if e.Name == probe {
+				at = e.Modified
+			}
+		}
+		d.Storage.Delete(t, probe, false)
+		if first.IsZero() {
+			first = at
+		}
+		if at.After(first) && at.After(here) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the storage's clock did not move past %s", first)
+		}
+	}
+}
 
 // What the API answers.
 type (
@@ -71,6 +106,8 @@ type (
 		FromTop bool         `json:"fromTop"`
 		Role    string       `json:"role"`
 		Can     []string     `json:"can"`
+		// Checking says the Drive is looking at the folder on the storage in the background: ask again with ?wait.
+		Checking bool `json:"checking"`
 	}
 	itemJSON struct {
 		ID       int64   `json:"id"`

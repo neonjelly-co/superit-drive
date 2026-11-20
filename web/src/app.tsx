@@ -1,7 +1,18 @@
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Download, FolderInput, Trash2, Upload, Users, X } from "lucide-react";
 import { type DragEvent, type MouseEvent, useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, api, type DeletedPlace, type FolderRef, type Found, type Item, type Place, type SharedItem, type TrashItem } from "./api";
+import {
+	ApiError,
+	api,
+	type DeletedPlace,
+	type FolderRef,
+	type Found,
+	type Item,
+	type Listing,
+	type Place,
+	type SharedItem,
+	type TrashItem,
+} from "./api";
 import { Button } from "./components/button";
 import { type BulkOutcome, BulkResultDialog, eachOf, type Failure } from "./components/bulk-result";
 import { ConflictDialog } from "./components/conflict-dialog";
@@ -36,6 +47,10 @@ const ROLE_SENTENCE: Record<string, string> = {
 };
 
 let nextNotice = 1;
+
+/** Whether two lists of a folder show the same: the same items, as they are, and the same path and rights. */
+const sameList = (a: Listing, b: Listing) =>
+	JSON.stringify({ ...a, checking: false }) === JSON.stringify({ ...b, checking: false });
 
 /** "1 item", "3 items". */
 const itemsCount = (n: number) => (n === 1 ? "1 item" : `${n} items`);
@@ -96,6 +111,38 @@ export function App() {
 	const inFiles = where.view === "files" && placeId !== undefined && listing.data !== undefined;
 	const uploads = useUploads(placeId, folderId, items);
 
+	// The list comes from the Drive's index at once, while the Drive looks at the folder on the storage (`checking`):
+	// one more request waits for that look, and its list replaces this one. While the person is acting on the list (an
+	// item selected, a dialog open, a change under way) it waits, so nothing moves under their hand: a line above the
+	// list says it changed, and it is shown when they ask or are done.
+	const [changedList, setChangedList] = useState<{ key: string; listing: Listing }>();
+	const listKey = `${placeId}:${folderId}`;
+	const checking = listing.data?.checking === true && placeId !== undefined;
+	useEffect(() => {
+		if (!checking || placeId === undefined) return;
+		let stop = false;
+		(async () => {
+			for (let i = 0; i < 6 && !stop; i++) {
+				let next: Listing;
+				try {
+					next = await api.list(placeId, folderId, true);
+				} catch (e) {
+					// Gone from the storage, or the person's access with it: the list says so.
+					if (!stop && e instanceof ApiError && e.status === 404) void queryClient.invalidateQueries({ queryKey: ["items", placeId, folderId] });
+					return;
+				}
+				if (stop) return;
+				if (!next.checking || i === 5) {
+					setChangedList({ key: `${placeId}:${folderId}`, listing: { ...next, checking: false } });
+					return;
+				}
+			}
+		})();
+		return () => {
+			stop = true;
+		};
+	}, [checking, placeId, folderId, listing.dataUpdatedAt, queryClient]);
+
 	// The trash of every place the person may restore from, and the shared folders in the trash they may restore.
 	const trashPlaces = where.view === "trash" ? (places.data?.filter((p) => p.can.includes("see-trash")) ?? []) : [];
 	const trashes = useQueries({
@@ -136,6 +183,19 @@ export function App() {
 	const [bulkResult, setBulkResult] = useState<BulkResult>();
 	const [restoring, setRestoring] = useState<string>();
 	const [notice, setNotice] = useState<Notice | null>(null);
+	// The list the look at the storage brought, while it waits to be shown; whether it differs from the one shown.
+	const waiting = changedList?.key === listKey ? changedList.listing : undefined;
+	const differs = waiting !== undefined && listing.data !== undefined && !sameList(waiting, listing.data);
+	const acting =
+		ticked.size > 0 || dialog !== null || moving !== undefined || busy || progress !== undefined || bulkResult !== undefined || uploads.question !== undefined;
+	const showChanges = useCallback(() => {
+		if (!waiting || placeId === undefined) return;
+		queryClient.setQueryData(["items", placeId, folderId], waiting);
+		setChangedList(undefined);
+	}, [waiting, placeId, folderId, queryClient]);
+	useEffect(() => {
+		if (waiting && (!differs || !acting)) showChanges();
+	}, [waiting, differs, acting, showChanges]);
 	const [dragging, setDragging] = useState(false);
 	const say = useCallback((n: Omit<Notice, "key">) => setNotice({ ...n, key: nextNotice++ }), []);
 	const closeNotice = useCallback(() => setNotice(null), []);
@@ -611,6 +671,14 @@ export function App() {
 								)}
 							</div>
 							<p className="mt-1 text-sm text-muted-foreground">{note}</p>
+							{differs && acting && (
+								<p role="status" className="mt-3 flex items-center gap-3 text-sm text-muted-foreground">
+									This folder changed on the Drive storage.
+									<Button small variant="ghost" onClick={showChanges}>
+										Show the changes
+									</Button>
+								</p>
+							)}
 							<ItemList
 								placeId={placeId}
 								items={items}

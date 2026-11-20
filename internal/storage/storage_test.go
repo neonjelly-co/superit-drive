@@ -1,15 +1,19 @@
 package storage
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -129,7 +133,7 @@ func TestListReadsWhatOtherServersSend(t *testing.T) {
 
 	base, _ := url.Parse(srv.URL + "/base")
 	c := New(base, "u", "p", "/drive")
-	entries, err := c.List(context.Background(), "My files/Réka")
+	entries, err := c.List(context.Background(), "My files/Réka", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +153,7 @@ func TestListReadsWhatOtherServersSend(t *testing.T) {
 		}
 	}
 
-	if _, err := New(base, "u", "wrong", "/drive").List(context.Background(), ""); err != ErrUnauthorized {
+	if _, err := New(base, "u", "wrong", "/drive").List(context.Background(), "", 10); err != ErrUnauthorized {
 		t.Errorf("a refused login: got %v, want ErrUnauthorized", err)
 	}
 }
@@ -161,7 +165,7 @@ func TestPathsCannotLeaveTheDrivesFolder(t *testing.T) {
 	base, _ := url.Parse(srv.URL)
 	c := New(base, "u", "p", "/drive")
 	for _, p := range []string{"..", "../other", "My files/../..", "My files/./x"} {
-		if _, err := c.List(context.Background(), p); !errors.Is(err, ErrBadPath) {
+		if _, err := c.List(context.Background(), p, 10); !errors.Is(err, ErrBadPath) {
 			t.Errorf("List(%q): got %v, want ErrBadPath", p, err)
 		}
 		if err := c.MakeFolder(context.Background(), p); !errors.Is(err, ErrBadPath) {
@@ -523,7 +527,7 @@ func TestAnUnknownAnswerSaysWhatItWas(t *testing.T) {
 	}))
 	defer srv.Close()
 	base, _ := url.Parse(srv.URL)
-	_, err := New(base, "u", "p", "/").List(context.Background(), "")
+	_, err := New(base, "u", "p", "/").List(context.Background(), "", 10)
 	var status *StatusError
 	if !errors.As(err, &status) || status.Status != "301 Moved Permanently" || status.Location != "https://dav.example.com/" {
 		t.Fatalf("got %v", err)
@@ -548,6 +552,191 @@ func checkErr(t *testing.T, name string, err, want error) {
 	default:
 		if !errors.Is(err, want) {
 			t.Errorf("%s: got %v, want %v", name, err, want)
+		}
+	}
+}
+
+// listingOf is a WebDAV listing of the folder /drive/f/ holding n files, as Apache sends it; cut leaves it unfinished.
+func listingOf(n int, cut bool) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">`)
+	b.WriteString(`<D:response><D:href>/drive/f/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype>` +
+		`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`)
+	for i := range n {
+		fmt.Fprintf(&b, `<D:response><D:href>/drive/f/file%d.txt</D:href><D:propstat><D:prop><D:resourcetype/>`+
+			`<D:getcontentlength>%d</D:getcontentlength></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`, i, i)
+	}
+	if cut {
+		b.WriteString(`<D:response><D:href>/drive/f/half`)
+		return b.String()
+	}
+	b.WriteString(`</D:multistatus>`)
+	return b.String()
+}
+
+// A listing is read as it arrives, and List stops at the most it was asked for, so a folder of any size on the storage
+// never fills the Drive's memory; Each reads it all and keeps nothing. A listing cut short is never taken for a whole one.
+func TestAListingIsReadAsItArrivesAndBounded(t *testing.T) {
+	body := listingOf(5, false)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMultiStatus)
+		if r.URL.Path == "/drive/cut/" {
+			_, _ = w.Write([]byte(listingOf(3, true)))
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	base, _ := url.Parse(srv.URL)
+	c := New(base, "u", "p", "/drive")
+	ctx := context.Background()
+
+	if got, err := c.List(ctx, "f", 5); err != nil || len(got) != 5 || got[4].Name != "file4.txt" || got[4].Size != 4 {
+		t.Fatalf("five entries, at most five: got %+v, %v", got, err)
+	}
+	if got, err := c.List(ctx, "f", 4); !errors.Is(err, ErrTooMany) {
+		t.Fatalf("five entries, at most four: got %+v, %v; want ErrTooMany", got, err)
+	}
+	seen := 0
+	if err := c.Each(ctx, "f", func(Entry) error { seen++; return nil }); err != nil || seen != 5 {
+		t.Fatalf("Each: %d entries, %v", seen, err)
+	}
+	stop := errors.New("stop")
+	if err := c.Each(ctx, "f", func(Entry) error { return stop }); !errors.Is(err, stop) {
+		t.Fatalf("an error from each: got %v", err)
+	}
+	if got, err := c.List(ctx, "cut", 100); err == nil || errors.Is(err, ErrTooMany) {
+		t.Fatalf("a listing cut short: got %+v, %v; want an error", got, err)
+	}
+	if err := c.Each(ctx, "cut", func(Entry) error { return nil }); err == nil {
+		t.Fatal("Each of a listing cut short: no error")
+	}
+	// A listing longer, in bytes, than its entries could be is not read to its end.
+	long := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMultiStatus)
+		_, _ = w.Write([]byte(`<?xml version="1.0"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/drive/f/a</D:href>` +
+			`<D:propstat><D:prop><D:getlastmodified>` + strings.Repeat("x", 4<<20) + `</D:getlastmodified></D:prop>` +
+			`<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>`))
+	}))
+	defer long.Close()
+	longBase, _ := url.Parse(long.URL)
+	if _, err := New(longBase, "u", "p", "/drive").List(ctx, "f", 10); !errors.Is(err, ErrTooMany) {
+		t.Fatalf("a listing of 4 MiB for ten entries: got %v, want ErrTooMany", err)
+	}
+}
+
+// keepAliveRace is a WebDAV server that answers the first request on each connection and keeps the connection open, then
+// closes it as soon as a second request arrives on it, without acting on that one: a server whose keep-alive time ran
+// out just as the Drive sent a request on the connection it kept. It records every request it acted on.
+type keepAliveRace struct {
+	ln    net.Listener
+	mu    sync.Mutex
+	acted []string
+}
+
+func newKeepAliveRace(t *testing.T) *keepAliveRace {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &keepAliveRace{ln: ln}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go s.serve(conn)
+		}
+	}()
+	t.Cleanup(func() { ln.Close() })
+	return s
+}
+
+func (s *keepAliveRace) serve(conn net.Conn) {
+	defer conn.Close()
+	in := bufio.NewReader(conn)
+	for first := true; ; first = false {
+		req, err := http.ReadRequest(in)
+		if err != nil || !first {
+			return // the second request on a connection is never acted on
+		}
+		_, _ = io.Copy(io.Discard, req.Body)
+		what := req.Method + " " + req.URL.Path
+		if req.Header.Get("Content-Range") != "" {
+			what += " (part)"
+		}
+		s.mu.Lock()
+		s.acted = append(s.acted, what)
+		s.mu.Unlock()
+		var res string
+		switch req.Method {
+		case "PROPFIND":
+			listing := `<?xml version="1.0"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>` + req.URL.Path +
+				`</D:href><D:propstat><D:prop><D:resourcetype/><D:getcontentlength>5</D:getcontentlength></D:prop>` +
+				`<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>`
+			res = fmt.Sprintf("HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: %d\r\n\r\n%s", len(listing), listing)
+		case http.MethodGet:
+			res = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+		case http.MethodDelete:
+			res = "HTTP/1.1 204 No Content\r\n\r\n"
+		default:
+			res = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
+		}
+		if _, err := conn.Write([]byte(res)); err != nil {
+			return
+		}
+	}
+}
+
+func (s *keepAliveRace) requests() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.acted)
+}
+
+// A server that closes a kept connection just as the Drive sends on it: reading is sent again on a new connection (it
+// changes nothing), and every change goes on a new connection of its own, so it reaches the server once and never fails
+// for it. Without that, Go does not send a MOVE, MKCOL, PUT or DELETE again, and the member got 502.
+func TestAServerClosingAKeptConnectionFailsNothing(t *testing.T) {
+	s := newKeepAliveRace(t)
+	base, _ := url.Parse("http://" + s.ln.Addr().String())
+	c := New(base, "u", "p", "/drive")
+	ctx := context.Background()
+
+	// Each step follows a read, which leaves its connection kept open for the next request.
+	steps := []struct {
+		name string
+		do   func() error
+	}{
+		{"look up", func() error { _, err := c.Stat(ctx, "a.txt"); return err }},
+		{"look up again", func() error { _, err := c.Stat(ctx, "a.txt"); return err }},
+		{"read", func() error {
+			f, err := c.Read(ctx, "a.txt", nil, "")
+			if err == nil {
+				_, _ = io.Copy(io.Discard, f.Body)
+				f.Body.Close()
+			}
+			return err
+		}},
+		{"move", func() error { return c.Move(ctx, "a.txt", "b.txt") }},
+		{"make a folder", func() error { return c.CreateFolder(ctx, "new") }},
+		{"write", func() error { return c.Put(ctx, "c.txt", strings.NewReader("hello"), 5) }},
+		{"write a part", func() error { return c.PutPart(ctx, "c.txt", 0, strings.NewReader("hello"), 5, 10) }},
+		{"delete", func() error { return c.Delete(ctx, "c.txt") }},
+	}
+	for _, step := range steps {
+		if _, err := c.Stat(ctx, "warm.txt"); err != nil { // keeps a connection open
+			t.Fatalf("before %s: %v", step.name, err)
+		}
+		if err := step.do(); err != nil {
+			t.Errorf("%s on a server that closed the kept connection: %v", step.name, err)
+		}
+	}
+	got := s.requests()
+	for _, want := range []string{"MOVE /drive/a.txt", "MKCOL /drive/new/", "PUT /drive/c.txt", "PUT /drive/c.txt (part)", "DELETE /drive/c.txt"} {
+		if n := len(slices.DeleteFunc(slices.Clone(got), func(r string) bool { return r != want })); n != 1 {
+			t.Errorf("%q reached the server %d times, want once:\n%s", want, n, strings.Join(got, "\n"))
 		}
 	}
 }

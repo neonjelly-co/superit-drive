@@ -92,7 +92,7 @@ func (x *Index) Restore(ctx context.Context, placeID, id, folderID int64, name s
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `
-			DELETE FROM items WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL`,
+			DELETE FROM items WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL AND missing_at IS NULL`,
 			placeID, folderID, name)
 		if err != nil {
 			return err
@@ -100,7 +100,7 @@ func (x *Index) Restore(ctx context.Context, placeID, id, folderID int64, name s
 		res, err := tx.ExecContext(ctx, `
 			UPDATE items
 			SET parent_id = ?, name = ?, trashed_at = NULL, trash_folder = NULL, trashed_why = NULL, trashed_by = NULL, restore_to = NULL
-			WHERE id = ? AND place_id = ? AND trashed_at IS NOT NULL`,
+			WHERE id = ? AND place_id = ? AND trashed_at IS NOT NULL AND missing_at IS NULL`,
 			parent(folderID), name, id, placeID)
 		if err != nil {
 			return err
@@ -116,12 +116,12 @@ func (x *Index) Restore(ctx context.Context, placeID, id, folderID int64, name s
 	return x.Item(ctx, placeID, id)
 }
 
-// TrashItems returns what is in the place's trash, the most recently deleted first. A folder's Size is the sum of the
-// files in it, as far as the index knows them.
+// TrashItems returns what is in the place's trash, the most recently deleted first, leaving out those whose entries the
+// storage no longer shows. A folder's Size is the sum of the files in it, as far as the index knows them.
 func (x *Index) TrashItems(ctx context.Context, placeID int64) ([]TrashItem, error) {
 	items, err := scanTrashItems(x.db.QueryContext(ctx, `
 		SELECT `+trashColumns+` FROM items
-		WHERE place_id = ? AND trashed_at IS NOT NULL
+		WHERE place_id = ? AND trashed_at IS NOT NULL AND missing_at IS NULL
 		ORDER BY trashed_at DESC, id DESC`, placeID))
 	if err != nil {
 		return nil, err
@@ -165,20 +165,21 @@ func (x *Index) CountInside(ctx context.Context, placeID int64, ids []int64, lim
 	err = x.db.QueryRowContext(ctx, `
 		WITH RECURSIVE inside (id, depth) AS (
 			SELECT id, 0 FROM items
-			WHERE place_id = ? AND trashed_at IS NULL AND id IN (SELECT value FROM json_each(?))
+			WHERE place_id = ? AND trashed_at IS NULL AND missing_at IS NULL AND id IN (SELECT value FROM json_each(?))
 			UNION ALL
 			SELECT items.id, inside.depth + 1 FROM items JOIN inside ON items.parent_id = inside.id
-			WHERE inside.depth < ?
+			WHERE items.missing_at IS NULL AND inside.depth < ?
 		)
 		SELECT COUNT(*) FROM (SELECT 1 FROM inside LIMIT ?)`, placeID, string(list), MaxDepth, limit).Scan(&n)
 	return n, err
 }
 
 // TrashItem finds the item with id in the place's trash, a folder's Size summed as in TrashItems. Something inside a
-// folder in the trash is not found: it goes and comes back with its folder.
+// folder in the trash is not found: it goes and comes back with its folder. Neither is one whose entry the storage no
+// longer shows.
 func (x *Index) TrashItem(ctx context.Context, placeID, id int64) (TrashItem, error) {
 	t, err := scanTrashItem(x.db.QueryRowContext(ctx, `
-		SELECT `+trashColumns+` FROM items WHERE id = ? AND place_id = ? AND trashed_at IS NOT NULL`, id, placeID))
+		SELECT `+trashColumns+` FROM items WHERE id = ? AND place_id = ? AND trashed_at IS NOT NULL AND missing_at IS NULL`, id, placeID))
 	if err == nil && t.Folder {
 		t.Size, err = x.sizeInside(ctx, t.ID)
 	}
@@ -197,41 +198,6 @@ func (x *Index) TrashedBefore(ctx context.Context, before time.Time) ([]TrashIte
 func (x *Index) RemoveFromTrash(ctx context.Context, placeID, id int64) error {
 	_, err := x.db.ExecContext(ctx, "DELETE FROM items WHERE id = ? AND place_id = ? AND trashed_at IS NOT NULL", id, placeID)
 	return err
-}
-
-// ForgetTrash removes from the index the items of the place's trash whose folders gone says are no longer on the
-// storage, unless stale says the trash changed since the Drive looked.
-func (x *Index) ForgetTrash(ctx context.Context, placeID int64, gone func(entry string) bool, stale func() bool) error {
-	return x.write(ctx, func(tx *sql.Tx) error {
-		if stale() {
-			return nil
-		}
-		rows, err := tx.QueryContext(ctx, "SELECT id, trash_folder FROM items WHERE place_id = ? AND trashed_at IS NOT NULL", placeID)
-		if err != nil {
-			return err
-		}
-		var drop []int64
-		for rows.Next() {
-			var id int64
-			var entry string
-			if err := rows.Scan(&id, &entry); err != nil {
-				rows.Close()
-				return err
-			}
-			if gone(entry) {
-				drop = append(drop, id)
-			}
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		for _, id := range drop {
-			if _, err := tx.ExecContext(ctx, "DELETE FROM items WHERE id = ?", id); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 }
 
 // TrashEntries says which folders of the place's trash on the storage the index knows: those of its items, and the one

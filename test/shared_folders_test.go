@@ -178,8 +178,9 @@ func TestNewSharedFolderMakesOneTopFolderOnTheStoragePerSharedFolder(t *testing.
 	if got := onStorage(t, d, "Shared folders/Clients"); len(got) != 0 {
 		t.Fatalf("a new shared folder is not empty: %q", got)
 	}
-	// Nothing on the storage is named after the person who made it.
-	if got := onStorage(t, d, ""); !slices.Equal(got, []string{"Shared folders/"}) {
+	// Nothing on the storage is named after the person who made it: beside the shared folders is only the Drive's own
+	// hidden folder, with its mark.
+	if got := onStorage(t, d, ""); !slices.Equal(got, []string{".superit-drive/", "Shared folders/"}) {
 		t.Fatalf("the Drive's folder holds %q", got)
 	}
 

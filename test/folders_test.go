@@ -22,16 +22,34 @@ func listPath(placeID, folderID int64) string {
 	return fmt.Sprintf("/api/places/%d/items/%d/items", placeID, folderID)
 }
 
-// list lists a folder and fails the test unless the Drive answered with it.
+// list opens a folder as the interface does, and fails the test unless the Drive answered with it: the list from the
+// index, and when the Drive says it is looking at the folder on the storage, the list again once it has (?wait).
 func list(t *testing.T, c *harness.Client, placeID, folderID int64) itemsJSON {
 	t.Helper()
-	res := c.Get(t, listPath(placeID, folderID))
+	res := opened(t, c, placeID, folderID)
 	if res.Status != http.StatusOK {
 		t.Fatalf("listing folder %d: got %d %s", folderID, res.Status, res.Body)
 	}
 	var l itemsJSON
 	res.JSON(t, &l)
 	return l
+}
+
+// opened opens a folder as the interface does, and returns the last answer: the list from the index, then, while the
+// Drive says it is looking at the folder on the storage, the list once it has.
+func opened(t *testing.T, c *harness.Client, placeID, folderID int64) harness.Response {
+	t.Helper()
+	res := c.Get(t, listPath(placeID, folderID))
+	for range 3 {
+		var l struct {
+			Checking bool `json:"checking"`
+		}
+		if res.Status != http.StatusOK || json.Unmarshal(res.Body, &l) != nil || !l.Checking {
+			return res
+		}
+		res = c.Get(t, listPath(placeID, folderID)+"?wait")
+	}
+	return res
 }
 
 func sendJSON(t *testing.T, c *harness.Client, method, path string, body any) harness.Response {
@@ -229,10 +247,11 @@ func TestFoldersPutOnTheStorageDirectlyOpen(t *testing.T) {
 		t.Fatalf("path %+v", l.Path)
 	}
 
-	// A folder removed from the storage directly answers as gone, and leaves the list of the folder above it.
+	// A folder removed from the storage directly is listed from the index once more as it is opened, then, once the
+	// Drive has looked, answers as one that is not there, and leaves the list of the folder above it.
 	d.Storage.Delete(t, rekasTop+"/Archive/2025", true)
-	res := c.Get(t, listPath(placeID, y2025.ID))
-	if res.Status != http.StatusNotFound || !strings.Contains(errorOf(t, res), "no longer") {
+	res := opened(t, c, placeID, y2025.ID)
+	if res.Status != http.StatusNotFound || errorOf(t, res) != notHere {
 		t.Fatalf("a folder gone from the storage: got %d %s", res.Status, res.Body)
 	}
 	if res := c.Get(t, downloadPath(placeID, report.ID)); res.Status != http.StatusNotFound {

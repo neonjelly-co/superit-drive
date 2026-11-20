@@ -83,6 +83,7 @@ func (d *Drive) makeSharedFolder(ctx context.Context, name, folder, creator stri
 	case err != nil:
 		return index.Place{}, false, storageError(err)
 	}
+	d.marked(ctx)
 	p, err = d.index.AddSharedFolder(ctx, name, folder, creator, d.now())
 	if err != nil {
 		d.log.Error("a shared folder's top folder was made, but the shared folder could not be recorded", "folder", folder, "error", err)
@@ -118,10 +119,11 @@ func (d *Drive) DeleteSharedFolder(ctx context.Context, p index.Place) (DeletedS
 		return DeletedSharedFolder{}, err
 	}
 
-	entry, dir, err := d.makeEntry(ctx, p)
+	entry, dir, held, err := d.makeEntry(ctx, p)
 	if err != nil {
 		return DeletedSharedFolder{}, err
 	}
+	defer held()
 	to, ok := pathIn(dir, path.Base(p.Folder))
 	if !ok {
 		return DeletedSharedFolder{}, errors.New("a shared folder's top folder has no name") // the Drive made it

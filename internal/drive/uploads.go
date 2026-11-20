@@ -35,6 +35,10 @@ const PartSize = 32 << 20
 // space an unfinished upload takes, so it is not kept longer.
 const AbandonedAfter = 24 * time.Hour
 
+// maxLeftOvers is the most files left in the uploads folder (by an upload the Drive did not finish, or put there
+// directly) one run removes.
+const maxLeftOvers = 1000
+
 // moveIntoPlace bounds moving a whole upload into its folder. A Storage Box renames, at once; another WebDAV server may
 // copy the bytes.
 const moveIntoPlace = 10 * time.Minute
@@ -507,7 +511,7 @@ func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, d
 	}
 
 	// Size and time as the storage records them. If it cannot say right now, the file is there all the same: use what
-	// the Drive knows, and the next listing corrects it.
+	// the Drive knows, and the next look at the folder corrects it.
 	seen := index.Seen{Name: name, Changed: d.now().UTC()}
 	sctx, cancel = context.WithTimeout(ctx, storageTimeout)
 	if e, err := d.storage.Stat(sctx, file); err == nil && !e.Folder {
@@ -515,10 +519,10 @@ func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, d
 	}
 	cancel()
 	d.changed(folderKey{p.ID, folderID(folder)})
-	it, err := d.index.PutItem(ctx, p.ID, folderID(folder), seen)
+	it, err := d.index.PutItem(ctx, p.ID, folderID(folder), seen, d.now())
 	if errors.Is(err, index.ErrNoFolder) {
 		// Its folder moved to another place, or went, after the upload was decided on it; the file is where the folder
-		// was, and a listing finds it there.
+		// was, and a look at it finds it there.
 		return Upload{}, ErrGone
 	}
 	if err != nil {
@@ -549,22 +553,31 @@ func (d *Drive) removeAbandoned(ctx context.Context) error {
 		removed++
 	}
 
+	// The files in the uploads folder the index does not know, unchanged for a day. The folder is read as it arrives and
+	// only those names are kept, at most maxLeftOvers a run: whoever put a great many files there directly costs the
+	// Drive no more memory than that, and the rest go on the next runs.
 	known, err := d.index.UploadIDs(ctx)
 	if err != nil {
 		return err
 	}
+	var leftOver []storage.Entry
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
-	entries, err := d.storage.List(sctx, UploadsFolder)
+	err = d.storage.Each(sctx, UploadsFolder, func(e storage.Entry) error {
+		if len(leftOver) < maxLeftOvers && !known[e.Name] && !e.Changed.IsZero() && e.Changed.Before(cutoff) {
+			leftOver = append(leftOver, e)
+		}
+		return nil
+	})
 	cancel()
 	if errors.Is(err, storage.ErrNotFound) {
-		entries, err = nil, nil
+		err = nil
 	}
 	if err != nil {
 		return storageError(err)
 	}
-	for _, e := range entries {
+	for _, e := range leftOver {
 		p, ok := pathIn(UploadsFolder, e.Name)
-		if !ok || known[e.Name] || e.Changed.IsZero() || !e.Changed.Before(cutoff) || d.claimed(p) {
+		if !ok || d.claimed(p) {
 			continue
 		}
 		sctx, cancel := context.WithTimeout(ctx, storageTimeout)

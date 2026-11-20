@@ -21,3 +21,15 @@ func Now() time.Time { return time.Now().Add(shift) }
 
 // Shift is how far the clock is moved.
 func Shift() time.Duration { return shift }
+
+// Walk is the timing of the walk through the storage set by SUPERIT_DRIVE_TEST_WALK_EVERY (when it starts after the
+// Drive does, and how often) and SUPERIT_DRIVE_TEST_WALK_PAUSE (how long it rests after each folder, 0 when not set);
+// ok is false without the first.
+func Walk() (every, pause time.Duration, ok bool) {
+	every, err := time.ParseDuration(os.Getenv("SUPERIT_DRIVE_TEST_WALK_EVERY"))
+	if err != nil || every <= 0 {
+		return 0, 0, false
+	}
+	pause, _ = time.ParseDuration(os.Getenv("SUPERIT_DRIVE_TEST_WALK_PAUSE"))
+	return every, max(pause, 0), true
+}

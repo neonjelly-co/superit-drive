@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
@@ -24,35 +25,50 @@ var ErrTooMany = errors.New("too many files and folders for one zip")
 // the top of the zip, called name. With only (ids of items directly in the folder), the zip holds just those items
 // (each a file, or a folder with everything in it), at its top.
 //
-// Each folder is listed from the storage on the way, as when it is opened, so the zip holds what is there now. Files
-// are stored as they are, not compressed: most large files are compressed already, and compressing costs memory.
+// Each folder is looked at on the storage on the way (Refresh), so the zip holds what is there now. Files are stored
+// as they are, not compressed: most large files are compressed already, and compressing costs memory.
 // A backslash in a name becomes "_" in the zip, where some programs would take it for a folder.
 //
 // start is called once, just before the first byte, and returns where the zip goes. An error before that (an id in
 // only that is not directly in the folder is index.ErrNoItem; a folder with too much in it, ErrTooMany) means nothing
 // was written; an error after it means the zip was cut short.
 func (d *Drive) Zip(ctx context.Context, p index.Place, folder *index.Item, name string, only []int64, start func() io.Writer) error {
-	items, err := d.List(ctx, p, folder)
-	if err != nil {
-		return err
-	}
 	prefix := zipName(name) + "/"
-	if only != nil {
-		pick := make(map[int64]bool, len(only))
+	var items []index.Item
+	var err error
+	if only == nil {
+		if items, err = d.listed(ctx, p, folder); err != nil {
+			return err
+		}
+	} else {
+		if err := d.Refresh(ctx, p, folder); err != nil {
+			return err
+		}
+		picked := make(map[int64]bool, len(only))
 		for _, id := range only {
-			pick[id] = true
-		}
-		var chosen []index.Item
-		for _, it := range items {
-			if pick[it.ID] {
-				chosen = append(chosen, it)
-				delete(pick, it.ID)
+			if picked[id] {
+				continue
 			}
+			picked[id] = true
+			it, err := d.index.Item(ctx, p.ID, id)
+			if err != nil {
+				return err
+			}
+			if it.ParentID != folderID(folder) {
+				return index.ErrNoItem
+			}
+			items = append(items, it)
 		}
-		if len(pick) > 0 {
-			return index.ErrNoItem
-		}
-		items, prefix = chosen, ""
+		slices.SortFunc(items, func(a, b index.Item) int {
+			if a.Folder != b.Folder {
+				if a.Folder {
+					return -1
+				}
+				return 1
+			}
+			return strings.Compare(a.Name, b.Name)
+		})
+		prefix = ""
 	}
 	// What the index knows is in it, before anything is written; the walk counts again as it goes.
 	ids := make([]int64, 0, len(items))
@@ -119,7 +135,7 @@ func (z *zipping) items(ctx context.Context, prefix string, in *index.Item, item
 			if err := z.folder(name+"/", &it); err != nil {
 				return err
 			}
-			inside, err := z.d.List(ctx, z.place, &it)
+			inside, err := z.d.listed(ctx, z.place, &it)
 			if errors.Is(err, ErrGone) {
 				continue // gone from the storage since its folder was listed
 			}
@@ -161,6 +177,19 @@ func (z *zipping) file(ctx context.Context, name string, it index.Item) error {
 	}
 	_, err = io.Copy(w, f.Body)
 	return err
+}
+
+// listed looks at a folder of the place (nil: its top folder) on the storage, and returns what the index then holds in
+// it: ErrTooMany when that is more than a zip can hold, and ErrGone when the folder is gone from the storage.
+func (d *Drive) listed(ctx context.Context, p index.Place, folder *index.Item) ([]index.Item, error) {
+	if err := d.Refresh(ctx, p, folder); err != nil {
+		return nil, err
+	}
+	items, more, err := d.index.FirstChildren(ctx, p.ID, folderID(folder), MaxZipEntries)
+	if err == nil && more {
+		err = ErrTooMany
+	}
+	return items, err
 }
 
 // zipName is a name as a zip holds it: some programs take a backslash for a folder, which could put a file outside

@@ -44,12 +44,18 @@ func (d *Drive) newEntry() string {
 	return d.now().UTC().Format(entryDay) + " " + hex.EncodeToString(b)
 }
 
-// makeEntry makes a new entry in the place's trash on the storage, and the trash's folders above it when missing.
-func (d *Drive) makeEntry(ctx context.Context, p index.Place) (entry, dir string, err error) {
+// makeEntry makes a new entry in the place's trash on the storage, and the trash's folders above it when missing. The
+// entry is held (claimed) until release is called, once the index records what goes into it: until then a look at the
+// trash leaves it alone, rather than take it for an entry put there directly.
+func (d *Drive) makeEntry(ctx context.Context, p index.Place) (entry, dir string, release func(), err error) {
 	entry = d.newEntry()
 	dir, ok := pathIn(trashTop(p), entry)
 	if !ok {
-		return "", "", errors.New("the trash's folder for this place cannot be named") // the entry is the Drive's own name
+		return "", "", nil, errors.New("the trash's folder for this place cannot be named") // the entry is the Drive's own name
+	}
+	release, ok = d.claim(dir)
+	if !ok {
+		return "", "", nil, ErrBusy // the same random name twice at once: never in practice
 	}
 	ctx, cancel := context.WithTimeout(ctx, storageTimeout)
 	defer cancel()
@@ -57,7 +63,11 @@ func (d *Drive) makeEntry(ctx context.Context, p index.Place) (entry, dir string
 	if errors.Is(err, storage.ErrNotFound) {
 		err = d.storage.MakeFolder(ctx, dir)
 	}
-	return entry, dir, storageError(err)
+	if err != nil {
+		release()
+		return "", "", nil, storageError(err)
+	}
+	return entry, dir, release, nil
 }
 
 // moveOnStorage moves a file or folder on the storage, the way its kind needs. When the folder it was going into is
@@ -118,16 +128,17 @@ func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item, by str
 	defer release()
 	stale := d.since(folderKey{p.ID, it.ParentID})
 
-	entry, dir, err := d.makeEntry(ctx, p)
+	entry, dir, held, err := d.makeEntry(ctx, p)
 	if err != nil {
 		return TrashEntry{}, err
 	}
+	defer held()
 	to, _ := pathIn(dir, it.Name)
 	if err := d.moveOnStorage(ctx, it.Folder, from, to); err != nil {
 		_ = d.removeEntry(ctx, dir)
 		if errors.Is(err, storage.ErrNotFound) {
-			// Gone from the storage already: the index follows.
-			if err := d.index.DropGone(ctx, p.ID, it.ParentID, it.ID, it.Name, stale); err != nil {
+			// Gone from the storage already: the index follows, hiding it until a later look confirms it.
+			if err := d.index.MarkMissing(ctx, p.ID, it.ParentID, it.ID, it.Name, d.now(), stale); err != nil {
 				return TrashEntry{}, err
 			}
 			return TrashEntry{}, ErrGone
@@ -148,10 +159,11 @@ func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item, by str
 // putAside moves the file at file, which an upload by the member by is about to replace, into the place's trash, as a
 // new item. undo puts it back, for when the upload fails. replaced is nil when the file had gone meanwhile.
 func (d *Drive) putAside(ctx context.Context, p index.Place, folder *index.Item, file string, there storage.Entry, by string) (replaced *index.TrashItem, undo func(), err error) {
-	entry, dir, err := d.makeEntry(ctx, p)
+	entry, dir, held, err := d.makeEntry(ctx, p)
 	if err != nil {
 		return nil, nil, err
 	}
+	defer held()
 	to, _ := pathIn(dir, there.Name)
 	if err := d.moveOnStorage(ctx, false, file, to); err != nil {
 		_ = d.removeEntry(ctx, dir)
@@ -191,24 +203,20 @@ func (d *Drive) TrashItem(ctx context.Context, p index.Place, id int64) (index.T
 }
 
 // Trash returns what is in the place's trash, the most recently deleted first. Anything that has been there for 30
-// days is removed for good first, and anything no longer in the trash on the storage is dropped.
+// days is removed for good first, and the trash is looked at on the storage (rereadTrash): what is no longer there is
+// hidden, and entries put there directly are shown.
 func (d *Drive) Trash(ctx context.Context, p index.Place) ([]TrashEntry, error) {
 	if err := d.removeExpired(ctx, &p); err != nil {
 		return nil, err
 	}
-	stale := d.since(folderKey{p.ID, trashFolder})
-	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
-	entries, err := d.storage.List(sctx, trashTop(p))
-	cancel()
-	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		return nil, storageError(err)
-	}
-	present := map[string]bool{}
-	for _, e := range entries {
-		present[e.Name] = e.Folder
-	}
-	if err := d.index.ForgetTrash(ctx, p.ID, func(entry string) bool { return !present[entry] }, stale); err != nil {
+	_, err := d.rereadTrash(ctx, p)
+	switch {
+	case errors.Is(err, ErrStorage):
 		return nil, err
+	case err != nil && ctx.Err() != nil:
+		return nil, ctx.Err()
+	case err != nil:
+		d.lookFailed(p, trashFolder, err) // the index's trash is shown as it is
 	}
 
 	items, err := d.index.TrashItems(ctx, p.ID)
@@ -288,8 +296,9 @@ func (d *Drive) Restore(ctx context.Context, p index.Place, t index.TrashItem, i
 			continue
 		}
 		if errors.Is(err, errNotInTrash) {
-			_ = d.removeEntry(ctx, dir)
-			if err := d.index.RemoveFromTrash(ctx, p.ID, t.ID); err != nil {
+			// Its entry no longer holds it: hidden from the trash, and dropped when a later look confirms it. The entry
+			// is left as it is: whatever is in it is shown in the trash on its own.
+			if err := d.index.MarkTrashMissing(ctx, p.ID, t.ID, d.now()); err != nil {
 				return index.Item{}, err
 			}
 			return index.Item{}, ErrGone
@@ -441,14 +450,24 @@ func (d *Drive) removeExpired(ctx context.Context, only *index.Place) error {
 }
 
 // removeLeftovers removes the entries of the place's trash on the storage that the index does not know and whose
-// names say they are older than cutoff.
+// names say they are older than cutoff. The trash is read as it arrives, and at most maxLeftOvers entries are removed a
+// run.
 func (d *Drive) removeLeftovers(ctx context.Context, p index.Place, cutoff time.Time) (int, error) {
 	known, err := d.index.TrashEntries(ctx, p.ID)
 	if err != nil {
 		return 0, err
 	}
+	var due []string
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
-	entries, err := d.storage.List(sctx, trashTop(p))
+	err = d.storage.Each(sctx, trashTop(p), func(e storage.Entry) error {
+		if len(due) >= maxLeftOvers || !e.Folder || known[e.Name] || len(e.Name) < len(entryDay) {
+			return nil
+		}
+		if day, err := time.Parse(entryDay, e.Name[:len(entryDay)]); err == nil && day.Add(24*time.Hour).Before(cutoff) {
+			due = append(due, e.Name)
+		}
+		return nil
+	})
 	cancel()
 	if errors.Is(err, storage.ErrNotFound) {
 		return 0, nil
@@ -457,16 +476,9 @@ func (d *Drive) removeLeftovers(ctx context.Context, p index.Place, cutoff time.
 		return 0, storageError(err)
 	}
 	removed := 0
-	for _, e := range entries {
-		if !e.Folder || known[e.Name] || len(e.Name) < len(entryDay) {
-			continue
-		}
-		day, err := time.Parse(entryDay, e.Name[:len(entryDay)])
-		if err != nil || !day.Add(24*time.Hour).Before(cutoff) {
-			continue
-		}
-		dir, ok := pathIn(trashTop(p), e.Name)
-		if !ok {
+	for _, name := range due {
+		dir, ok := pathIn(trashTop(p), name)
+		if !ok || d.busyIn(dir) {
 			continue
 		}
 		if err := d.removeEntry(ctx, dir); err != nil {
