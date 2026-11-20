@@ -255,9 +255,11 @@ func TestNothingChangesWithoutTheDrivesMark(t *testing.T) {
 	if got := names(list(t, c, placeID, 0).Items); !slices.Equal(got, []string{"a.txt", "b.txt"}) {
 		t.Fatalf("without the mark the list changed: %q", got)
 	}
-	if logs := d.Logs(); !strings.Contains(logs, "does not hold the Drive's mark") || !strings.Contains(logs, strings.TrimSpace(string(mark))) {
-		t.Fatalf("the log does not say the mark is missing, and what it held:\n%s", logs)
-	}
+	// The list answers from the index while the look goes on behind it, so the log line may come a moment later.
+	harness.Eventually(t, "the log says the mark is missing, and what it held", func() bool {
+		logs := d.Logs()
+		return strings.Contains(logs, "does not hold the Drive's mark") && strings.Contains(logs, strings.TrimSpace(string(mark)))
+	})
 	// The whole storage emptied, as one mounted wrongly would look, and an hour on: still nothing changes.
 	d.Storage.Delete(t, "My files", true)
 	d.Storage.Delete(t, ".superit-drive", true)
@@ -522,9 +524,10 @@ func TestTheWalkFindsChangesInFoldersNobodyOpens(t *testing.T) {
 	harness.Eventually(t, "Dóra's Shared with me no longer lists the file gone from the storage", func() bool {
 		return len(sharedNames(t, o)) == 0
 	})
-	if !strings.Contains(d.Logs(), "the walk through the storage ended") {
-		t.Fatalf("the log does not say the walk ended:\n%s", d.Logs())
-	}
+	// What the walk found shows before it has been through the last folder.
+	harness.Eventually(t, "the log says the walk ended", func() bool {
+		return strings.Contains(d.Logs(), "the walk through the storage ended")
+	})
 }
 
 // A walk cut short by a restart goes on from where it was, and the log says so.
