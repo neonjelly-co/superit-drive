@@ -77,13 +77,16 @@ func (s *Server) tryTurn(w http.ResponseWriter, c call, key string) (release fun
 
 // turnKey is what keeps an upload's place in line for a slot: a resumable upload's id; for an upload in one request,
 // the `turn` the interface names it by (any short word of letters, digits, - and _), which counts only for the
-// person who names it. Without one it keeps no place.
+// person who names it (for visitors, those who came with the same link). Without one it keeps no place.
 func turnKey(r *http.Request, c call) string {
 	if c.upload != nil {
 		return "upload:" + c.upload.ID
 	}
 	if t := r.URL.Query().Get("turn"); turnName.MatchString(t) {
-		if c.guest != nil {
+		switch {
+		case c.link != nil:
+			return "files:link:" + strconv.FormatInt(c.link.ID, 10) + ":" + t
+		case c.guest != nil:
 			return "files:guest:" + strconv.FormatInt(c.guest.ID, 10) + ":" + t
 		}
 		return "files:member:" + c.member.UserID + ":" + t

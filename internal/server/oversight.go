@@ -180,9 +180,12 @@ type outsideShareJSON struct {
 	SharedBy *personJSON `json:"sharedBy,omitempty"`
 	Former   bool        `json:"former,omitempty"`
 	// Guest is, for an invitation, the guest: their address. Role is what it lets them do ("viewer": open and download;
-	// "editor": also upload, rename, move and delete inside it); a link only lets its visitors see and download.
-	Guest *guestJSON  `json:"guest,omitempty"`
-	Role  access.Role `json:"role"`
+	// "editor": also upload, rename, move and delete inside it); a view link only lets its visitors see and download
+	// ("viewer"). LinkKind is a link's kind: "view", or "upload-only" (without a role: its visitors only send files in,
+	// and see nothing).
+	Guest    *guestJSON  `json:"guest,omitempty"`
+	Role     access.Role `json:"role,omitempty"`
+	LinkKind string      `json:"linkKind,omitempty"`
 	// Since is when it was made or given; Until when an invitation ends, if it does.
 	Since time.Time  `json:"since"`
 	Until *time.Time `json:"until,omitempty"`
@@ -378,8 +381,11 @@ func (s *Server) outsideLink(ctx context.Context, seen *placesSeen, l index.Link
 	}
 	list := s.members.Current()
 	e := s.outsideShareOf("link", *p, it, l.MadeBy, list)
-	e.Role, e.Since, e.Uses = access.Viewer, l.Made, l.Uses
-	e.Works = access.Decide(visitorOf(l, list), access.SeeThroughLink, where)
+	e.LinkKind, e.Since, e.Uses = l.Kind, l.Made, l.Uses
+	if l.Kind == index.ViewLink {
+		e.Role = access.Viewer
+	}
+	e.Works = linkWorks(l, where, list)
 	if !l.Used.IsZero() {
 		used := l.Used
 		e.Used = &used

@@ -415,36 +415,49 @@ func TestACopyFromANewerDriveStopsTheDriveFromStarting(t *testing.T) {
 	}
 }
 
-// A copy made by an older Drive is adopted and brought up to date, and the Drive goes on copying its index.
+// A copy made by an older Drive is adopted and brought up to date, and the Drive goes on copying its index. (Copies of
+// older versions still are: internal/index tests one made by the migrations up to 0010.)
 func TestAnOlderCopyIsAdoptedAndBroughtUpToDate(t *testing.T) {
 	t.Parallel()
 	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora}, Env: copiesSoon("300ms", "2s")})
 	x, _, notesPage := sharedBeforeTheCopy(t, d)
 	d.Stop(t)
-	// As a Drive whose index was at migration 0010 made it: without the counter of access changes and its triggers.
+	// As a Drive whose index was at migration 0011 made it, before upload-only links: its links of one kind, without
+	// what each took in, and its files without the label of those that came through a link. (The table is made again
+	// as 0006 made it; renaming it into place quotes its name, which 0006 did not.)
 	alterStoredCopy(t, d, func(db *sql.DB) {
-		rows, err := db.Query("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'access_changes_%'")
-		if err != nil {
-			t.Fatal(err)
+		for _, statement := range []string{
+			`CREATE TABLE links_0011 (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id    INTEGER NOT NULL UNIQUE REFERENCES items (id) ON DELETE CASCADE,
+    token_hash BLOB    NOT NULL UNIQUE CHECK (length(token_hash) = 32),
+    kind       TEXT    NOT NULL CHECK (kind IN ('view')),
+    made_at    INTEGER NOT NULL, -- unix milliseconds
+    made_by    TEXT    NOT NULL,
+    uses       INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
+    used_at    INTEGER
+)`,
+			"INSERT INTO links_0011 SELECT id, item_id, token_hash, kind, made_at, made_by, uses, used_at FROM links",
+			"DROP TABLE links",
+			"ALTER TABLE links_0011 RENAME TO links",
+			"PRAGMA writable_schema = ON",
+			`UPDATE sqlite_schema SET sql = replace(sql, 'CREATE TABLE "links"', 'CREATE TABLE links') WHERE type = 'table' AND name = 'links'`,
+			"PRAGMA writable_schema = OFF",
+			"CREATE TRIGGER access_changes_links_insert AFTER INSERT ON links BEGIN UPDATE access_changes SET n = n + 1; END",
+			"CREATE TRIGGER access_changes_links_delete AFTER DELETE ON links BEGIN UPDATE access_changes SET n = n + 1; END",
+			`CREATE TRIGGER access_changes_links_update AFTER UPDATE OF item_id, token_hash, kind, made_at, made_by ON links
+    BEGIN UPDATE access_changes SET n = n + 1; END`,
+			"ALTER TABLE items DROP COLUMN added_through_link",
+			"PRAGMA user_version = 11",
+		} {
+			run(t, db, statement)
 		}
-		var triggers []string
-		for rows.Next() {
-			var name string
-			rows.Scan(&name)
-			triggers = append(triggers, name)
-		}
-		rows.Close()
-		for _, name := range triggers {
-			run(t, db, "DROP TRIGGER "+name)
-		}
-		run(t, db, "DROP TABLE access_changes")
-		run(t, db, "PRAGMA user_version = 10")
 	})
 
 	d.OnANewServer(t, nil)
 	adopted(t, d, "storage")
-	if !strings.Contains(d.Logs(), "version=10") {
-		t.Fatalf("the log does not say the copy's version was 10:\n%s", d.Logs())
+	if !strings.Contains(d.Logs(), "version=11") {
+		t.Fatalf("the log does not say the copy's version was 11:\n%s", d.Logs())
 	}
 	if got := sharedNames(t, d.As(dora)); !slices.Contains(got, entry("Clients", x.place)) {
 		t.Fatalf("Dóra's Shared with me from an older copy: %q", got)

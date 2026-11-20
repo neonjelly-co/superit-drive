@@ -78,6 +78,8 @@ var placeRoutesTriedByAnOutsider = []string{
 	"DELETE /api/places/{place}/items/{item}/access/guests/{guest}",
 	"GET /api/places/{place}/items/{item}/link",
 	"POST /api/places/{place}/items/{item}/link",
+	"PUT /api/places/{place}/items/{item}/link",
+	"POST /api/places/{place}/items/{item}/link/reset",
 	"DELETE /api/places/{place}/items/{item}/link",
 	"GET /api/places/{place}/items",
 	"GET /api/places/{place}/items/{item}/items",
@@ -135,6 +137,8 @@ var itemRoutesTriedWithPartOfAPlace = []string{
 	"DELETE /api/places/{place}/items/{item}/access/guests/{guest}",
 	"GET /api/places/{place}/items/{item}/link",
 	"POST /api/places/{place}/items/{item}/link",
+	"PUT /api/places/{place}/items/{item}/link",
+	"POST /api/places/{place}/items/{item}/link/reset",
 	"DELETE /api/places/{place}/items/{item}/link",
 	"GET /api/places/{place}/items/{item}/items",
 	"POST /api/places/{place}/items/{item}/files",
@@ -321,6 +325,7 @@ var linkRoutesTriedByAVisitor = []string{
 	"GET /s/{token}/items/{item}/download",
 	"GET /s/{token}/items/{item}/open",
 	"GET /s/{token}/items/{item}/zip",
+	"POST /s/{token}/files",
 }
 
 func TestEveryRouteWithALinkIsTriedByAVisitor(t *testing.T) {
@@ -347,8 +352,10 @@ func TestNoRouteIsDecidedForAnotherKindOfPerson(t *testing.T) {
 	member := access.Person{UserID: "u-reka", Role: members.RoleAdmin}
 	visitors := []access.Person{
 		{Link: &access.Link{Item: 10, Kind: access.ViewLink, By: member}},
+		{Link: &access.Link{Item: 10, Kind: access.UploadLink, Folder: true, By: member}},
 		// A signed-in member who came with a link, as a request under the prefix with forged headers would be.
 		{UserID: "u-reka", Role: members.RoleAdmin, Link: &access.Link{Item: 10, Kind: access.ViewLink, By: member}},
+		{UserID: "u-reka", Role: members.RoleAdmin, Link: &access.Link{Item: 10, Kind: access.UploadLink, Folder: true, By: member}},
 	}
 	guests := []access.Person{
 		{Guest: &access.Guest{ID: 7}},
@@ -375,8 +382,11 @@ func TestNoRouteIsDecidedForAnotherKindOfPerson(t *testing.T) {
 			t.Errorf("%s: under the public prefix %v, with a link %v, a visitor's action %v: want all or none",
 				rt.pattern, visitors_, rt.link != "", slices.Contains(access.ThroughALink, rt.action))
 		}
-		if visitors_ && (!strings.HasPrefix(rt.pattern, "GET ") || rt.place != "" || rt.trashed != "" || rt.upload != "") {
-			t.Errorf("%s is a visitor's: it must only read, and find its place through its link", rt.pattern)
+		// A visitor reads (GET), but for sending a file into their link's own folder (POST, and only that action).
+		sends := rt.action == access.UploadThroughLink
+		if visitors_ && ((sends && (!strings.HasPrefix(rt.pattern, "POST ") || rt.item != "")) || (!sends && !strings.HasPrefix(rt.pattern, "GET ")) ||
+			rt.place != "" || rt.trashed != "" || rt.upload != "") {
+			t.Errorf("%s is a visitor's: it must only read, or send a file into its link's own folder, and find its place through its link", rt.pattern)
 		}
 		if forGuests && (rt.trashed != "" || rt.inTrash || (rt.place != "" && rt.item == "" && rt.upload == "")) {
 			t.Errorf("%s is a guest's: in a place it names an item or an upload, never a place as a whole or the trash", rt.pattern)
@@ -480,18 +490,36 @@ func checkGuestHeaders(t *testing.T, what string, h http.Header) {
 // Under the public prefix, a visitor only reads: any other method is refused with 405 before anything else is looked
 // at (the bare server would panic otherwise), whatever headers come with it, and the answer is the same for every
 // address there.
+//
+// The one exception is sending a file in through an upload-only link: POST, to that one route only. Every other method
+// there is refused the same way (the route for it is POST, and nothing else is).
 func TestVisitorsOnlyRead(t *testing.T) {
 	s := bareServer(t)
 	h := s.Handler()
-	paths := []string{"/s/", "/s/x", "/s/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/nothing/here"}
+	paths := []string{"/s/", "/s/x", "/s/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/nothing/here", "/s/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/items/1/files",
+		"/s/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/files/x", "/s/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/files/", "/s/guestx/files"}
+	sendsIn := ""
 	for _, rt := range s.routes() {
 		if rt.link != "" {
 			paths = append(paths, examplePath(rt.pattern))
 		}
+		if rt.action == access.UploadThroughLink {
+			if sendsIn != "" || rt.pattern != "POST /s/{token}/files" {
+				t.Fatalf("visitors send files in through %q and %q: only one route, POST /s/{token}/files, may", sendsIn, rt.pattern)
+			}
+			sendsIn = examplePath(rt.pattern)
+		}
+	}
+	sendIn := regexp.MustCompile(`^/s/[^/]+/files$`)
+	if !sendIn.MatchString(sendsIn) {
+		t.Fatalf("the route visitors send files in through is at %q", sendsIn)
 	}
 	var first string
 	for _, path := range paths {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, "PROPFIND", "MKCOL"} {
+			if sendIn.MatchString(path) && method == http.MethodPost {
+				continue // the one change a visitor makes: tried through HTTP, test/upload_only_links_test.go
+			}
 			for _, headers := range []http.Header{
 				{},
 				{SecretHeader: {secret}, UserIDHeader: {"u-reka"}, "Origin": {"https://files.example.com"}},
@@ -545,6 +573,46 @@ func TestTheVisitorsPolicyIsStrict(t *testing.T) {
 		if strings.Contains(visitorPolicy, loose) {
 			t.Errorf("the visitors' policy %q allows %q", visitorPolicy, loose)
 		}
+	}
+}
+
+// An upload-only link's page runs one script, its own, by its hash, which may talk only to the public prefix of the
+// Drive's address; everything else is as strict as the visitors' policy. The page holds exactly that script and style.
+func TestTheSendPagesPolicyAllowsOnlyItsOwnScript(t *testing.T) {
+	s := bareServer(t)
+	want := "default-src 'none'; style-src '" + styleHash(visitorStyle) + "'; script-src '" + styleHash(sendScript) +
+		"'; connect-src https://files.example.com/s/; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	if s.sendPolicy != want {
+		t.Fatalf("the send page's policy is\n%s\nwant\n%s", s.sendPolicy, want)
+	}
+	for _, loose := range []string{"'unsafe-inline'", "'unsafe-eval'", "'self'", "*", "data:", "blob:", "'strict-dynamic'"} {
+		if strings.Contains(s.sendPolicy, loose) {
+			t.Errorf("the send page's policy allows %q", loose)
+		}
+	}
+	rec := httptest.NewRecorder()
+	s.renderVisitor(rec, http.StatusOK, visitorView{Name: "Invoices", By: "Shared by Bence", Folder: true, Send: true})
+	if got := rec.Header().Get("Content-Security-Policy"); got != s.sendPolicy {
+		t.Fatalf("the send page went out with the policy %q", got)
+	}
+	page := rec.Body.String()
+	scripts := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(page, -1)
+	styles := regexp.MustCompile(`(?s)<style>(.*?)</style>`).FindAllStringSubmatch(page, -1)
+	if len(scripts) != 1 || styleHash(scripts[0][1]) != styleHash(sendScript) || len(styles) != 1 || styleHash(styles[0][1]) != styleHash(visitorStyle) {
+		t.Fatalf("the send page's script and style do not match their hashes:\n%s", page)
+	}
+	if strings.Count(page, "<script") != 1 || strings.Contains(page, "<form") || strings.Contains(page, " on") && regexp.MustCompile(` on[a-z]+=`).MatchString(page) {
+		t.Fatalf("the send page has more than its one script, or a form, or an inline handler:\n%s", page)
+	}
+	// Without the Drive's address, the page's own origin.
+	if p := sendPolicyFor(""); !strings.Contains(p, "connect-src 'self';") {
+		t.Fatalf("the send page's policy without an address: %s", p)
+	}
+	// A view link's page has no script.
+	rec = httptest.NewRecorder()
+	s.renderVisitor(rec, http.StatusOK, visitorView{Name: "Invoices", By: "Shared by Bence", Folder: true})
+	if strings.Contains(rec.Body.String(), "<script") || rec.Header().Get("Content-Security-Policy") != "" {
+		t.Fatalf("a view link's page has a script, or a policy of its own: %q", rec.Header().Get("Content-Security-Policy"))
 	}
 }
 

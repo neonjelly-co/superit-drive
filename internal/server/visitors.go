@@ -29,17 +29,21 @@ import (
 // is decided by the access package as a person of their own kind, through the link their address names, with its item
 // as the top of what they may see; no route outside the prefix ever decides for a visitor (a test checks both).
 //
-// Visitors only read: every route here is GET (and HEAD), and any other method is refused with 405 before anything else
-// is looked at. Every answer here is marked so that the address, which is the secret, does not travel and is not kept
-// (Referrer-Policy: no-referrer, Cache-Control: no-store), search engines do not list it (X-Robots-Tag), and nothing
-// runs or loads but the page's own style (visitorPolicy); no cookie is ever set. A link that does not work (removed,
-// never made, malformed, or one that does not count now), and anything outside what it covers, gets the one answer
-// visitorNotHere, the same bytes for every one of them.
+// Visitors only read, but for one thing: every route here is GET (and HEAD), and any other method is refused with 405
+// before anything else is looked at; the one exception is sending a file in through an upload-only link (POST
+// /s/{token}/files, into the link's own folder, never replacing anything), and only that route takes a POST. Every
+// answer here is marked so that the address, which is the secret, does not travel and is not kept (Referrer-Policy:
+// no-referrer, Cache-Control: no-store), search engines do not list it (X-Robots-Tag), and nothing runs or loads but the
+// page's own style (visitorPolicy); no cookie is ever set. A link that does not work (removed, never made, malformed, or
+// one that does not count now), and anything outside what it covers, gets the one answer visitorNotHere, the same bytes
+// for every one of them.
 //
-// The pages are plain HTML made here, one column, with no script and nothing of the members' interface: they work
-// without JavaScript. A file's bytes are sent by the members' own handlers (download, open, zip), with the same safe
-// list and headers (opening.go), and take a transfer slot in the visitors' own line (at most transfers.OutsiderSlots
-// of them at once).
+// The pages are plain HTML made here, one column, with nothing of the members' interface. A view link's pages have no
+// script: they work without JavaScript. An upload-only link's page has one small script of its own, in the page, which
+// sends each file chosen or dropped as one request (sendPolicy lets it run, by its hash, and talk to the public prefix
+// of the Drive's own address, and nothing else). A file's bytes are sent by the members' own handlers (download, open,
+// zip), with the same safe list and headers (opening.go); they, and files sent in, take a transfer slot in the
+// outsiders' own line (at most transfers.OutsiderSlots of them at once, with guests).
 
 // How many visitors' requests are worked on at once, how many more may wait for their turn, and for how long; any more
 // are told at once that the Drive is busy. A transfer leaves this count once it is decided, to wait for its slot in
@@ -61,10 +65,17 @@ const (
 	visitorsBusy   = "The Drive is busy. Try again in a moment."
 )
 
-// guardVisitor is guard for a route under the public prefix: only reading, then the visitor's link, the place its item
-// is in, the item the request is about and the access given on the way down to it, then access.Decide for the visitor.
+// guardVisitor is guard for a route under the public prefix: only reading (or, on the one route for it, sending a file
+// in), then the visitor's link, the place its item is in, the item the request is about and the access given on the way
+// down to it, then access.Decide for the visitor.
 func (s *Server) guardVisitor(w http.ResponseWriter, r *http.Request, rt route) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+	if rt.action == access.UploadThroughLink {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			s.refuse(w, r, http.StatusMethodNotAllowed, onlyReading)
+			return
+		}
+	} else if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		s.refuse(w, r, http.StatusMethodNotAllowed, onlyReading)
 		return
@@ -91,8 +102,8 @@ func (s *Server) guardVisitor(w http.ResponseWriter, r *http.Request, rt route) 
 		s.refuse(w, r, http.StatusNotFound, notHere)
 		return
 	}
-	if rt.action == access.DownloadThroughLink {
-		leave() // it waits for its transfer slot in the visitors' own line, which bounds them by itself
+	if rt.action == access.DownloadThroughLink || rt.action == access.UploadThroughLink {
+		leave() // it waits for its transfer slot in the outsiders' own line, which bounds them by itself
 	}
 	rt.serve(w, r, c)
 }
@@ -155,7 +166,7 @@ func accessLink(l index.Link, list *members.List) access.Link {
 	if m, ok := list.Lookup(l.MadeBy); ok {
 		by = personOf(m)
 	}
-	return access.Link{Item: l.Item, Kind: access.LinkKind(l.Kind), By: by}
+	return access.Link{Item: l.Item, Kind: access.LinkKind(l.Kind), Folder: l.Folder, By: by}
 }
 
 // used counts a use of the link a visitor came with, or of the invitations a guest came in through: in memory, so it
@@ -186,9 +197,20 @@ func (s *Server) used(r *http.Request, c call) {
 // download); for a file, Open and Download. Above a folder inside it are the folders from the link's item down: never
 // anything above the link's item.
 //
+// Through an upload-only link, the link's own page is the place to send files in (sendInPage): nothing of what is in the
+// folder.
+//
 //	GET /s/{token}
 //	GET /s/{token}/items/{item}
 func (s *Server) visitorPage(w http.ResponseWriter, r *http.Request, c call) {
+	if !access.Decide(c.person, access.SeeThroughLink, c.access) {
+		if access.Decide(c.person, access.UploadThroughLink, c.access) {
+			s.sendInPage(w, r, c)
+			return
+		}
+		s.refuse(w, r, http.StatusNotFound, notHere) // guard decided only on opening the link's page; never
+		return
+	}
 	token := r.PathValue("token")
 	path := pathTo(*c.item)
 	at := slices.IndexFunc(path, func(it index.Item) bool { return it.ID == c.link.Item })
@@ -283,6 +305,9 @@ type visitorView struct {
 	More  bool
 	// For a file: its size, and where it opens (when its kind does) and downloads.
 	Size, Open, Download string
+	// Send is true for an upload-only link's page: a place to choose or drop files and send them into the folder, and
+	// nothing of what is in it.
+	Send bool
 }
 
 type visitorLink struct{ Name, Href string }
@@ -299,12 +324,16 @@ func (s *Server) renderVisitor(w http.ResponseWriter, status int, v visitorView)
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
+	if v.Send {
+		h.Set("Content-Security-Policy", s.sendPolicy)
+	}
 	w.WriteHeader(status)
 	if err := visitorTemplate.Execute(w, struct {
 		visitorView
-		Style template.CSS
-		Title string
-	}{v, template.CSS(visitorStyle), titleOf(v)}); err != nil {
+		Style  template.CSS
+		Script template.JS
+		Title  string
+	}{v, template.CSS(visitorStyle), template.JS(sendScript), titleOf(v)}); err != nil {
 		s.log.Info("a visitor's page was not sent whole", "error", err)
 	}
 }
@@ -337,7 +366,7 @@ func formatSize(bytes int64) string {
 // graphite ink, in one column on every screen.
 const visitorStyle = `:root{color-scheme:light;--background:oklch(0.956 0.006 239.8);--foreground:oklch(0.283 0.026 246.5);` +
 	`--card:oklch(1 0 0);--muted:oklch(0.937 0.008 241.7);--muted-foreground:oklch(0.511 0.028 248.4);` +
-	`--border:oklch(0.893 0.013 244.3);--ring:oklch(0.511 0.028 248.4)}` +
+	`--border:oklch(0.893 0.013 244.3);--ring:oklch(0.511 0.028 248.4);--destructive:oklch(0.544 0.186 26)}` +
 	`*{box-sizing:border-box}` +
 	`html,body{margin:0;background:var(--background);color:var(--foreground);font-family:"Atkinson Hyperlegible Next",` +
 	`"Atkinson Hyperlegible",ui-sans-serif,system-ui,sans-serif;line-height:1.5;-webkit-text-size-adjust:100%}` +
@@ -363,6 +392,18 @@ const visitorStyle = `:root{color-scheme:light;--background:oklch(0.956 0.006 23
 	`.size{color:var(--muted-foreground);font-variant-numeric:tabular-nums;white-space:nowrap}` +
 	`.do{display:flex;gap:1rem;white-space:nowrap}.do a{color:var(--foreground);font-weight:600}` +
 	`.note{margin:1rem 0 0;color:var(--muted-foreground)}` +
+	`.send{margin:1.5rem 0 0}` +
+	`.drop{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.375rem;` +
+	`min-height:10rem;padding:1.5rem 1rem;border:2px dashed var(--border);border-radius:.75rem;background:var(--card);` +
+	`text-align:center}` +
+	`.drop:hover,.drop.over{border-color:var(--ring)}` +
+	`.drop:focus-within{outline:3px solid var(--ring);outline-offset:2px}` +
+	`.drop input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}` +
+	`.drop strong{font-weight:600}.drop span{color:var(--muted-foreground)}` +
+	`.send .list .state{color:var(--muted-foreground);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}` +
+	`.send .list .state.bad{color:var(--destructive)}` +
+	`button.button{border:0;font:inherit;cursor:pointer}button.button:disabled{opacity:.5;cursor:default}` +
+	`button:focus-visible{outline:3px solid var(--ring);outline-offset:2px}` +
 	`footer{padding:1.5rem 1rem;text-align:center;font-size:.875rem;color:var(--muted-foreground)}`
 
 // visitorPolicy is the Content-Security-Policy of every answer under the public prefix that is not a file's bytes
@@ -407,7 +448,17 @@ var visitorTemplate = template.Must(template.New("visitor").Funcs(template.FuncM
 <nav class="crumbs" aria-label="Folders">{{range .Crumbs}}<a href="{{.Href}}">{{.Name}}</a> › {{end}}</nav>
 {{- end}}
 <h1>{{.Name}}</h1>
-{{- if .Folder}}
+{{- if .Send}}
+<p class="note">Send files to this folder. What is in it stays hidden: you cannot see its files, their names, or what anyone else sent. Nothing you send replaces anything in it.</p>
+<div class="send">
+<label class="drop" id="drop"><input type="file" id="files" multiple><strong>Drop files here, or choose them</strong><span>Files only: send what is in a folder, not the folder.</span></label>
+<ul class="list" id="chosen" hidden></ul>
+<p class="actions"><button class="button" id="send" type="button" disabled>Send</button></p>
+<p class="note" id="said" role="status" aria-live="polite"></p>
+</div>
+<noscript><p class="note">Sending files needs JavaScript, which is switched off in this browser. Switch it on, then reload this page.</p></noscript>
+<script>{{.Script}}</script>
+{{- else if .Folder}}
 <p class="actions"><a class="button" href="{{.Zip}}" download>Download all as zip</a></p>
 {{- if .Items}}
 <ul class="list">
