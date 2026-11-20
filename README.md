@@ -153,7 +153,8 @@ name if the name is taken there. Items keep their ids throughout. The Drive remo
 was deleted: when it starts, every hour, and before showing the Trash view. An entry in a trash that the index does
 not know (left by a change the Drive did not finish, put back by a rollback, or put there directly), named as an entry
 and holding exactly one file or folder, is shown in the Trash as deleted on the day its name says, by nobody the Drive
-knows, going back to the place's top folder; any other is removed once the day in its name is 30 days past.
+knows, going back to the place's top folder (after a rollback, one holding exactly an item restored since is that item:
+see [After a rollback](#after-a-rollback)); any other is removed once the day in its name is 30 days past.
 
 **Space used** is the Drive's own sum of the sizes of the files its index knows, in every place, the trash included,
 shown in the sidebar as "about" against `DRIVE_CAPACITY` (or alone, without it). Files put on the storage directly
@@ -184,7 +185,8 @@ Drive looks at it again (`internal/drive/reread.go`, `walk.go`):
   GET    /api/places/{place}/items/{folder}/items[?wait]
   ```
 - **The walk.** Now and then the Drive looks at every folder of every place, and at every place's trash, one at a time:
-  a minute after it starts, then six hours after each walk ends. After each folder it rests half a second, or three
+  a minute after it starts, then six hours after each walk ends (at once after a [rollback](#after-a-rollback), and
+  again eleven minutes after that walk ends). After each folder it rests half a second, or three
   times as long as the folder took when that is longer (at most a minute), so a slow storage is asked less often. Its
   requests are listings (`PROPFIND` with `Depth: 1`, a few hundred bytes per entry) and, rarely, a look at one address;
   never a file's bytes, so it takes no transfer slot and holds one connection to the storage at a time. A walk of
@@ -225,7 +227,8 @@ What one look does, in one folder:
   first place is made, holding the id the index keeps. A look that would change anything checks it first; without it,
   or with another id (a storage that is empty, mounted wrongly, someone else's, or put back to before the Drive marked
   it), nothing is added, hidden or dropped, and the log says so every ten minutes, with the id the file should hold:
-  written back, looks go on. Most looks change nothing, and then ask and write nothing more.
+  written back, looks go on. Most looks change nothing, and then ask and write nothing more. The Drive writes the mark
+  back itself only after a [rollback](#after-a-rollback) to a snapshot taken before it last wrote it.
 
 The trash and the hidden folders are on the storage too. The Trash view looks at each place's trash on the storage
 before it answers, and the walk looks at every place's trash. An item of a trash whose entry is gone, or no longer
@@ -241,14 +244,91 @@ is built anew from a storage that holds files: only they see it.
 Search and "Shared with me" read only the index: what appears on the storage is found once a look took it in (its
 folder opened, or the walk); what goes is not found from the first look that missed it.
 
-**After the storage is put back to an earlier state** (a snapshot rolled back; the Drive is stopped meanwhile, and the
-walk goes on a minute after it starts): files that were added or changed since are gone or as they were; the looks
-hide what the index knows that is gone, and drop it with its sharing ten minutes later; files that are back (deleted or
-moved since) are new items with their folder's access only; files changed since keep their ids with their older
-content; trash entries made since are gone (their items hidden, then dropped), and entries that are back (restored or
-removed for good since) show in the Trash as entries put there directly; an upload in progress whose file went starts
-again from its beginning. Sharing itself is never put back. The mark is in every snapshot taken after the Drive's first
-place, so looks go on after a rollback; one to before that changes nothing until the mark is written back.
+**After the storage is put back to an earlier state without the Drive being told** (a self-hoster's own WebDAV put back;
+the Drive is stopped meanwhile, and the walk goes on a minute after it starts): files that were added or changed since
+are gone or as they were; the looks hide what the index knows that is gone, and drop it with its sharing ten minutes
+later; files that are back (deleted or moved since) are new items with their folder's access only; files changed since
+keep their ids with their older content; trash entries made since are gone (their items hidden, then dropped), and
+entries that are back (restored or removed for good since) show in the Trash as entries put there directly; a shared
+folder deleted since stays in the trash, and restoring it takes its top folder as it is back at its own path; an upload
+in progress whose file went starts again from its beginning. Sharing itself is never put back. The mark is in every
+snapshot taken after the Drive's first place, so looks go on after a rollback; one to before that changes nothing until
+the mark is written back. Told about it in its settings, the Drive does more: see [After a rollback](#after-a-rollback).
+
+### After a rollback
+
+A project admin can put Superit's Drive storage back to one of its daily snapshots, from the dashboard: a rollback. The
+storage then holds the files as they were when the snapshot was taken, and everything written since is gone, the
+Drive's trash, uploads in progress and the copy of its index included. The index on the server is not put back: who has
+access to what stays as it was just before, except on what no longer exists. Whoever runs the Drive tells it in three
+settings, and the Drive does the rest (`internal/drive/rollback.go`). A self-hoster who puts their own WebDAV back can
+use them the same way.
+
+**What the platform passes.** The daemon stops the Drive, the storage is put back, and the daemon starts the Drive
+again, only once the storage is back, with these environment variables:
+
+| Variable | Value |
+|---|---|
+| `DRIVE_ROLLBACK_AT` | When the rollback was done (when the platform ran it), as RFC 3339 with its offset: `2026-11-20T09:41:00Z`. Every rollback has its own: it is how the Drive tells one from another, to the second. |
+| `DRIVE_ROLLBACK_TO` | When the snapshot it went back to was taken (the snapshot's `created` from Hetzner), as RFC 3339: `2026-11-19T03:00:00Z`. Earlier than `DRIVE_ROLLBACK_AT`. |
+| `DRIVE_ROLLBACK_BY` | The name of the project admin who did it, as members should read it: their display name (their email address when they have none). Plain text, never markup: the Drive turns control characters into spaces, takes out the characters that turn the direction of text, and cuts it to 100 characters, the last one "…". |
+
+- Pass all three, or none. With only some, a time the Drive cannot read (a date alone, a time without its offset, a
+  number), `DRIVE_ROLLBACK_TO` not before `DRIVE_ROLLBACK_AT`, or a name with nothing left in it, the Drive does not
+  start: it exits with 1 and its log names every variable that is wrong, as for any setting.
+  `superit-drive check-storage` does not read them.
+- Keep passing the same values on every later start (a new version, a new capacity), until the next rollback replaces
+  them. The Drive takes a rollback in once and keeps it in its index: the same `DRIVE_ROLLBACK_AT` again is old news (it
+  logs `the rollback of the storage in the settings was taken in already`), and one older than the last it took in is
+  left aside (a warning). Leaving them out later changes nothing: the notice runs its seven days all the same.
+- An install that is given them for a rollback it never saw (a new server, an index made anew) takes it in as new: it
+  costs one walk through the storage, and shows the notice for what is left of the seven days.
+
+**What the Drive does with a new one.** It logs `the storage was put back to a snapshot`, with the three times, and walks
+through the storage at once, from the top (a walk the stop cut short is begun again): first every shared folder in the
+trash and every place's trash, then every folder. The looks then do what they always do ([Keeping in step with the
+storage](#keeping-in-step-with-the-storage)), with three more rules until that walk has ended with the mark there
+throughout (a restart before then goes on with them):
+
+- **Added since the snapshot**: gone. Hidden at the first look, so its sharing and its link stop at once; dropped with
+  them when a look at least ten minutes later confirms it. The walk after the one that takes the rollback in comes eleven
+  minutes after it ends, not six hours, so that happens within about two walks, and the space used is right again.
+- **Changed since**: the same item, with the content it had in the snapshot, its sharing and its link.
+- **Deleted, moved or renamed since**: back where it was in the snapshot, as a new item with the access of its folder
+  and nothing of its own: the Drive cannot tell it for the item it was, and a share or a link that stopped when it was
+  deleted does not start again by itself. It can be shared again; the notice says so.
+- **Sharing is never put back, and nothing is given from the storage**: access taken away since, and a link removed
+  since, stay away; nothing that was removed comes back.
+- **A shared folder deleted since** has its top folder back at its own path, while the index holds it in the trash. Its
+  entry in the trash no longer holds it, so it is out of the trash again, as if a manager had restored it: with its
+  managers, the roles given on it, what was given inside it and its links, as the index kept them. (A manager restoring
+  such a shared folder by hand gets the same, with or without a rollback.)
+- **Restored from the trash since**: back in its entry of the trash. An entry the index does not know that holds exactly
+  an item the place has outside the trash (the same name, kind, size and time of its last change), which is no longer
+  where the index has it, is that item: it goes back into the trash as itself, with what was given on it and its link,
+  which work again when it is restored. Any other entry that is back (an item removed for good since, or changed after it
+  was restored) shows in the Trash as an entry put there directly.
+- **The mark**: a snapshot taken after the Drive first marked the storage holds the mark, so looks go on. One taken
+  before that does not, and the rollback says why: when the snapshot was taken before the Drive last wrote its mark and
+  the storage holds none, the Drive writes it back with the id its index keeps, logs it, and looks go on (what the
+  Drive had made since is then gone, as the admin was told). A mark with another id is never replaced, and a mark
+  missing from a snapshot taken after the Drive wrote it still stops every look, as without a rollback.
+- **Places made since** (a shared folder, a member's first My files) stay, emptied: a place is never removed for want of
+  its top folder. A shared folder's managers can delete it.
+
+**The notice.** For seven days from `DRIVE_ROLLBACK_AT` (from when the Drive took it in, when that time is still to come
+by the Drive's clock), `GET /api/me` answers members with
+
+```
+"rollback": {"by": "Réka Kovács", "to": "2026-11-19T03:00:00Z", "at": "2026-11-20T09:41:00Z", "until": "2026-11-27T09:41:00Z"}
+```
+
+and the interface shows it above the list, in every view, as "The files were put back to 19 November at 04:00" (the
+time in the browser's time zone): "Réka Kovács put the Drive's files back to how they were then, on 20 November.
+Anything added or changed after that is gone, and anything deleted after that is back. Files that came back may need to
+be shared again." The name is shown as text. A member can close it: it stays closed in that browser, for that rollback,
+and nowhere else; a new rollback shows again. Visitors through a public link are told nothing: their pages say nothing
+about the project but who shared the item. Guests, when they come, will not be told either.
 
 **Connections to the storage.** A server closes a connection kept open between requests after a while, and can do so
 just as the Drive sends on it; the Drive then cannot tell whether the server acted. So every request that changes the
@@ -381,7 +461,9 @@ person can already see one of that name; refusing a name they cannot see would t
 
 **A shared folder in the trash.** Deleting a shared folder moves its whole top folder into an entry of its own trash
 folder, beside what was deleted from it, and hides it from everyone. Its items, its trash and its roles stay in the
-index, and its folder stays held, so restoring always has its own folder to go back to. Its managers and the project
+index, and its folder stays held, so restoring always has its own folder to go back to (something put there on the
+storage directly is never replaced, unless its entry no longer holds its top folder: then that is its top folder, put
+back by a rollback, and it is restored as it is). Its managers and the project
 admins find it in the Trash view and can restore it; 30 days after it was deleted the Drive removes its trash folder,
 and everything in it, for good. A shared folder always keeps someone in charge: taking a manager away, or giving them
 less, is refused when nobody in the member list would be left managing it (there is always someone while the project
@@ -901,8 +983,10 @@ restart a Drive (`Drive.Restart`) 31 days later and see the trash emptied, or te
 from the storage dropped; and `SUPERIT_DRIVE_TEST_WALK_EVERY` and `SUPERIT_DRIVE_TEST_WALK_PAUSE` (Go durations) make the
 walk through the storage start that soon, run that often and rest that long after each folder. A Drive built without
 the tag reads no such variable. Tests change the storage directly with the harness's own WebDAV client
-(`Drive.Storage`), including a `MOVE` that keeps a file's time (a storage that answered wrong for a while) and `Fill`,
-which puts thousands of files straight onto the stand-in storage's disk.
+(`Drive.Storage`), including a `MOVE` that keeps a file's time (a storage that answered wrong for a while), `Fill`,
+which puts thousands of files straight onto the stand-in storage's disk, and `Snapshot` and `RollBack`, which copy the
+Drive's folder on that disk with every time kept and put it back, as a Storage Box's snapshots do (stop the Drive first,
+`Drive.Stop`, then `Restart` it with the rollback settings).
 
 **Running it locally.**
 
@@ -950,7 +1034,7 @@ internal/server/       HTTP: routes.go lists every route; server.go's guard runs
                        public prefix and the visitor's pages
 internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
                        shared folders, the access given on them; reread.go and walk.go keep the index in step with
-                       the storage
+                       the storage, and rollback.go takes in the storage put back to a snapshot
 internal/index/        the SQLite index (search.go: names as a search compares them, and the walk down a scope);
                        schema changes are numbered files in migrations/, run with foreign keys
                        off (SQLite's recipe for rebuilding a table) and checked with foreign_key_check before each
