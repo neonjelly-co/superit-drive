@@ -224,3 +224,46 @@ func (s *Storage) List(t *testing.T, p string) (entries []Entry, ok bool) {
 	}
 	return entries, true
 }
+
+// Move moves the file or folder at from to to, on the storage directly (MOVE, never replacing): what is moved keeps
+// the time it last changed, as a storage that answered wrong for a while and then right again would show it.
+func (s *Storage) Move(t *testing.T, from, to string, folder bool) {
+	t.Helper()
+	status, body := s.do(t, "MOVE", s.address(from, folder), nil, http.Header{
+		"Destination": {s.address(to, false)},
+		"Overwrite":   {"F"},
+	})
+	if status != http.StatusCreated && status != http.StatusNoContent {
+		t.Fatalf("MOVE %s to %s: %d %s", from, to, status, body)
+	}
+}
+
+// Fill puts n empty files called prefix0, prefix1 and so on into the folder at dir (made if missing), straight into
+// the stand-in storage's own disk: thousands in a second, where one request each would take minutes.
+func (s *Storage) Fill(t *testing.T, dir string, n int, prefix string) {
+	t.Helper()
+	root := "/var/storage/files" + strings.TrimPrefix(s.root, shared.storage.url) // this Drive's folder
+	folder := root
+	for _, seg := range strings.Split(dir, "/") {
+		if seg != "" {
+			folder += "/" + seg
+		}
+	}
+	script := `set -e; mkdir -p "$1"; cd "$1"; i=0; while [ $i -lt "$2" ]; do : > "$3$i"; i=$((i+1)); done; ` +
+		`chown -R www-data:www-data "$4"`
+	out, err := exec.Command("docker", "exec", shared.storage.id, "sh", "-c", script, "fill",
+		folder, strconv.Itoa(n), prefix, root).CombinedOutput()
+	if err != nil {
+		t.Fatalf("filling %s with %d files: %v: %s", dir, n, err, out)
+	}
+}
+
+// PutEscaped writes a file at the address escaped, a path already escaped for the wire ("My%20files/r/a%0Ab.txt"),
+// whose name a path of real names cannot say: one with a line break, or bytes that are not text.
+func (s *Storage) PutEscaped(t *testing.T, escaped, content string) {
+	t.Helper()
+	status, body := s.do(t, http.MethodPut, s.root+"/"+escaped, strings.NewReader(content), nil)
+	if status != http.StatusCreated && status != http.StatusNoContent {
+		t.Fatalf("PUT %s: %d %s", escaped, status, body)
+	}
+}

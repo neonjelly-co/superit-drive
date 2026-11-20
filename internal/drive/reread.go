@@ -136,9 +136,6 @@ func (d *Drive) reread(ctx context.Context, p index.Place, id int64) (index.Outc
 	case err != nil:
 		return index.Outcome{}, storageError(err)
 	}
-	if !d.ours(ctx) {
-		return index.Outcome{}, errUntrusted
-	}
 
 	seen := make([]index.Seen, 0, len(entries))
 	names := make(map[string]bool, len(entries))
@@ -151,10 +148,27 @@ func (d *Drive) reread(ctx context.Context, p index.Place, id int64) (index.Outc
 		names[e.Name] = true
 	}
 	entries = nil
+	leaveName := func(name string) bool {
+		at, ok := pathIn(dir, name)
+		return !ok || CheckName(name) != nil || d.busyIn(at)
+	}
 
-	// What has been missing long enough is dropped if a request for its own address finds nothing there.
+	// Most looks find the folder as the index has it: nothing more is asked or written.
 	now := d.now()
 	old := now.Add(-ConfirmAfter)
+	known, err := d.index.KnownIn(ctx, p.ID, id)
+	if err != nil {
+		return index.Outcome{}, err
+	}
+	if !index.Differs(known, seen, leaveName, old) {
+		return index.Outcome{}, nil
+	}
+	known = nil
+	if !d.ours(ctx) {
+		return index.Outcome{}, errUntrusted
+	}
+
+	// What has been missing long enough is dropped if a request for its own address finds nothing there.
 	missing, err := d.index.MissingIn(ctx, p.ID, id, old, maxConfirms)
 	if err != nil {
 		return index.Outcome{}, err
@@ -175,12 +189,9 @@ func (d *Drive) reread(ctx context.Context, p index.Place, id int64) (index.Outc
 	}
 	defer leave()
 	return d.index.Reconcile(ctx, p.ID, id, index.Reread{
-		Path: path,
-		Seen: seen,
-		Leave: func(name string) bool {
-			at, ok := pathIn(dir, name)
-			return !ok || CheckName(name) != nil || d.busyIn(at)
-		},
+		Path:      path,
+		Seen:      seen,
+		Leave:     leaveName,
 		Busy:      func() bool { return d.busyAt(dir) },
 		Stale:     stale,
 		At:        now,
@@ -223,9 +234,6 @@ func (d *Drive) rereadTrash(ctx context.Context, p index.Place) (index.Outcome, 
 	case err != nil:
 		return index.Outcome{}, storageError(err)
 	}
-	if !d.ours(ctx) {
-		return index.Outcome{}, errUntrusted
-	}
 	present := map[string]bool{}
 	for _, e := range entries {
 		if e.Folder {
@@ -234,14 +242,37 @@ func (d *Drive) rereadTrash(ctx context.Context, p index.Place) (index.Outcome, 
 	}
 	entries = nil
 
-	// Missing items of the trash: back only when their entry holds them again; dropped when, missing long enough, their
-	// entry is gone or holds them no more.
+	// Most looks find the trash as the index has it: nothing more is asked or written.
 	now := d.now()
 	old := now.Add(-ConfirmAfter)
 	missing, err := d.index.TrashMissing(ctx, p.ID, now, maxConfirms)
 	if err != nil {
 		return index.Outcome{}, err
 	}
+	known, err := d.index.TrashEntries(ctx, p.ID)
+	if err != nil {
+		return index.Outcome{}, err
+	}
+	gone := map[string]bool{}
+	for _, m := range missing {
+		gone[m.Entry] = true
+	}
+	changes := len(missing) > 0
+	for entry := range known {
+		changes = changes || (!present[entry] && !gone[entry])
+	}
+	for entry := range present {
+		changes = changes || (!known[entry] && entryName.MatchString(entry))
+	}
+	if !changes {
+		return index.Outcome{}, nil
+	}
+	if !d.ours(ctx) {
+		return index.Outcome{}, errUntrusted
+	}
+
+	// Missing items of the trash: back only when their entry holds them again; dropped when, missing long enough, their
+	// entry is gone or holds them no more.
 	notBack := map[string]bool{}
 	confirmed := map[int64]time.Time{}
 	for _, m := range missing {
@@ -272,10 +303,6 @@ func (d *Drive) rereadTrash(ctx context.Context, p index.Place) (index.Outcome, 
 	}
 
 	// Entries the index does not know: shown in the trash when each holds exactly one item it can use.
-	known, err := d.index.TrashEntries(ctx, p.ID)
-	if err != nil {
-		return index.Outcome{}, err
-	}
 	var adopt []index.Adopted
 	for entry := range present {
 		if len(adopt) >= maxAdoptions {
@@ -511,25 +538,15 @@ func (l *logged) due(kind string, every time.Duration) bool {
 // marked it), looks change nothing in the index, and the Drive logs why.
 const StorageIDFile = HiddenFolder + "/storage-id"
 
-// markFor is how long a check that the storage holds the mark is used before it is made again.
-const markFor = 30 * time.Second
+// mark serialises the checks of the Drive's mark on the storage.
+type mark struct{ mu sync.Mutex }
 
-// mark is what the Drive knows about its mark on the storage.
-type mark struct {
-	mu      sync.Mutex
-	ok      bool
-	checked time.Time
-}
-
-// ours says whether the storage holds the Drive's mark with the id its index keeps. The first time, with an index that
-// keeps none, the Drive writes its mark (or takes the one there, when its index was made anew against a storage that
-// holds one).
+// ours says whether the storage holds the Drive's mark with the id its index keeps. It is asked afresh by every look
+// that would change the index (most change nothing, and do not ask). The first time, with an index that keeps none, the
+// Drive writes its mark (or takes the one there, when its index was made anew against a storage that holds one).
 func (d *Drive) ours(ctx context.Context) bool {
 	d.mark.mu.Lock()
 	defer d.mark.mu.Unlock()
-	if d.mark.ok && time.Since(d.mark.checked) < markFor {
-		return true
-	}
 	ok, why, err := d.checkMark(ctx)
 	if err != nil {
 		if ctx.Err() == nil && d.logged.due("mark unread", 10*time.Minute) {
@@ -537,16 +554,21 @@ func (d *Drive) ours(ctx context.Context) bool {
 		}
 		return false
 	}
-	if !ok {
-		if d.logged.due("mark missing", 10*time.Minute) {
-			d.log.Error("the storage does not hold the Drive's mark, so it may be empty, mounted wrongly, someone else's, or put back to before the Drive marked it: "+
-				"nothing is hidden or dropped from the index until the mark is back (put the line in id into the file)", "file", StorageIDFile, "why", why)
-		}
-		d.mark.ok = false
-		return false
+	if !ok && d.logged.due("mark missing", 10*time.Minute) {
+		d.log.Error("the storage does not hold the Drive's mark, so it may be empty, mounted wrongly, someone else's, or put back to before the Drive marked it: "+
+			"nothing is added, hidden or dropped from the index until the mark is back (the file holds the id, on one line)", "file", StorageIDFile, "why", why)
 	}
-	d.mark.ok, d.mark.checked = true, time.Now()
-	return true
+	return ok
+}
+
+// marked makes sure the storage holds the Drive's mark, as a place is made on it: the Drive's first change to a storage
+// marks it as its own, before any look has to tell whether it still is. It is logged, not refused, when it cannot.
+func (d *Drive) marked(ctx context.Context) {
+	d.mark.mu.Lock()
+	defer d.mark.mu.Unlock()
+	if _, _, err := d.checkMark(ctx); err != nil && ctx.Err() == nil {
+		d.log.Warn("the Drive could not mark the storage as its own; it tries again at the next look", "error", err)
+	}
 }
 
 // checkMark reads the mark on the storage and compares it with the id the index keeps; why says what differs.

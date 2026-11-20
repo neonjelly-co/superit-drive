@@ -245,6 +245,7 @@ func (d *Drive) MyFiles(ctx context.Context, m members.Member) (index.Place, err
 	if err := d.storage.MakeFolder(ctx, folder); err != nil {
 		return index.Place{}, storageError(err)
 	}
+	d.marked(ctx)
 	return d.index.AddMyFiles(ctx, m.UserID, folder)
 }
 

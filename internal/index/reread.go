@@ -118,6 +118,71 @@ func Same(m Missing, s Seen) bool {
 	return m.Folder == s.Folder && m.Size == s.Size && m.Changed.Unix() == s.Changed.Unix()
 }
 
+// A Known item is one the index holds directly in a folder, live or missing, as a look compares it with the storage.
+type Known struct {
+	Name    string
+	Folder  bool
+	Size    int64
+	Changed time.Time
+	// Missing is when it went missing; zero while the storage shows it.
+	Missing time.Time
+}
+
+// KnownIn returns what the index holds directly in one folder of a place (folderID 0: its top folder), live and
+// missing, not what is in the trash.
+func (x *Index) KnownIn(ctx context.Context, placeID, folderID int64) ([]Known, error) {
+	rows, err := x.db.QueryContext(ctx, `
+		SELECT name, is_folder, size, changed_at, IFNULL(missing_at, 0) FROM items
+		WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL`, placeID, folderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Known
+	for rows.Next() {
+		var k Known
+		var changed, missing int64
+		if err := rows.Scan(&k.Name, &k.Folder, &k.Size, &changed, &missing); err != nil {
+			return nil, err
+		}
+		k.Changed = time.Unix(changed, 0).UTC()
+		if missing != 0 {
+			k.Missing = time.UnixMilli(missing).UTC()
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// Differs says whether a look that found seen in a folder whose items the index holds as known would change anything:
+// add, change, bring back, hide or drop an item (old and leave as for a Reread). A look that would not need not be
+// applied.
+func Differs(known []Known, seen []Seen, leave func(name string) bool, old time.Time) bool {
+	live := make(map[string]Known, len(known))
+	for _, k := range known {
+		if leave(k.Name) {
+			continue
+		}
+		if k.Missing.IsZero() {
+			live[k.Name] = k
+		} else if !k.Missing.After(old) {
+			return true // missing long enough: it may be dropped
+		}
+	}
+	found := 0
+	for _, s := range seen {
+		if leave(s.Name) {
+			continue
+		}
+		k, ok := live[s.Name]
+		if !ok || k.Folder != s.Folder || k.Size != s.Size || k.Changed.Unix() != s.Changed.Unix() {
+			return true
+		}
+		found++
+	}
+	return found != len(live)
+}
+
 // known is an item of one folder as Reconcile reads it.
 type known struct {
 	id      int64

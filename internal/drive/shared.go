@@ -83,6 +83,7 @@ func (d *Drive) makeSharedFolder(ctx context.Context, name, folder, creator stri
 	case err != nil:
 		return index.Place{}, false, storageError(err)
 	}
+	d.marked(ctx)
 	p, err = d.index.AddSharedFolder(ctx, name, folder, creator, d.now())
 	if err != nil {
 		d.log.Error("a shared folder's top folder was made, but the shared folder could not be recorded", "folder", folder, "error", err)
