@@ -327,9 +327,10 @@ func (d *Drive) rereadTrash(ctx context.Context, p index.Place) (index.Outcome, 
 			Item: index.Seen{Name: e.Name, Folder: e.Folder, Size: e.Size, Changed: e.Changed}})
 	}
 	// After a rollback, an entry holding exactly an item the place has outside the trash, which is no longer where the
-	// index has it, is that item, restored since the snapshot: it goes back into the trash as itself (rollback.go).
+	// index has it, is that item, restored since the snapshot: it goes back into the trash as itself (rollback.go). With
+	// an index made from a copy, it is that item deleted since the copy was made (adopt.go).
 	if len(adopt) > 0 {
-		if _, rolling := d.rollingBack(ctx); rolling {
+		if d.catchingUp(ctx) {
 			for i := range adopt {
 				if id, from, ok := d.restoredSince(ctx, p, adopt[i].Item); ok {
 					adopt[i].Same, adopt[i].From = id, from
@@ -651,10 +652,13 @@ func (d *Drive) writeMark(ctx context.Context, id string) error {
 }
 
 // readMark reads the id in the Drive's mark on the storage: "" when there is none.
-func (d *Drive) readMark(ctx context.Context) (string, error) {
+func (d *Drive) readMark(ctx context.Context) (string, error) { return readMarkOn(ctx, d.storage) }
+
+// readMarkOn reads the id in the Drive's mark on the storage s: "" when there is none.
+func readMarkOn(ctx context.Context, s *storage.Client) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, storageTimeout)
 	defer cancel()
-	f, err := d.storage.Read(ctx, StorageIDFile, nil, "")
+	f, err := s.Read(ctx, StorageIDFile, nil, "")
 	if errors.Is(err, storage.ErrNotFound) {
 		return "", nil
 	}

@@ -51,9 +51,10 @@ const (
 	walkFinished = "walk_finished" // when the last walk ended (the same)
 )
 
-// Walk walks the storage now and then, as w says, until ctx ends. After a rollback (rollback.go) it walks at once, every
-// trash first, and once that walk has ended, the next one comes ConfirmAfter (and a minute) later rather than after
-// w.Every, so what the rollback took away is dropped with its sharing soon, and the space used is right again.
+// Walk walks the storage now and then, as w says, until ctx ends. After a rollback (rollback.go), and with an index made
+// from a copy (adopt.go), it walks at once, every trash first, and once that walk has ended, the next one comes
+// ConfirmAfter (and a minute) later rather than after w.Every, so what the rollback took away (or what went since the
+// copy was made) is dropped with its sharing soon, and the space used is right again.
 func (d *Drive) Walk(ctx context.Context, w Walking) {
 	wait := w.First
 	if _, under, _ := d.index.State(ctx, walkCursor); !under {
@@ -63,7 +64,7 @@ func (d *Drive) Walk(ctx context.Context, w Walking) {
 			}
 		}
 	}
-	if _, rolling := d.rollingBack(ctx); rolling {
+	if d.catchingUp(ctx) {
 		wait = 0
 	}
 	for {
@@ -76,7 +77,8 @@ func (d *Drive) Walk(ctx context.Context, w Walking) {
 		}
 		wait = w.Every
 		r, rolling := d.rollingBack(ctx)
-		first := rolling && d.afterRollback(ctx)
+		adopted := d.adopting(ctx)
+		first := (rolling || adopted) && d.afterRollback(ctx)
 		got, err := d.walk(ctx, w.Pause)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -85,8 +87,15 @@ func (d *Drive) Walk(ctx context.Context, w Walking) {
 			continue
 		}
 		if first && got.untrusted == 0 {
-			if err := d.rolledBack(ctx, r.At); err != nil && ctx.Err() == nil {
-				d.log.Error("the end of the walk after the rollback could not be recorded; the next walk takes it in again", "error", err)
+			if rolling {
+				if err := d.rolledBack(ctx, r.At); err != nil && ctx.Err() == nil {
+					d.log.Error("the end of the walk after the rollback could not be recorded; the next walk takes it in again", "error", err)
+				}
+			}
+			if adopted {
+				if err := d.adoptedInStep(ctx); err != nil && ctx.Err() == nil {
+					d.log.Error("the end of the walk after the index was made from a copy could not be recorded; the next walk does it again", "error", err)
+				}
 			}
 			wait = min(w.Every, ConfirmAfter+time.Minute)
 		}

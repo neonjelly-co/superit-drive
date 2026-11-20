@@ -175,6 +175,53 @@ func (d *Drive) Restart(t *testing.T, env map[string]string) {
 	d.waitUntilListening(t)
 }
 
+// OnANewServer stops the Drive and starts it again as a new server would, after the old one was lost: against the same
+// storage, with the same member list and settings, changed by env, but with an empty data folder (everything the old
+// server held is gone) and a new header secret, as a new server's daemon makes one. Its URL and Secret change.
+func (d *Drive) OnANewServer(t *testing.T, env map[string]string) {
+	t.Helper()
+	d.loseServer(t)
+	d.Restart(t, env)
+}
+
+func (d *Drive) loseServer(t *testing.T) {
+	t.Helper()
+	d.stop()
+	if err := os.RemoveAll(d.DataDir); err != nil {
+		t.Fatal(err)
+	}
+	d.Secret = randomHex(32)
+	d.env["DRIVE_HEADER_SECRET"] = d.Secret
+}
+
+// OnANewServerFailing is OnANewServer for a Drive that is expected to refuse to start there: it returns what it printed.
+func (d *Drive) OnANewServerFailing(t *testing.T, env map[string]string) string {
+	t.Helper()
+	d.loseServer(t)
+	return d.RestartFailing(t, env)
+}
+
+// RestartFailing is Restart for a Drive that is expected to refuse to start: it returns what it printed then.
+func (d *Drive) RestartFailing(t *testing.T, env map[string]string) string {
+	t.Helper()
+	d.stop()
+	d.earlierLogs += d.logs.String()
+	for k, v := range env {
+		d.env[k] = v
+	}
+	d.URL = ""
+	d.run(t)
+	select {
+	case <-d.exited:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the Drive was expected to stop, but it is still running:\n%s", d.Logs())
+	}
+	if d.cmd.ProcessState.Success() {
+		t.Fatalf("the Drive stopped without an error:\n%s", d.Logs())
+	}
+	return d.logs.String()
+}
+
 func (d *Drive) waitUntilListening(t *testing.T) {
 	t.Helper()
 	deadline := time.After(15 * time.Second)

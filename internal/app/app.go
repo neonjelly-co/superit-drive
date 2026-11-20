@@ -43,15 +43,19 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	if err != nil {
 		return err
 	}
+	store := storage.New(s.Storage.URL, s.Storage.User, s.Storage.Password, s.Storage.Folder)
+	if shift := clock.Shift(); shift != 0 {
+		log.Warn("this is a test build: its clock is moved forward", "by", shift.String())
+	}
+	// A data folder without an index (a new server) makes it from a copy, its own or the storage's, when there is one.
+	if err := drive.Adopt(ctx, s.DataDir, store, log, clock.Now); err != nil {
+		return err
+	}
 	x, err := index.Open(ctx, s.DataDir)
 	if err != nil {
 		return err
 	}
 	defer x.Close()
-	store := storage.New(s.Storage.URL, s.Storage.User, s.Storage.Password, s.Storage.Folder)
-	if shift := clock.Shift(); shift != 0 {
-		log.Warn("this is a test build: its clock is moved forward", "by", shift.String())
-	}
 	d := drive.New(x, store, drive.Options{Now: clock.Now, Log: log, StopAt: clock.StopAt})
 	defer d.Stop() // the looks at folders under way in the background end, before the index closes
 
@@ -152,6 +156,21 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 		d.Walk(walkCtx, walking)
 	}()
 	defer func() { stopWalk(); <-walkDone }() // before the index closes
+
+	// Writes a copy of the index into the data folder and onto the storage: now, after access changes, and every night.
+	copying := drive.DefaultCopying
+	if quiet, latest, retry, ok := clock.Copying(); ok {
+		copying.Quiet, copying.Latest, copying.Retry, copying.Poll = quiet, latest, retry, min(copying.Poll, quiet/4)
+		log.Warn("this is a test build: the copy of the index follows access changes at the pace the test sets",
+			"quiet", quiet.String(), "latest", latest.String(), "retry", retry.String())
+	}
+	copyCtx, stopCopies := context.WithCancel(ctx)
+	copiesDone := make(chan struct{})
+	go func() {
+		defer close(copiesDone)
+		d.KeepCopies(copyCtx, s.DataDir, copying)
+	}()
+	defer func() { stopCopies(); <-copiesDone }() // before the index closes
 
 	// Writes how often each public link and each guest's invitation was used, counted in memory as visitors and guests
 	// use them: every half minute, and once more when the Drive stops (after the last request, before the index closes).
