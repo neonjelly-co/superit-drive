@@ -2,6 +2,7 @@ import { Download, ExternalLink, FolderInput, FolderOpen, MapPin, PenLine, Trash
 import { type Action, api, type FolderRef, type Item } from "../api";
 import { formatChangedFull, formatSize } from "../format";
 import { AccessSection } from "./access-section";
+import { PublicLinkSection } from "./public-link-section";
 import { Button } from "./button";
 import { FileIcon } from "./file-icon";
 
@@ -36,7 +37,7 @@ type Props = {
 /**
  * The details panel on the right of layout D. It opens when one item is selected (a click on its row) and holds the
  * item's details, Open (a folder, or a file of a kind the browser shows) and Download, who can see it and giving
- * access (for whoever may share it), and Rename, Move and Delete. The public link comes with its own ticket.
+ * access (for whoever may share it), its public link (for whoever may share it), and Rename, Move and Delete.
  */
 export function DetailsPanel(props: Props) {
 	const { placeId, where, item, can, me, here, onClose, onOpen, onRename, onMove, onDelete, onShow, onAccessChanged, busy } = props;
@@ -122,6 +123,17 @@ export function DetailsPanel(props: Props) {
 					canChange={can.includes("share")}
 					roles={["viewer", "editor"]}
 					me={me}
+					onChanged={onAccessChanged}
+				/>
+			)}
+
+			{can.includes("manage-link") && (
+				<PublicLinkSection
+					key={`link-${item.id}`}
+					placeId={placeId}
+					itemId={item.id}
+					what={item.kind}
+					canMake={can.includes("make-link")}
 					onChanged={onAccessChanged}
 				/>
 			)}

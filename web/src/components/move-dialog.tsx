@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, Folder, FolderOpen, User, Users } from "lucide-react";
+import { ChevronRight, Folder, FolderOpen, Link2, User, Users } from "lucide-react";
 import { type ReactNode, useState } from "react";
-import { nameOf, ROLE_NAME, whoCanSee, whyOf } from "../access";
+import { ROLE_NAME, whoCanSee, whoOf, whyOf } from "../access";
 import { type Access, type Action, api, type FolderRef, type Item, type Member, type SeenBy } from "../api";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
@@ -54,11 +54,12 @@ async function warningFor(placeId: number, items: Item[], dest: Destination): Pr
 	// What every item gets there is what was given there; what was given on each item it keeps, and is said apart.
 	const access = (first?.access ?? []).filter((a) => !a.given);
 	const everyone = access.some((a) => a.everyone);
+	const link = access.some((a) => a.link);
 	const members = [...new Set(access.filter((a) => a.userId && !a.former).map((a) => a.userId as string))];
 	const kept = previews
 		.map((p, i) => ({ name: items[i]?.name ?? "", access: p.access.filter((a) => a.given) }))
 		.filter((k) => k.access.length > 0);
-	return { becomesProjects, access, seenBy: { everyone, members: everyone ? [] : members }, kept };
+	return { becomesProjects, access, seenBy: { everyone, members: everyone ? [] : members, link }, kept };
 }
 
 /**
@@ -343,8 +344,8 @@ function Line({ depth, children }: { depth: number; children: ReactNode }) {
 
 /** One line of who will see what is moved, where it goes: who, their role, and why. */
 function AccessLine({ a, me, given }: { a: Access; me?: string; given: string }) {
-	const Icon = a.everyone ? Users : User;
-	const name = a.everyone ? "Everyone in the project" : a.former ? "Someone no longer in the project" : a.userId === me ? "You" : nameOf(a);
+	const Icon = a.link ? Link2 : a.everyone ? Users : User;
+	const name = whoOf(a, me);
 	const why = a.given ? given : whyOf(a);
 	return (
 		<li className="flex items-center gap-2.5 border-b border-border py-2 last:border-0">

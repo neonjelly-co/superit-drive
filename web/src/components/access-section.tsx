@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { User, Users, X } from "lucide-react";
+import { Link2, User, Users, X } from "lucide-react";
 import { useId, useState } from "react";
-import { nameOf, ROLE_MEANS, ROLE_NAME, whyOf } from "../access";
+import { ROLE_MEANS, ROLE_NAME, whoOf, whyOf } from "../access";
 import { type Access, api, type Grantee, type Role } from "../api";
 import { Button } from "./button";
 
@@ -80,18 +80,13 @@ export function AccessSection({ placeId, itemId, what, canChange, roles, me, onC
 			) : (
 				<ul className="mt-2 text-sm">
 					{access.data.map((a, i) => {
-						const name = a.everyone
-							? "Everyone in the project"
-							: a.former
-								? "Someone no longer in the project"
-								: a.userId === me
-									? "You"
-									: nameOf(a);
+						const name = whoOf(a, me);
 						const why = whyOf(a);
-						const changeable = canChange && a.given && !a.owner && !a.admin && a.role !== "owner";
+						// A public link is made and removed in its own section, below.
+						const changeable = canChange && a.given && !a.owner && !a.admin && !a.link && a.role !== "owner";
 						// Nobody gives access on an item to themselves: their own line can only be taken away (stepping back).
 						const ownOnItem = itemId !== null && !a.everyone && a.userId === me;
-						const Icon = a.everyone ? Users : User;
+						const Icon = a.link ? Link2 : a.everyone ? Users : User;
 						return (
 							// One person can have several lines, from several folders: the place in the list is the key.
 							<li key={i} className="flex items-center gap-2.5 border-b border-border py-2 last:border-0">

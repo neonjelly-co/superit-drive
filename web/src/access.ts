@@ -26,9 +26,10 @@ function shortName(m: Member | undefined): string {
 
 /**
  * The list's one plain sentence: who can see an item. "Only you", "You and Dóra", "You, Dóra and Bence", "You and 4
- * others", or "Everyone in the project".
+ * others", "Everyone in the project", or, when a public link reaches it, "Anyone with the link".
  */
 export function whoCanSee(seenBy: SeenBy, me: string | undefined, members: Member[] | undefined): string {
+	if (seenBy.link) return "Anyone with the link";
 	if (seenBy.everyone) return "Everyone in the project";
 	const byId = new Map(members?.map((m) => [m.userId, m]));
 	const others = seenBy.members.filter((id) => id !== me).map((id) => shortName(byId.get(id)));
@@ -41,6 +42,14 @@ export function whoCanSee(seenBy: SeenBy, me: string | undefined, members: Membe
 	if (others.length === 1) return `You and ${others[0]}`;
 	if (others.length === 2) return `You, ${others[0]} and ${others[1]}`;
 	return `You and ${others.length} others`;
+}
+
+/** Who a line of "who can see this" is about, as the person reading it says it. */
+export function whoOf(a: Access, me: string | undefined): string {
+	if (a.link) return "Anyone with the link";
+	if (a.everyone) return "Everyone in the project";
+	if (a.former) return "Someone no longer in the project";
+	return a.userId === me ? "You" : nameOf(a);
 }
 
 /** Why someone in "who can see this" has their access, in a few words after their role. */

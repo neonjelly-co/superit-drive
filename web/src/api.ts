@@ -25,6 +25,8 @@ export type Action =
 	| "restore"
 	| "see-access"
 	| "share"
+	| "make-link"
+	| "manage-link"
 	| "manage-access"
 	| "delete-shared-folder"
 	| "restore-shared-folder";
@@ -61,13 +63,17 @@ export type DeletedPlace = {
 /** A member of the project, from the member list. */
 export type Member = { userId: string; email: string; displayName: string; role: "admin" | "member" };
 
-/** Who can see an item, for the list's sentence: everyone in the project, or these members (by user id). */
-export type SeenBy = { everyone: boolean; members: string[] };
+/**
+ * Who can see an item, for the list's sentence: everyone in the project, or these members (by user id); and `link`
+ * when anyone with a public link (on it, or on a folder above it) can.
+ */
+export type SeenBy = { everyone: boolean; members: string[]; link?: boolean };
 
 /** One line of "who can see this", for an item or a shared folder as a whole. */
 export type Access = {
-	/** Everyone in the project; otherwise one member. */
+	/** Everyone in the project; `link`, anyone with the public link (as viewer); otherwise one member. */
 	everyone?: boolean;
+	link?: boolean;
 	userId?: string;
 	email?: string;
 	displayName?: string;
@@ -168,6 +174,23 @@ export type Found = Item & {
  * becomesProjects: it would leave the person's My files for a shared folder, and become the project's.
  */
 export type MovePreview = { becomesProjects: boolean; access: Access[]; seenBy: SeenBy };
+
+/**
+ * The public link on a file or folder, as whoever may share it sees it. `address` is only in the answer that made it:
+ * the Drive keeps a fingerprint of it, not the address, and cannot show it again. `works` is false while it lets nobody
+ * in (whoever made it can no longer share the item, or sharing outside the project is off there).
+ */
+export type PublicLink = {
+	kind: "view";
+	made: string;
+	madeBy?: Person;
+	/** Whoever made it has left the project. */
+	former?: boolean;
+	uses: number;
+	used?: string;
+	works: boolean;
+	address?: string;
+};
 
 /** About how much space the Drive's files take, and the storage's size when it is known. Bytes. */
 export type Usage = { used: number; capacity?: number };
@@ -344,6 +367,17 @@ export const api = {
 	/** Takes away what was given right there; access from a folder above stays. */
 	takeAccess: (placeId: number, itemId: number | null, from: Grantee) =>
 		call<{ access: Access[] }>("DELETE", granteePath(placeId, itemId, from)).then((r) => r.access),
+	/** The public link on an item, or null. */
+	link: (placeId: number, itemId: number) =>
+		call<{ link: PublicLink | null }>("GET", `/api/places/${placeId}/items/${itemId}/link`).then((r) => r.link),
+	/**
+	 * Makes a public link on an item; with replace, in place of the one it has, whose address then stops working. The
+	 * answer holds the address, once.
+	 */
+	makeLink: (placeId: number, itemId: number, replace: boolean) =>
+		call<{ link: PublicLink }>("POST", `/api/places/${placeId}/items/${itemId}/link`, { replace }).then((r) => r.link),
+	/** Removes the public link on an item: its address stops working for good. */
+	removeLink: (placeId: number, itemId: number) => call<null>("DELETE", `/api/places/${placeId}/items/${itemId}/link`),
 	usage: () => call<Usage>("GET", "/api/usage"),
 	/** What is in a folder of a place (null: its top folder). */
 	list: (placeId: number, folderId: number | null) => call<Listing>("GET", `${inFolder(placeId, folderId)}/items`),
