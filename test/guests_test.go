@@ -900,6 +900,17 @@ func TestAGuestCannotGetOutOfWhatWasGivenToThem(t *testing.T) {
 			sameAs(t, fmt.Sprintf("Anna: %s with %s", route, what), send(a, uploadTries(id)[route]), missing)
 		}
 	}
+	// A zip of what she was given, naming items outside it: the same answer as an item that is not there.
+	zipNaming := func(id int64) harness.Response {
+		return a.Get(t, guestItemPath(x.place, x.bakery.ID, fmt.Sprintf("/zip?item=%d", id)))
+	}
+	for what, id := range map[string]int64{"Price list.pdf": x.prices.ID, "Secret.txt": x.secret.ID, "Old.pdf, in the trash": old.ID,
+		"Slip.pdf": slip.ID, "Offer.pdf, below": x.offer.ID} {
+		sameAs(t, "a zip of Bakery naming "+what, zipNaming(id), zipNaming(nowhere))
+	}
+	if got := zipEntries(t, zipNaming(x.y2026.ID).Body); len(got) != 4 || got["2026/Offer.pdf"] != "offer" {
+		t.Fatalf("a zip of Bakery naming 2026 holds %q", keys(got))
+	}
 	// What she was given itself stays where its giver put it: renaming it (to a name taken in Clients, or free) and
 	// deleting it answer as for an item that is not there.
 	for _, name := range []string{"Price list.pdf", "Bakery 2026"} {
