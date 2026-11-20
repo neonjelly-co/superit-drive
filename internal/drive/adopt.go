@@ -131,12 +131,12 @@ func Adopt(ctx context.Context, dataDir string, s *storage.Client, log *slog.Log
 	if err := syncFolder(dataDir); err != nil {
 		return err
 	}
-	from := "the data folder's copy (" + filepath.Join(index.BackupFolder, index.FileName) + ")"
+	from := "the data folder's copy (" + filepath.Join(index.BackupFolder, index.FileName) + "); guests stay signed in"
 	if chosen.storage != "" {
-		from = "the copy on the storage (" + chosen.storage + ")"
+		from = "the copy on the storage (" + chosen.storage + "); guests sign in again with a new code"
 	}
-	log.Warn("the data folder held no index: the Drive made it from "+from+", as it was when the copy was made; "+
-		"a walk through the storage now takes in what changed there since. Guests sign in again with a new code",
+	log.Warn("the data folder held no index: the Drive made it from "+from+". The index is as it was when the copy was "+
+		"made; a walk through the storage now takes in what changed there since",
 		"number", chosen.info.Seq, "copied", chosen.changed.Format(time.RFC3339), "storageId", chosen.info.StorageID,
 		"version", chosen.info.Version, "places", chosen.sum.Places, "sharedFolders", chosen.sum.SharedFolders,
 		"items", chosen.sum.Items, "shares", chosen.sum.Grants, "managers", chosen.sum.Managers, "links", chosen.sum.Links,

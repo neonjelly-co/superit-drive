@@ -366,8 +366,9 @@ The index alone holds who has access to what, and it lives on one server. So the
   guests in now or belongs to one server (below), for a Drive on a new server to start from (see [Starting from a
   copy](#starting-from-a-copy)).
 
-**When.** Both together: when the Drive starts; soon after access changes; and every night at 03:00 UTC, whatever
-changed. An access change is anything that changes who may reach what: a share given, changed or taken away; a public
+**When.** Both together: when the Drive starts; soon after access changes; every night at 03:00 UTC, whatever
+changed; and as the Drive stops (after the last request is answered), when access changed since the last copy, so that
+a snapshot of the data folder taken once it has stopped, as before an upgrade, holds every change. An access change is anything that changes who may reach what: a share given, changed or taken away; a public
 link made, replaced or removed; a guest invited, their invitation changed, or gone with it; a shared folder made,
 deleted, restored or removed for good, and its managers; a switch of sharing outside the project; a held My files
 handed over or deleted; and an item renamed, moved, deleted or restored (what was given on it, and on what is in it,
@@ -382,7 +383,8 @@ finds the files on the storage, with the access of their folder, and the counts 
 made more than 30 seconds before a pause in them), and everything else as it was at the last copy: the last access
 change's, or last night's at the latest. The log says each copy, with why it was made, its number and its size. When the
 storage does not take a copy (it does not answer, or does not hold the Drive's mark), the data folder's copy is
-written all the same, and the copy is put on the storage five minutes later, or once the mark is back.
+written all the same, and the storage is asked again every five minutes: once it answers and holds the mark, a new copy
+goes there.
 
 **On the storage, safely.** A copy is written under a name of its own (`upload-<random>.part`, one `PUT`), then moved
 to its name (`MOVE`, never replacing anything), and only then is the copy before it removed: a whole copy is there
@@ -441,16 +443,17 @@ brought; guests sign in again with a new code.
 - **A copy made by a newer Drive** (its schema is newer than this one's): the Drive does not start, and says so. An
   index built without it would soon put a copy without the shares in its place. Start a version as new as the one that
   made it.
-- **A damaged copy**, **one of another storage's index**, or **one larger than 4 GiB**: not adopted. It is moved aside on
-  the storage, to `refused-<when>-<its name>` (or beside the data folder's copy, as `index.sqlite.refused-<when>`), and
-  kept; the Drive builds its index from the files, and the log says so loudly (`level=ERROR`, in capitals).
+- **A damaged copy**, or **one of another storage's index**: not adopted. It is moved aside on the storage, to
+  `refused-<when>-<its name>` (or beside the data folder's copy, as `index.sqlite.refused-<when>`), and kept; the Drive
+  builds its index from the files, and the log says so loudly (`level=ERROR`, in capitals). One larger than 4 GiB (no
+  index comes near it) is not downloaded, and is left where it is.
 - **No copy**: the Drive builds its index from the files on the storage: each member's My files is the folder of their
   address when they first open the Drive, with what is in it; there are no shares, links or guests, and folders in
   `Shared folders/` belong to no shared folder (the walk logs them).
 - **Copies, but no mark on the storage**: none is adopted (whose they are cannot be told), the log says so loudly, and
   the copies stay. If the storage is this Drive's, stop it, write the id of the copies to adopt (the name of their
   folder) into `.superit-drive/storage-id`, and start it again with an empty data folder.
-- **The storage cannot be read** (after three tries in about ten seconds): the Drive does not start, and says why. An
+- **The storage cannot be read** (three tries, a few seconds apart): the Drive does not start, and says why. An
   index made without knowing whether there is a copy would replace it. A container started again by its supervisor
   (Docker's `--restart`) tries again.
 

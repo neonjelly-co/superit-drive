@@ -177,14 +177,19 @@ func ClearCopy(ctx context.Context, file string, c Clearing) error {
 		return err
 	}
 	defer tx.Rollback()
-	var statements []string
 	if c.Outsiders {
-		statements = append(statements, "DELETE FROM guest_sessions", "DELETE FROM guest_codes", "DELETE FROM guest_limits",
-			"DELETE FROM uploads")
-	}
-	for _, s := range statements {
-		if _, err := tx.ExecContext(ctx, s); err != nil {
-			return fmt.Errorf("clearing the copy of the index: %w", err)
+		for _, table := range []string{"guest_sessions", "guest_codes", "guest_limits", "uploads"} {
+			// A copy of an older schema may not have the table yet.
+			var there bool
+			if err := tx.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?)", table).Scan(&there); err != nil {
+				return err
+			}
+			if !there {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+				return fmt.Errorf("clearing the copy of the index: %w", err)
+			}
 		}
 	}
 	for _, key := range c.State {

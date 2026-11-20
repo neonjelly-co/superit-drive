@@ -63,7 +63,8 @@ func copiesMade(d *harness.Drive) []string {
 }
 
 // copiesSettled waits until the Drive has put at least one copy on the storage after the first `after` (copiesMade), and
-// then none for two seconds: the last copy holds every change made before the wait began.
+// then none for four seconds (longer than any test waits for quiet): the last copy holds every change made before the
+// wait began.
 func copiesSettled(t *testing.T, d *harness.Drive, after int) {
 	t.Helper()
 	last, since := -1, time.Now()
@@ -72,7 +73,7 @@ func copiesSettled(t *testing.T, d *harness.Drive, after int) {
 		if n != last {
 			last, since = n, time.Now()
 		}
-		return n > after && time.Since(since) > 2*time.Second
+		return n > after && time.Since(since) > 4*time.Second
 	})
 }
 
@@ -562,7 +563,7 @@ func copyFileName(seq int64) string { return fmt.Sprintf("copy-%012d.sqlite", se
 // stop still get a copy within the bound, while they go on.
 func TestABurstOfAccessChangesMakesOneCopy(t *testing.T) {
 	t.Parallel()
-	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora}, Env: copiesSoon("2s", "5s")})
+	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora}, Env: copiesSoon("3s", "8s")})
 	b := d.As(bence)
 	x := bencesFiles(t, d)
 	copiesSettled(t, d, 0)
@@ -581,14 +582,14 @@ func TestABurstOfAccessChangesMakesOneCopy(t *testing.T) {
 		t.Fatalf("a burst of six changes made the copies %q, want one", got)
 	}
 
-	// A change every half second for nine seconds: never two quiet seconds, yet a copy within five of the first.
+	// A change every half second for twelve seconds: never three quiet seconds, yet a copy within eight of the first.
 	n = len(copiesMade(d))
-	for i, start := 0, time.Now(); time.Since(start) < 9*time.Second; i++ {
+	for i, start := 0, time.Now(); time.Since(start) < 12*time.Second; i++ {
 		ok(t, "giving Dóra Ledger.xlsx again", share(t, b, x.place, x.ledger.ID, dora, []string{"viewer", "editor"}[i%2]))
 		time.Sleep(500 * time.Millisecond)
 	}
 	if got := copiesMade(d)[n:]; len(got) == 0 {
-		t.Fatal("no copy was made while access kept changing for nine seconds")
+		t.Fatal("no copy was made while access kept changing for twelve seconds")
 	}
 }
 
