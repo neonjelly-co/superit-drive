@@ -200,10 +200,10 @@ func (k *keeper) write(ctx context.Context, reason string) {
 		return
 	}
 	k.copied = info.Changes
-	if k.seen == info.Changes {
-		k.waiting = time.Time{}
+	if n, err := d.index.AccessChanges(ctx); err == nil && n != info.Changes {
+		k.seen, k.changed, k.waiting = n, d.now(), d.now() // changes that came while it was being made wait for the next
 	} else {
-		k.waiting = d.now() // changes that came while it was being made wait for the next
+		k.seen, k.waiting = info.Changes, time.Time{}
 	}
 	stored, err := k.toStorage(ctx, info)
 	took := time.Since(began).Round(time.Millisecond).String()

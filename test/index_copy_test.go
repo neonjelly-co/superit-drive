@@ -582,6 +582,23 @@ func TestABurstOfAccessChangesMakesOneCopy(t *testing.T) {
 		t.Fatalf("a burst of six changes made the copies %q, want one", got)
 	}
 
+	// Started again, and left alone longer than a change waits at most: a burst still makes one copy, after it.
+	d.Restart(t, nil)
+	b = d.As(bence)
+	harness.Eventually(t, "the copy as the Drive started", func() bool {
+		return slices.Contains(copiesMade(d), "the Drive started")
+	})
+	time.Sleep(9 * time.Second)
+	n = len(copiesMade(d))
+	for i := range 6 { // over more than one look at the count
+		ok(t, "giving Dóra Ledger.xlsx", share(t, b, x.place, x.ledger.ID, dora, []string{"viewer", "editor"}[i%2]))
+		time.Sleep(400 * time.Millisecond)
+	}
+	copiesSettled(t, d, n)
+	if got := copiesMade(d)[n:]; !slices.Equal(got, []string{"access changed"}) {
+		t.Fatalf("a burst of six changes, long after the Drive started, made the copies %q, want one", got)
+	}
+
 	// A change every half second for twelve seconds: never three quiet seconds, yet a copy within eight of the first.
 	n = len(copiesMade(d))
 	for i, start := 0, time.Now(); time.Since(start) < 12*time.Second; i++ {
