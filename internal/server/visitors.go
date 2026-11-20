@@ -363,7 +363,6 @@ var visitorTemplate = template.Must(template.New("visitor").Funcs(template.FuncM
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
-<link rel="icon" href="data:,">
 <title>{{.Title}}</title>
 <style>{{.Style}}</style>
 </head>
