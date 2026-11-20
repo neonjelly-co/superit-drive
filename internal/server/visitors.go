@@ -153,12 +153,26 @@ func accessLink(l index.Link, list *members.List) access.Link {
 	return access.Link{Item: l.Item, Kind: access.LinkKind(l.Kind), By: by}
 }
 
-// usedLink counts a use of the link a visitor came with: in memory, so it never waits, takes no lock and never fails
-// (drive.UsedLink). A use is a page through the link, or a file's bytes (a download, a file opened, a zip) from their
-// start: not a HEAD, nor a part of a file after its start (a video seeking, a download resuming).
-func (s *Server) usedLink(r *http.Request, c call) {
-	if c.link != nil && r.Method == http.MethodGet {
+// used counts a use of the link a visitor came with, or of the invitations a guest came in through: in memory, so it
+// never waits, takes no lock and never fails (drive.UsedLink, drive.UsedInvitation). A use is a page through the
+// link, a folder or file a guest opened, or a file's bytes (a download, a file opened, a zip) from their start: not a
+// HEAD, nor a part of a file after its start (a video seeking, a download resuming); and a guest's change (an upload, a
+// new folder, a rename, a move, a delete). Each of the guest's invitations on the way down to what they used counts,
+// while it lets them in.
+func (s *Server) used(r *http.Request, c call) {
+	if r.Method == http.MethodHead {
+		return
+	}
+	if c.link != nil {
 		s.drive.UsedLink(*c.link)
+	}
+	if c.guest != nil && c.access != nil {
+		list := s.members.Current()
+		for _, g := range c.grants {
+			if g.Guest == c.guest.ID && invitationWorks(c.access, accessGrant(g, list)) {
+				s.drive.UsedInvitation(g)
+			}
+		}
 	}
 }
 
@@ -224,7 +238,7 @@ func (s *Server) visitorPage(w http.ResponseWriter, r *http.Request, c call) {
 		}
 	}
 	s.renderVisitor(w, http.StatusOK, v)
-	s.usedLink(r, c)
+	s.used(r, c)
 }
 
 // sharer says who shared what a link is on, as a visitor reads it: the display name of the member who made it, and

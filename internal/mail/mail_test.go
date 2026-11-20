@@ -232,3 +232,62 @@ func TestWithoutAMailServerNothingIsSent(t *testing.T) {
 		t.Fatal("a nil Mailer is on")
 	}
 }
+
+// Whether mail works: off without a mail server; otherwise checked (connect, encrypt, sign in, and nothing sent), and
+// learnt from every message sent. A mail server that refuses the login, or is not there, does not work, and says why.
+func TestWhetherMailWorks(t *testing.T) {
+	off := New(settings.Mail{}, "files.example.com", slog.New(slog.DiscardHandler))
+	if ok, why := off.Works(context.Background()); ok || why != whyOff {
+		t.Fatalf("without a mail server: %v %q", ok, why)
+	}
+	if ok, why := off.Known(); ok || why != whyOff {
+		t.Fatalf("without a mail server, known: %v %q", ok, why)
+	}
+
+	server, client := tlsPair(t)
+	smtp := mailtest.Start(t, mailtest.Options{TLS: server, User: "drive", Password: "pw"})
+	good := settings.Mail{Host: smtp.Host, Port: smtp.Port, TLS: settings.StartTLS, User: "drive", Password: "pw", From: from}
+	m, _ := running(t, good, client, 5*time.Second)
+	if ok, _ := m.Known(); !ok {
+		t.Fatal("before anything is known, mail is taken to work")
+	}
+	if ok, why := m.Works(context.Background()); !ok || why != "" {
+		t.Fatalf("a mail server that works: %v %q", ok, why)
+	}
+	if got := smtp.Messages(); len(got) != 0 {
+		t.Fatalf("a check sent %d messages", len(got))
+	}
+
+	wrong := good
+	wrong.Password = "wrong"
+	w, l := running(t, wrong, client, 5*time.Second)
+	if ok, why := w.Works(context.Background()); ok || why != whyLogin {
+		t.Fatalf("a mail server that refuses the login: %v %q", ok, why)
+	}
+	if ok, why := w.Known(); ok || why != whyLogin {
+		t.Fatalf("known after the check: %v %q", ok, why)
+	}
+	if strings.Contains(l.String(), "wrong") {
+		t.Fatalf("the log holds the password: %s", l)
+	}
+
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	gone := good
+	gone.Port = port
+	g, _ := running(t, gone, client, 5*time.Second)
+	if ok, why := g.Works(context.Background()); ok || why != whyUnreachable {
+		t.Fatalf("a mail server that is not there: %v %q", ok, why)
+	}
+
+	// A message that could not be sent says so too; one sent says it works again.
+	m.Send(Message{To: "dora@example.com", Subject: "x", Body: "x"})
+	smtp.WaitFor(t, 1)
+	if ok, _ := m.Known(); !ok {
+		t.Fatal("after a message was sent")
+	}
+	if err := w.Deliver(context.Background(), message); err == nil {
+		t.Fatal("a message through a server that refuses the login was sent")
+	}
+}

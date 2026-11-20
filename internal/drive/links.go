@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"sync"
 	"time"
 
@@ -107,12 +108,13 @@ func (d *Drive) FirstChildren(ctx context.Context, p index.Place, folder *index.
 	return d.index.FirstChildren(ctx, p.ID, folderID(folder), limit)
 }
 
-// uses counts the uses of links in memory, between writes to the index: counting one never writes, never waits for
-// the index or a place's lock, and never fails. WriteUses writes them, every so often and when the Drive stops; a
-// Drive that is killed loses those counted since.
+// uses counts the uses of links, and of guests' invitations, in memory, between writes to the index: counting one never
+// writes, never waits for the index or a place's lock, and never fails. WriteUses writes them, every so often and when
+// the Drive stops; a Drive that is killed loses those counted since.
 type uses struct {
-	mu      sync.Mutex
-	pending map[int64]index.Use
+	mu          sync.Mutex
+	pending     map[int64]index.Use // links, by id
+	invitations map[int64]index.Use // invitations, by grant id
 }
 
 // UsedLink counts one use of the link, now.
@@ -122,10 +124,26 @@ func (d *Drive) UsedLink(l index.Link) {
 	if d.uses.pending == nil {
 		d.uses.pending = map[int64]index.Use{}
 	}
-	u := d.uses.pending[l.ID]
+	d.uses.pending[l.ID] = d.used(d.uses.pending[l.ID])
+}
+
+// UsedInvitation counts one use of the invitation (a grant to a guest), now.
+func (d *Drive) UsedInvitation(g index.Grant) {
+	if g.ID == 0 || g.Guest == 0 {
+		return
+	}
+	d.uses.mu.Lock()
+	defer d.uses.mu.Unlock()
+	if d.uses.invitations == nil {
+		d.uses.invitations = map[int64]index.Use{}
+	}
+	d.uses.invitations[g.ID] = d.used(d.uses.invitations[g.ID])
+}
+
+func (d *Drive) used(u index.Use) index.Use {
 	u.Count++
 	u.Last = d.now().UTC().Truncate(time.Millisecond) // as the index keeps it
-	d.uses.pending[l.ID] = u
+	return u
 }
 
 // withUses is the link with the uses counted and not yet written added.
@@ -142,34 +160,58 @@ func (d *Drive) withUses(l index.Link) index.Link {
 	return l
 }
 
-// WriteUses writes the uses of links counted since the last time into the index. What cannot be written is kept for
-// the next time.
+// withInvitationUses is the grants with the uses of invitations counted and not yet written added.
+func (d *Drive) withInvitationUses(grants []index.Grant) []index.Grant {
+	d.uses.mu.Lock()
+	defer d.uses.mu.Unlock()
+	for i, g := range grants {
+		if u, ok := d.uses.invitations[g.ID]; ok && g.Guest != 0 {
+			grants[i].Uses += u.Count
+			if u.Last.After(g.Used) {
+				grants[i].Used = u.Last
+			}
+		}
+	}
+	return grants
+}
+
+// WriteUses writes the uses of links and invitations counted since the last time into the index. What cannot be
+// written is kept for the next time.
 func (d *Drive) WriteUses(ctx context.Context) error {
 	d.uses.mu.Lock()
-	pending := d.uses.pending
-	d.uses.pending = nil
+	links, invitations := d.uses.pending, d.uses.invitations
+	d.uses.pending, d.uses.invitations = nil, nil
 	d.uses.mu.Unlock()
-	if len(pending) == 0 {
-		return nil
-	}
-	err := d.index.AddUses(ctx, pending)
+	err := d.index.AddUses(ctx, links)
 	if err != nil {
-		d.uses.mu.Lock()
-		for id, u := range d.uses.pending {
-			p := pending[id]
-			p.Count += u.Count
-			if u.Last.After(p.Last) {
-				p.Last = u.Last
-			}
-			pending[id] = p
-		}
-		d.uses.pending = pending
-		d.uses.mu.Unlock()
+		d.keepUses(&d.uses.pending, links)
+	}
+	if ierr := d.index.AddInvitationUses(ctx, invitations); ierr != nil {
+		d.keepUses(&d.uses.invitations, invitations)
+		err = errors.Join(err, ierr)
 	}
 	return err
 }
 
-// KeepUses writes the uses of links every interval until ctx ends, and once more then.
+// keepUses puts uses that could not be written back into pending, with those counted meanwhile.
+func (d *Drive) keepUses(pending *map[int64]index.Use, uses map[int64]index.Use) {
+	d.uses.mu.Lock()
+	defer d.uses.mu.Unlock()
+	if uses == nil {
+		uses = map[int64]index.Use{}
+	}
+	for id, u := range *pending {
+		p := uses[id]
+		p.Count += u.Count
+		if u.Last.After(p.Last) {
+			p.Last = u.Last
+		}
+		uses[id] = p
+	}
+	*pending = uses
+}
+
+// KeepUses writes the uses of links and invitations every interval until ctx ends, and once more then.
 func (d *Drive) KeepUses(ctx context.Context, every time.Duration) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
@@ -178,13 +220,13 @@ func (d *Drive) KeepUses(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			if err := d.WriteUses(wctx); err != nil {
-				d.log.Error("the uses of public links could not be written as the Drive stopped; they are lost", "error", err)
+				d.log.Error("the uses of public links and invitations could not be written as the Drive stopped; they are lost", "error", err)
 			}
 			cancel()
 			return
 		case <-tick.C:
 			if err := d.WriteUses(ctx); err != nil {
-				d.log.Warn("the uses of public links could not be written; they are tried again later", "error", err)
+				d.log.Warn("the uses of public links and invitations could not be written; they are tried again later", "error", err)
 			}
 		}
 	}

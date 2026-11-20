@@ -22,7 +22,8 @@ import (
 // must also be tried by an outsider in test/shared_folders_test.go, and a route that takes an item (or an upload in
 // progress, which is about the folder it goes into) by someone with access to part of the place in
 // test/sharing_test.go; a route under the public prefix by a visitor trying to get out of their link in
-// test/links_test.go (a test here fails until it is).
+// test/links_test.go; a guest's route by a guest trying to get out of what was given to them in test/guests_test.go
+// (a test in server_test.go fails until it is).
 //
 // A folder of a place is addressed as an item; the place's top folder by the place alone. So most things that happen
 // in a folder have two routes, one for the top folder and one for any other.
@@ -63,6 +64,12 @@ func (s *Server) routes() []route {
 		{pattern: "DELETE /api/places/{place}/items/{item}/access/members/{member}", action: access.Share, place: "place", item: "item", serve: s.takeAccess(toMember)},
 		{pattern: "PUT /api/places/{place}/items/{item}/access/everyone", action: access.Share, place: "place", item: "item", serve: s.giveAccess(toEveryone)},
 		{pattern: "DELETE /api/places/{place}/items/{item}/access/everyone", action: access.Share, place: "place", item: "item", serve: s.takeAccess(toEveryone)},
+		// Guests (invitations.go): typing an address in "Give access" invites a guest, or shares with the member whose
+		// address it is; an invitation's role and end date are changed while sharing outside the project is on, and it is
+		// taken away by whoever may share. {guest} is a guest's id.
+		{pattern: "POST /api/places/{place}/items/{item}/access/guests", action: access.Share, place: "place", item: "item", serve: s.invite},
+		{pattern: "PUT /api/places/{place}/items/{item}/access/guests/{guest}", action: access.InviteGuest, place: "place", item: "item", serve: s.changeInvitation},
+		{pattern: "DELETE /api/places/{place}/items/{item}/access/guests/{guest}", action: access.Share, place: "place", item: "item", serve: s.takeInvitation},
 		// The public link on a file or folder (links.go): whoever may share it makes one, sees it and removes it.
 		{pattern: "GET /api/places/{place}/items/{item}/link", action: access.ManageLink, place: "place", item: "item", serve: s.linkOf},
 		{pattern: "POST /api/places/{place}/items/{item}/link", action: access.MakeLink, place: "place", item: "item", serve: s.makeLink},
@@ -108,6 +115,35 @@ func (s *Server) routes() []route {
 		{pattern: "GET /s/{token}/items/{item}/download", action: access.DownloadThroughLink, link: "token", item: "item", serve: s.download},
 		{pattern: "GET /s/{token}/items/{item}/open", action: access.DownloadThroughLink, link: "token", item: "item", serve: s.open},
 		{pattern: "GET /s/{token}/items/{item}/zip", action: access.DownloadThroughLink, link: "token", item: "item", serve: s.zip},
+
+		// The guests' part of the public prefix (guests.go): signing in with a code mailed to them, their pages, and what
+		// they do with what was given to them. Always a guest here (by the session their cookie names) or nobody; never
+		// a member, whatever the request says. A change needs the Drive's own Origin, as a member's does. A guest is never
+		// given a place's top folder, so every route in a place names an item, or an upload in progress.
+		{pattern: "GET " + GuestPrefix, action: access.SignInAsGuest, guest: true, serve: s.toGuestPage},
+		{pattern: "GET " + GuestPrefix + "/{$}", action: access.SignInAsGuest, guest: true, serve: s.guestPage},
+		{pattern: "GET " + GuestPrefix + "/assets/{file...}", action: access.SignInAsGuest, guest: true, serve: s.guestAsset},
+		{pattern: "GET " + GuestPrefix + "/favicon.svg", action: access.SignInAsGuest, guest: true, serve: s.guestAsset},
+		{pattern: "POST " + GuestPrefix + "/api/code", action: access.SignInAsGuest, guest: true, serve: s.askForCode},
+		{pattern: "POST " + GuestPrefix + "/api/sign-in", action: access.SignInAsGuest, guest: true, serve: s.signIn},
+		{pattern: "POST " + GuestPrefix + "/api/sign-out", action: access.EnterAsGuest, guest: true, serve: s.signOut},
+		{pattern: "GET " + GuestPrefix + "/api/me", action: access.EnterAsGuest, guest: true, serve: s.guestMe},
+		{pattern: "GET " + GuestPrefix + "/api/shared-with-me", action: access.EnterAsGuest, guest: true, serve: s.guestSharedWithMe},
+		{pattern: "GET " + GuestPrefix + "/api/places/{place}/items/{item}", action: access.ListAsGuest, guest: true, place: "place", item: "item", serve: s.guestItem},
+		{pattern: "GET " + GuestPrefix + "/api/places/{place}/items/{item}/items", action: access.ListAsGuest, guest: true, place: "place", item: "item", serve: s.guestItems},
+		{pattern: "GET " + GuestPrefix + "/api/places/{place}/items/{item}/download", action: access.DownloadAsGuest, guest: true, place: "place", item: "item", serve: s.download},
+		{pattern: "GET " + GuestPrefix + "/api/places/{place}/items/{item}/open", action: access.DownloadAsGuest, guest: true, place: "place", item: "item", serve: s.open},
+		{pattern: "GET " + GuestPrefix + "/api/places/{place}/items/{item}/zip", action: access.DownloadAsGuest, guest: true, place: "place", item: "item", serve: s.zip},
+		{pattern: "POST " + GuestPrefix + "/api/places/{place}/items/{item}/files", action: access.UploadAsGuest, guest: true, place: "place", item: "item", serve: s.upload},
+		{pattern: "POST " + GuestPrefix + "/api/places/{place}/items/{item}/uploads", action: access.UploadAsGuest, guest: true, place: "place", item: "item", serve: s.startUpload},
+		{pattern: "GET " + GuestPrefix + "/api/places/{place}/uploads/{upload}", action: access.UploadAsGuest, guest: true, place: "place", upload: "upload", serve: s.uploadState},
+		{pattern: "PUT " + GuestPrefix + "/api/places/{place}/uploads/{upload}", action: access.UploadAsGuest, guest: true, place: "place", upload: "upload", serve: s.uploadPart},
+		{pattern: "POST " + GuestPrefix + "/api/places/{place}/uploads/{upload}/finish", action: access.UploadAsGuest, guest: true, place: "place", upload: "upload", serve: s.finishUpload},
+		{pattern: "DELETE " + GuestPrefix + "/api/places/{place}/uploads/{upload}", action: access.UploadAsGuest, guest: true, place: "place", upload: "upload", serve: s.cancelUpload},
+		{pattern: "POST " + GuestPrefix + "/api/places/{place}/items/{item}/folders", action: access.MakeFolderAsGuest, guest: true, place: "place", item: "item", serve: s.newFolder},
+		{pattern: "POST " + GuestPrefix + "/api/places/{place}/items/{item}/rename", action: access.RenameAsGuest, guest: true, place: "place", item: "item", serve: s.rename},
+		{pattern: "POST " + GuestPrefix + "/api/places/{place}/items/{item}/move", action: access.MoveAsGuest, guest: true, place: "place", item: "item", serve: s.guestMove},
+		{pattern: "DELETE " + GuestPrefix + "/api/places/{place}/items/{item}", action: access.DeleteAsGuest, guest: true, place: "place", item: "item", serve: s.guestDelete},
 	}
 }
 
@@ -122,15 +158,21 @@ type rollbackJSON struct {
 	Until time.Time `json:"until"`
 }
 
-// me says who is signed in and which project this Drive belongs to and, for seven days after the storage was put back
-// to a snapshot, that it was (rollback): who did it, and to when. Only members are told; visitors never ask here.
+// me says who is signed in and which project this Drive belongs to, whether guests can be invited on this Drive
+// (guests: not without mail that works, and why), and, for seven days after the storage was put back to a snapshot,
+// that it was (rollback): who did it, and to when. Only members are told; visitors and guests never ask here.
 func (s *Server) me(w http.ResponseWriter, r *http.Request, c call) {
+	invite, why := s.mail.Known()
+	if !invite {
+		why = cannotInvite(why)
+	}
 	out := map[string]any{
 		"userId":      c.member.UserID,
 		"email":       c.member.Email,
 		"displayName": c.member.DisplayName,
 		"role":        string(c.member.Role),
 		"project":     s.project,
+		"guests":      map[string]any{"invite": invite, "why": why},
 	}
 	rb, ok, err := s.drive.Notice(r.Context())
 	if err != nil {
@@ -290,13 +332,30 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request, c call, notAFold
 	return c.item, true
 }
 
-// listedJSON is an item in a listing: what the person may do with it, and who can see it.
+// listedJSON is an item in a member's listing: what the person may do with it, who can see it, and which guest added
+// it.
 type listedJSON struct {
 	itemJSON
 	// Can is every action the person may do with it (access.InAPlace), so the interface offers only those.
 	Can []access.Action `json:"can"`
 	// SeenBy is who can see it, for the list's "who can see it".
 	SeenBy seenByJSON `json:"seenBy"`
+	// AddedBy says, for a file or folder a guest added (uploaded or made), which guest: their address as it was then.
+	// Members read it as coming from outside the project. Never sent to a guest.
+	AddedBy *addedByJSON `json:"addedBy,omitempty"`
+}
+
+type addedByJSON struct {
+	Guest string `json:"guest"`
+}
+
+// listedOf is an item in a member's listing.
+func listedOf(it index.Item, can []access.Action, seen seenByJSON) listedJSON {
+	j := listedJSON{itemJSON: itemOf(it), Can: can, SeenBy: seen}
+	if it.AddedByGuest != "" {
+		j.AddedBy = &addedByJSON{Guest: it.AddedByGuest}
+	}
+	return j
 }
 
 type seenByJSON struct {
@@ -307,12 +366,14 @@ type seenByJSON struct {
 	Members []string `json:"members"`
 	// Link is true when anyone with a public link can see it: one on it, or on a folder above it, that works now.
 	Link bool `json:"link"`
+	// Guests is how many guests can see it now, through an invitation on it or on a folder above it.
+	Guests int `json:"guests"`
 }
 
-// seenBy is who can see what is at where: anyone with a link (from where.Links), and everyone, or each member access
-// gives a role there.
+// seenBy is who can see what is at where: anyone with a link (from where.Links), the guests invited there, and
+// everyone, or each member access gives a role there.
 func seenBy(list *members.List, where *access.Place) seenByJSON {
-	out := seenByJSON{Members: []string{}, Link: access.ByLink(where)}
+	out := seenByJSON{Members: []string{}, Link: access.ByLink(where), Guests: len(access.Guests(where))}
 	if access.ToEveryone(where) != access.NoRole {
 		out.Everyone = true
 		return out
@@ -347,30 +408,13 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
 	if !ok {
 		return
 	}
-	var checking bool
-	if r.URL.Query().Has("wait") {
-		checking = s.drive.Rechecked(r.Context(), *c.place, folder, recheckWait)
-		if r.Context().Err() != nil {
-			return
-		}
-		// The look may have found the folder gone: from now on it answers as one that is not there.
-		if folder != nil {
-			if _, err := s.drive.Item(r.Context(), *c.place, folder.ID); errors.Is(err, index.ErrNoItem) {
-				s.refuse(w, r, http.StatusNotFound, notHere)
-				return
-			}
-		}
-	} else {
-		checking = s.drive.Recheck(*c.place, folder)
-	}
-	inside, err := s.drive.GrantsInside(r.Context(), *c.place, folder)
-	if err != nil {
-		s.fail(w, r, err)
+	checking, ok := s.looked(w, r, c, folder)
+	if !ok {
 		return
 	}
-	givenOn := map[int64][]access.Grant{}
-	for _, g := range inside {
-		givenOn[g.Item] = append(givenOn[g.Item], accessGrant(g))
+	givenOn, ok := s.givenInside(w, r, c, folder)
+	if !ok {
+		return
 	}
 	var folders []index.Item
 	if folder != nil {
@@ -394,18 +438,63 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
 	who := personOf(c.member)
 	list := s.members.Current()
 	open, fromTop := openPath(who, c.access, folders)
-	head, err := json.Marshal(map[string]any{
+	s.writeListing(w, r, c, folder, map[string]any{
 		"path": pathOf(open), "fromTop": fromTop, "role": access.RoleAt(who, c.access), "can": can(who, c.access),
 		"checking": checking,
+	}, func(it index.Item) any {
+		where := here.Below(it.ID, givenOn[it.ID]).WithLinks(linkOn[it.ID]...)
+		return listedOf(it, can(who, where), seenBy(list, where))
 	})
+}
+
+// looked has a folder looked at on the storage, as opening it does: in the background, saying so (checking); or, with
+// ?wait, waiting (at most recheckWait) until the look is done. ok is false when the person was already answered: the
+// look found the folder gone.
+func (s *Server) looked(w http.ResponseWriter, r *http.Request, c call, folder *index.Item) (checking, ok bool) {
+	if !r.URL.Query().Has("wait") {
+		return s.drive.Recheck(*c.place, folder), true
+	}
+	checking = s.drive.Rechecked(r.Context(), *c.place, folder, recheckWait)
+	if r.Context().Err() != nil {
+		return false, false
+	}
+	// The look may have found the folder gone: from now on it answers as one that is not there.
+	if folder != nil {
+		if _, err := s.drive.Item(r.Context(), *c.place, folder.ID); errors.Is(err, index.ErrNoItem) {
+			s.refuse(w, r, http.StatusNotFound, notHere)
+			return false, false
+		}
+	}
+	return checking, true
+}
+
+// givenInside is what was given on each item directly in a folder, by item. ok is false when the person was already
+// answered.
+func (s *Server) givenInside(w http.ResponseWriter, r *http.Request, c call, folder *index.Item) (map[int64][]access.Grant, bool) {
+	inside, err := s.drive.GrantsInside(r.Context(), *c.place, folder)
+	if err != nil {
+		s.fail(w, r, err)
+		return nil, false
+	}
+	givenOn := map[int64][]access.Grant{}
+	list := s.members.Current()
+	for _, g := range inside {
+		givenOn[g.Item] = append(givenOn[g.Item], accessGrant(g, list))
+	}
+	return givenOn, true
+}
+
+// writeListing answers with what is in a folder: head's fields, then "items", one made by row for each item.
+//
+// A folder can hold thousands of items (10,000 put on the storage directly, more uploaded through the Drive): they are
+// read from the index a page at a time and sent as they are made, so a list costs the Drive the same little memory
+// whatever its length, however many are asked for at once.
+func (s *Server) writeListing(w http.ResponseWriter, r *http.Request, c call, folder *index.Item, head map[string]any, row func(index.Item) any) {
+	start, err := json.Marshal(head)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-
-	// A folder can hold thousands of items (10,000 put on the storage directly, more uploaded through the Drive): they
-	// are read from the index a page at a time and sent as they are made, so a list costs the Drive the same little
-	// memory whatever its length, however many are asked for at once.
 	first, more, err := s.drive.ChildrenPage(r.Context(), *c.place, folder, nil, listPage)
 	if err != nil {
 		s.fail(w, r, err)
@@ -415,13 +504,12 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	out := bufio.NewWriterSize(w, 32<<10)
-	_, _ = out.Write(head[:len(head)-1])
+	_, _ = out.Write(start[:len(start)-1])
 	_, _ = out.WriteString(`,"items":[`)
 	sent := 0
 	for page := first; ; {
 		for _, it := range page {
-			where := here.Below(it.ID, givenOn[it.ID]).WithLinks(linkOn[it.ID]...)
-			item, err := json.Marshal(listedJSON{itemJSON: itemOf(it), Can: can(who, where), SeenBy: seenBy(list, where)})
+			item, err := json.Marshal(row(it))
 			if err != nil {
 				s.cutShort(r, err)
 			}
@@ -460,15 +548,24 @@ func (s *Server) cutShort(r *http.Request, err error) {
 // openPath is the part of a path of folders (from the top of a place down) that the person can open. where must be
 // about the last of them, or something inside it, and hold what was given on all of them. Access only widens down
 // the tree, so it is the folders from the first one they can open down to the last; fromTop says whether they can open
-// the place's top folder, and so all of them.
+// the place's top folder, and so all of them. (For a guest, what they may open as a guest: never the top folder.)
 func openPath(who access.Person, where *access.Place, folders []index.Item) (open []index.Item, fromTop bool) {
-	fromTop = access.Decide(who, access.List, where.Up(0))
+	list := listOf(who)
+	fromTop = access.Decide(who, list, where.Up(0))
 	for i := range folders {
-		if fromTop || access.Decide(who, access.List, where.Up(i+1)) {
+		if fromTop || access.Decide(who, list, where.Up(i+1)) {
 			return folders[i:], fromTop
 		}
 	}
 	return nil, fromTop
+}
+
+// listOf is the action that is opening something, for the person: a guest's own (access.ListAsGuest), or a member's.
+func listOf(who access.Person) access.Action {
+	if who.Link == nil && who.Guest != nil {
+		return access.ListAsGuest
+	}
+	return access.List
 }
 
 // openFolders is openPath for a path of folders in place p that no decision has gathered the access for yet.
@@ -514,11 +611,12 @@ func (s *Server) newFolder(w http.ResponseWriter, r *http.Request, c call) {
 	if !s.readBody(w, r, &body) {
 		return
 	}
-	it, err := s.drive.NewFolder(r.Context(), *c.place, folder, body.Name)
+	it, err := s.drive.NewFolder(r.Context(), *c.place, folder, body.Name, c.by())
 	if err != nil {
 		s.changeFailed(w, r, err, body.Name)
 		return
 	}
+	s.used(r, c)
 	writeJSON(w, http.StatusCreated, itemOf(it))
 }
 
@@ -537,6 +635,7 @@ func (s *Server) rename(w http.ResponseWriter, r *http.Request, c call) {
 		s.changeFailed(w, r, err, body.Name)
 		return
 	}
+	s.used(r, c)
 	writeJSON(w, http.StatusOK, itemOf(it))
 }
 
@@ -728,7 +827,11 @@ func (s *Server) serveInterface(w http.ResponseWriter, r *http.Request, _ call) 
 // serveAsset serves one of the interface's files. Files under assets/ have their content's hash in their name, so a
 // browser may keep them.
 func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request, c call) {
-	name := strings.TrimPrefix(r.URL.Path, "/")
+	s.serveFile(w, r, c, strings.TrimPrefix(r.URL.Path, "/"))
+}
+
+// serveFile serves the interface's file called name (assets/… or favicon.svg).
+func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, c call, name string) {
 	if info, err := fs.Stat(s.ui, name); err != nil || info.IsDir() {
 		s.notFound(w, r, c)
 		return

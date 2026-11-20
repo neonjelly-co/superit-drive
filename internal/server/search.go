@@ -136,7 +136,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, c call) {
 			return
 		}
 		e := foundJSON{
-			listedJSON: listedJSON{itemJSON: itemOf(it), Can: can(who, where), SeenBy: seenBy(list, withLinks)},
+			listedJSON: listedOf(it, can(who, where), seenBy(list, withLinks)),
 			Place:      p.ID, PlaceKind: string(p.Kind), Role: access.RoleAt(who, where),
 			Path: pathOf(open), FromTop: fromTop,
 		}

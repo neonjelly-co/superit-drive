@@ -44,7 +44,7 @@ func TestALinkIsFoundOnlyByItsWholeToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	it, err := x.PutItem(ctx, p.ID, 0, index.Seen{Name: "Clients", Folder: true, Changed: clock}, clock)
+	it, err := x.PutItem(ctx, p.ID, 0, index.Seen{Name: "Clients", Folder: true, Changed: clock}, clock, "")
 	if err != nil {
 		t.Fatal(err)
 	}

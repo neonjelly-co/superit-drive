@@ -27,6 +27,30 @@ func TestParse(t *testing.T) {
 	}
 }
 
+// An address belongs to a member however its case is written, and only exactly: dots and "+" tags make other addresses.
+func TestByEmail(t *testing.T) {
+	l, err := Parse([]byte(`{"members":[
+		{"userId":"u1","email":"Reka.Kovacs@Example.com","role":"admin"},
+		{"userId":"u2","email":"bence+drive@example.com","role":"member"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for address, want := range map[string]string{
+		"reka.kovacs@example.com":   "u1",
+		" REKA.KOVACS@EXAMPLE.COM ": "u1",
+		"rekakovacs@example.com":    "",
+		"reka.kovacs+x@example.com": "",
+		"bence+drive@example.com":   "u2",
+		"bence@example.com":         "",
+		"":                          "",
+	} {
+		m, ok := l.ByEmail(address)
+		if ok != (want != "") || m.UserID != want {
+			t.Errorf("%q: got %q %v, want %q", address, m.UserID, ok, want)
+		}
+	}
+}
+
 func TestParseRefusesAListWithAProblem(t *testing.T) {
 	cases := map[string]string{
 		"not json":     `{`,
@@ -35,6 +59,7 @@ func TestParseRefusesAListWithAProblem(t *testing.T) {
 		"no email":     `{"members":[{"userId":"u1","role":"member"}]}`,
 		"unknown role": `{"members":[{"userId":"u1","email":"a@b.c","role":"owner"}]}`,
 		"twice":        `{"members":[{"userId":"u1","email":"a@b.c","role":"member"},{"userId":"u1","email":"d@e.f","role":"member"}]}`,
+		"one address":  `{"members":[{"userId":"u1","email":"a@b.c","role":"member"},{"userId":"u2","email":" A@B.c","role":"member"}]}`,
 	}
 	for name, data := range cases {
 		if _, err := Parse([]byte(data)); err == nil {

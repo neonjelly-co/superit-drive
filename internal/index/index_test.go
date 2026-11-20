@@ -36,7 +36,7 @@ func place(t *testing.T, x *Index, owner string) Place {
 
 func put(t *testing.T, x *Index, p Place, folderID int64, name string, folder bool, size int64) Item {
 	t.Helper()
-	it, err := x.PutItem(context.Background(), p.ID, folderID, Seen{Name: name, Folder: folder, Size: size, Changed: time.Now()}, time.Now())
+	it, err := x.PutItem(context.Background(), p.ID, folderID, Seen{Name: name, Folder: folder, Size: size, Changed: time.Now()}, time.Now(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,18 +683,18 @@ func TestAnUploadIsOnlyItsMembersAndGoesWithItsFolder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := x.UploadOf(ctx, bence.ID, into.ID, "u-bence")
+	got, err := x.UploadOf(ctx, bence.ID, into.ID, "u-bence", 0)
 	if err != nil || got.FolderID != clients.ID || got.Name != "Big.bin" || got.Size != 1<<30 || got.Touched.UnixMilli() != now.UnixMilli() {
 		t.Fatalf("Bence's upload: %+v, %v", got, err)
 	}
-	if got, err := x.UploadOf(ctx, bence.ID, top.ID, "u-bence"); err != nil || got.FolderID != 0 {
+	if got, err := x.UploadOf(ctx, bence.ID, top.ID, "u-bence", 0); err != nil || got.FolderID != 0 {
 		t.Fatalf("the upload into the top folder: %+v, %v", got, err)
 	}
 	for what, find := range map[string]func() error{
-		"by another member":     func() error { _, err := x.UploadOf(ctx, bence.ID, into.ID, "u-reka"); return err },
-		"through another place": func() error { _, err := x.UploadOf(ctx, reka.ID, into.ID, "u-bence"); return err },
+		"by another member":     func() error { _, err := x.UploadOf(ctx, bence.ID, into.ID, "u-reka", 0); return err },
+		"through another place": func() error { _, err := x.UploadOf(ctx, reka.ID, into.ID, "u-bence", 0); return err },
 		"an id that is not there": func() error {
-			_, err := x.UploadOf(ctx, bence.ID, "00000000000000000000000000000000", "u-bence")
+			_, err := x.UploadOf(ctx, bence.ID, "00000000000000000000000000000000", "u-bence", 0)
 			return err
 		},
 	} {
@@ -717,7 +717,7 @@ func TestAnUploadIsOnlyItsMembersAndGoesWithItsFolder(t *testing.T) {
 	if _, err := x.db.ExecContext(ctx, "DELETE FROM items WHERE id = ?", clients.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := x.UploadOf(ctx, bence.ID, into.ID, "u-bence"); !errors.Is(err, ErrNoUpload) {
+	if _, err := x.UploadOf(ctx, bence.ID, into.ID, "u-bence", 0); !errors.Is(err, ErrNoUpload) {
 		t.Fatalf("the upload into a folder removed for good: %v", err)
 	}
 	if err := x.RemoveUpload(ctx, top.ID); err != nil {
@@ -860,7 +860,7 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 	never := func(string) bool { return false }
 	for what, err := range map[string]error{
 		"an upload into Bakery, through Bence's My files": func() error {
-			_, err := x.PutItem(ctx, bence.ID, bakery.ID, Seen{Name: "Late.txt"}, now)
+			_, err := x.PutItem(ctx, bence.ID, bakery.ID, Seen{Name: "Late.txt"}, now, "")
 			return err
 		}(),
 		"a listing of Bakery, through Bence's My files": func() error {

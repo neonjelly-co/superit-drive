@@ -84,8 +84,47 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 		Log:          log,
 	})
 
-	// Removes what has been in the trash for 30 days, and uploads abandoned for a day: now, and every hour while the
-	// Drive runs.
+	// Sends guests the codes they ask for, one at a time, in the background: the page that asks answers at once, the same
+	// way for every address.
+	codesCtx, stopCodes := context.WithCancel(ctx)
+	codesDone := make(chan struct{})
+	go func() {
+		defer close(codesDone)
+		srv.SendCodes(codesCtx)
+	}()
+	defer func() { stopCodes(); <-codesDone }() // before the index closes
+
+	// A guest whose address is in the member list is a member: what was given to them is theirs as a member, by user id.
+	// Now, and whenever the list changes.
+	admit := func(l *members.List) {
+		if _, err := d.AdmitMembers(ctx, l); err != nil && ctx.Err() == nil {
+			log.Error("guests who joined the project could not be made members; it is tried again when the member list changes", "error", err)
+		}
+	}
+	admit(list.Current())
+	admitCtx, stopAdmit := context.WithCancel(ctx)
+	admitDone := make(chan struct{})
+	go func() {
+		defer close(admitDone)
+		seen := list.Current()
+		tick := time.NewTicker(members.PollInterval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-admitCtx.Done():
+				return
+			case <-tick.C:
+				if l := list.Current(); l != seen {
+					seen = l
+					admit(l)
+				}
+			}
+		}
+	}()
+	defer func() { stopAdmit(); <-admitDone }() // before the index closes
+
+	// Removes what has been in the trash for 30 days, uploads abandoned for a day, and guests' ended sessions and old
+	// codes: now, and every hour while the Drive runs.
 	tidyCtx, stopTidy := context.WithCancel(ctx)
 	tidyDone := make(chan struct{})
 	go func() {
@@ -108,8 +147,8 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	}()
 	defer func() { stopWalk(); <-walkDone }() // before the index closes
 
-	// Writes how often each public link was used, counted in memory as visitors use them: every half minute, and once
-	// more when the Drive stops (after the last request, before the index closes).
+	// Writes how often each public link and each guest's invitation was used, counted in memory as visitors and guests
+	// use them: every half minute, and once more when the Drive stops (after the last request, before the index closes).
 	usesCtx, stopUses := context.WithCancel(context.WithoutCancel(ctx))
 	usesDone := make(chan struct{})
 	go func() {
