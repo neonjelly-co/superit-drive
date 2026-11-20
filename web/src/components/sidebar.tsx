@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { FolderOpen, FolderPlus, FolderUp, Plus, Trash2, Upload, Users } from "lucide-react";
+import { FolderOpen, FolderPlus, FolderUp, Plus, ShieldCheck, Trash2, Upload, Users } from "lucide-react";
 import { type MouseEvent, useEffect, useRef } from "react";
 import { api, type Place } from "../api";
 import { type Chosen, chosenFolder } from "../uploads";
@@ -25,6 +25,8 @@ type Props = {
 	onNewFolder?: () => void;
 	/** Called for "New shared folder". */
 	onNewSharedFolder: () => void;
+	/** True for a project admin: "Sharing and space", what they oversee. */
+	oversees?: boolean;
 };
 
 /** Whether this browser lets a person choose a whole folder to upload (an input with webkitdirectory). */
@@ -32,10 +34,10 @@ const foldersChoosable = typeof document !== "undefined" && "webkitdirectory" in
 
 /**
  * The left sidebar of layout D: from the top, Upload (files, or a whole folder where the browser offers it) and New
- * folder, My files, the shared folders by name, New shared folder, Shared with me, Trash, and the storage meter at the
- * bottom.
+ * folder, My files, the shared folders by name, New shared folder, Shared with me, Trash, for a project admin "Sharing
+ * and space", and the storage meter at the bottom.
  */
-export function Sidebar({ project, where, go, sharedFolders, inShared, onUpload, onNewFolder, onNewSharedFolder }: Props) {
+export function Sidebar({ project, where, go, sharedFolders, inShared, onUpload, onNewFolder, onNewSharedFolder, oversees }: Props) {
 	const chooser = useRef<HTMLInputElement>(null);
 	const folderChooser = useRef<HTMLInputElement>(null);
 	// React does not know the attribute; the browser does.
@@ -141,6 +143,16 @@ export function Sidebar({ project, where, go, sharedFolders, inShared, onUpload,
 				>
 					<Trash2 aria-hidden className="size-4 text-muted-foreground" /> Trash
 				</a>
+				{oversees && (
+					<a
+						href={hrefOf({ view: "oversight" })}
+						onClick={link({ view: "oversight" })}
+						aria-current={where.view === "oversight" ? "page" : undefined}
+						className={nav(where.view === "oversight")}
+					>
+						<ShieldCheck aria-hidden className="size-4 text-muted-foreground" /> Sharing and space
+					</a>
+				)}
 			</nav>
 			<StorageMeter />
 		</aside>

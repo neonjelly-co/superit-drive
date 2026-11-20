@@ -21,7 +21,20 @@ export type Me = {
 	rollback?: Rollback;
 	/** Whether guests can be invited on this Drive: not without mail that works, and why. */
 	guests: { invite: boolean; why: string };
+	/** Whether sharing outside the project (public links and guests) is on for the whole project. */
+	sharingOutside: OutsideSwitch;
+	/** What the person may do that concerns no place: a project admin oversees, and switches sharing outside. */
+	can: ("enter" | "see-usage" | "make-shared-folder" | "oversee" | "switch-sharing-outside")[];
 };
+
+/**
+ * A switch of sharing outside the project (public links and guests): on, or off since when (`at`) and by whom (`by`,
+ * while they are a member; `former` once they have left).
+ */
+export type OutsideSwitch = { on: boolean; by?: Person; former?: boolean; at?: string };
+
+/** Whether sharing outside the project is on in a place: "on", or switched off for the whole "project" or this "folder". */
+export type Outside = "on" | "project" | "folder";
 
 /** The Drive storage put back to a snapshot: who did it (text from the platform), and when (ISO 8601). */
 export type Rollback = {
@@ -55,6 +68,7 @@ export type Action =
 	| "manage-link"
 	| "invite-guest"
 	| "manage-access"
+	| "switch-sharing-outside"
 	| "delete-shared-folder"
 	| "restore-shared-folder";
 
@@ -72,8 +86,18 @@ export type RoleAt = Role | "owner";
  * `can` is what they may do there.
  */
 export type Place =
-	| { id: number; kind: "my-files"; can: Action[] }
-	| { id: number; kind: "shared-folder"; name: string; role: Role; can: Action[] };
+	| { id: number; kind: "my-files"; can: Action[]; outside: Outside }
+	| {
+			id: number;
+			kind: "shared-folder";
+			name: string;
+			role: Role;
+			can: Action[];
+			/** Its own switch of sharing outside the project, which its managers switch. */
+			sharingOutside: OutsideSwitch;
+			/** Whether sharing outside the project is on in it now: off for it, or for the whole project. */
+			outside: Outside;
+	  };
 
 /** A shared folder in the trash. */
 export type DeletedPlace = {
@@ -170,6 +194,8 @@ export type Listing = {
 	role: RoleAt | "";
 	can: Action[];
 	checking?: boolean;
+	/** Whether sharing outside the project (public links and guests) is on here. */
+	outside?: Outside;
 };
 
 /** An item in the trash. */
@@ -226,9 +252,10 @@ export type Found = Item & {
 
 /**
  * Who would see an item where a move would put it, as "who can see this" would show it there, before it moves.
- * becomesProjects: it would leave the person's My files for a shared folder, and become the project's.
+ * becomesProjects: it would leave the person's My files for a shared folder, and become the project's. outside: whether
+ * sharing outside the project is on there (where it is off, its public link and guests stop there).
  */
-export type MovePreview = { becomesProjects: boolean; access: Access[]; seenBy: SeenBy };
+export type MovePreview = { becomesProjects: boolean; access: Access[]; seenBy: SeenBy; outside: Outside };
 
 /**
  * The public link on a file or folder, as whoever may share it sees it. `address` is only in the answer that made it:
@@ -250,6 +277,41 @@ export type PublicLink = {
 /** About how much space the Drive's files take, and the storage's size when it is known. Bytes. */
 export type Usage = { used: number; capacity?: number };
 
+/**
+ * One thing shared outside the project, as a project admin oversees it: a public link or a guest's invitation, on an
+ * item by name (never what is in it, nor the folders above it), in a shared folder or someone's My files, who shared
+ * it, with whom, since when, until when, how often it was used and when last, and whether it lets anyone in now.
+ */
+export type OutsideShare = {
+	kind: "link" | "guest";
+	item: { id: number; name: string; kind: "file" | "folder" };
+	place: { id: number; kind: "my-files" | "shared-folder"; name?: string; owner?: Person; ownerLeft?: boolean; outside: Outside };
+	sharedBy?: Person;
+	former?: boolean;
+	guest?: Guest;
+	role: Role;
+	since: string;
+	until?: string;
+	uses: number;
+	used?: string;
+	works: boolean;
+};
+
+/** The space one person's My files, or one shared folder, uses (its trash included). Bytes. */
+export type SpaceUsed = {
+	person?: Person;
+	/** Someone who has left, with their files held: their top folder's name on the storage. */
+	former?: boolean;
+	folder?: string;
+	id?: number;
+	name?: string;
+	deleted?: boolean;
+	used: number;
+};
+
+/** The space each person and each shared folder uses, the largest first, and the whole. */
+export type Space = { used: number; capacity?: number; people: SpaceUsed[]; sharedFolders: SpaceUsed[] };
+
 /** What an upload does when its name is taken: replace the file there, or keep both. */
 export type Existing = "replace" | "keep-both";
 
@@ -270,6 +332,8 @@ export class ApiError extends Error {
 			resumable?: boolean;
 			/** For a guest: they are not signed in (401), and must sign in first. */
 			signIn?: boolean;
+			/** For a guest: what was given to them is not available now, as sharing outside the project is off (403). */
+			unavailable?: boolean;
 		} = {},
 	) {
 		super(message);
@@ -316,6 +380,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 			resumable: data?.resumable,
 			retryAfter: Number(res.headers.get("Retry-After")) || undefined,
 			signIn: data?.signIn,
+			unavailable: data?.unavailable,
 		});
 	}
 	return data as T;
@@ -451,6 +516,16 @@ export const api = {
 	/** Removes the public link on an item: its address stops working for good. */
 	removeLink: (placeId: number, itemId: number) => call<null>("DELETE", `${base}/places/${placeId}/items/${itemId}/link`),
 	usage: () => call<Usage>("GET", `${base}/usage`),
+	/** Switches sharing outside the project off (or back on) for the whole project: a project admin. */
+	switchOutside: (on: boolean) =>
+		call<{ sharingOutside: OutsideSwitch }>("PUT", `${base}/sharing-outside`, { on }).then((r) => r.sharingOutside),
+	/** Switches sharing outside the project off (or back on) for one shared folder: its managers. */
+	switchFolderOutside: (placeId: number, on: boolean) => call<Place>("PUT", `${base}/places/${placeId}/sharing-outside`, { on }),
+	/** Everything shared outside the project, for a project admin. */
+	sharedOutside: () =>
+		call<{ sharingOutside: OutsideSwitch; items: OutsideShare[] }>("GET", `${base}/oversight/shared-outside`),
+	/** The space each person and each shared folder uses, for a project admin. */
+	space: () => call<Space>("GET", `${base}/oversight/space`),
 	/**
 	 * What is in a folder of a place (null: its top folder), from the Drive's index; opening it also has it looked at on
 	 * the storage. With wait, the list once that look is done (the Drive waits up to ten seconds for it).
@@ -560,7 +635,11 @@ export const guestApi = {
 	/** Signs in with the code: the Drive keeps the guest signed in on this browser for 30 days. */
 	signIn: (address: string, code: string) => call<{ address: string }>("POST", `${base}/sign-in`, { address, code }),
 	signOut: () => call<null>("POST", `${base}/sign-out`),
-	sharedWithMe: () => call<{ items: GuestShared[] }>("GET", `${base}/shared-with-me`).then((r) => r.items),
+	/**
+	 * What was shared with the guest that lets them in now; `unavailable` says something else given to them is not
+	 * available while sharing outside the project is switched off (it is not named).
+	 */
+	sharedWithMe: () => call<{ items: GuestShared[]; unavailable?: boolean }>("GET", `${base}/shared-with-me`),
 	/** One file or folder, with the folders above it that the guest may open. */
 	item: (placeId: number, itemId: number) =>
 		call<{ item: GuestItem; path: FolderRef[]; role: string }>("GET", `${base}/places/${placeId}/items/${itemId}`),

@@ -102,6 +102,14 @@ function Page({ children, project, top }: { children: ReactNode; project?: strin
 }
 
 function Problem({ error }: { error: unknown }) {
+	// Not available while sharing outside the project is switched off: nothing went wrong, so it is said calmly.
+	if (error instanceof ApiError && error.more.unavailable) {
+		return (
+			<p role="status" className="text-muted-foreground">
+				{error.message}
+			</p>
+		);
+	}
 	return (
 		<p role="alert" className="text-sm text-destructive">
 			{error instanceof Error ? error.message : String(error)}
@@ -242,30 +250,44 @@ function SignedIn({ address, project }: { address: string; project: string }) {
 				</>
 			}
 		>
-			{where.view === "shared" ? <Shared go={go} /> : <ItemView key={`${where.place}-${where.item}`} place={where.place} itemId={where.item} go={go} />}
+			{where.view === "shared" ? (
+				<Shared go={go} project={project} />
+			) : (
+				<ItemView key={`${where.place}-${where.item}`} place={where.place} itemId={where.item} go={go} />
+			)}
 		</Page>
 	);
 }
 
 const untilDay = new Intl.DateTimeFormat("en-GB", { dateStyle: "long" });
 
-/** "Shared with me": everything shared with the guest that they may open now, the most recently shared first. */
-function Shared({ go }: { go: (w: Where) => void }) {
+/**
+ * "Shared with me": everything shared with the guest that they may open now, the most recently shared first; and, while
+ * the project has switched off sharing outside the project, that something else given to them is not available now.
+ */
+function Shared({ go, project }: { go: (w: Where) => void; project: string }) {
 	const shared = useQuery({ queryKey: ["guest-shared"], queryFn: guestApi.sharedWithMe });
+	const items = shared.data?.items;
 	return (
 		<>
 			<h1 className="text-2xl font-bold">Shared with me</h1>
+			{shared.data?.unavailable && (
+				<p role="status" className="mt-3 text-muted-foreground">
+					Some of what was shared with you is not available right now: {project} has switched off sharing outside the
+					project. It works again once they switch it back on.
+				</p>
+			)}
 			{shared.error ? (
 				<div className="mt-4">
 					<Problem error={shared.error} />
 				</div>
-			) : !shared.data ? (
+			) : !items ? (
 				<p className="mt-4 text-muted-foreground">Loading…</p>
-			) : shared.data.length === 0 ? (
+			) : items.length === 0 ? (
 				<p className="mt-4 text-muted-foreground">Nothing on this Drive is shared with you now.</p>
 			) : (
 				<ul className="mt-6 overflow-hidden rounded-xl border border-border bg-card">
-					{shared.data.map((it) => (
+					{items.map((it) => (
 						<li key={`${it.place}-${it.id}`} className="flex items-center gap-3 border-t border-border px-4 py-3 first:border-t-0">
 							<FileIcon item={it} />
 							<div className="min-w-0 flex-1">
