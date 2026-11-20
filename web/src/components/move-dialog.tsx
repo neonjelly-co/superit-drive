@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Folder, FolderOpen, Link2, User, Users } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { ROLE_NAME, whoCanSee, whoOf, whyOf } from "../access";
-import { type Access, type Action, api, type FolderRef, type Item, type Member, type SeenBy } from "../api";
+import { type Access, type Action, api, type FolderRef, type Item, type Member, type Outside, type SeenBy } from "../api";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
 
@@ -43,14 +43,22 @@ type Props = {
  * there (what is given there, and for a single item what was given on it too), and, for several items, what each keeps
  * that was given on it.
  */
-type Warning = { becomesProjects: boolean; access: Access[]; seenBy: SeenBy; kept: { name: string; access: Access[] }[] };
+type Warning = {
+	becomesProjects: boolean;
+	access: Access[];
+	seenBy: SeenBy;
+	kept: { name: string; access: Access[] }[];
+	/** Whether sharing outside the project is on there: off, public links and guests stop there. */
+	outside: Outside;
+};
 
 /** The warning for moving items, from what the Drive says about each (GET …/move). */
 async function warningFor(placeId: number, items: Item[], dest: Destination): Promise<Warning> {
 	const previews = await Promise.all(items.map((i) => api.movePreview(placeId, i.id, dest.place.id, dest.folder?.id ?? null)));
 	const becomesProjects = previews.some((p) => p.becomesProjects);
 	const [first] = previews;
-	if (first && previews.length === 1) return { access: first.access, seenBy: first.seenBy, becomesProjects, kept: [] };
+	const outside = first?.outside ?? "on";
+	if (first && previews.length === 1) return { access: first.access, seenBy: first.seenBy, becomesProjects, kept: [], outside };
 	// What every item gets there is what was given there; what was given on each item it keeps, and is said apart.
 	const access = (first?.access ?? []).filter((a) => !a.given);
 	const everyone = access.some((a) => a.everyone);
@@ -59,7 +67,7 @@ async function warningFor(placeId: number, items: Item[], dest: Destination): Pr
 	const kept = previews
 		.map((p, i) => ({ name: items[i]?.name ?? "", access: p.access.filter((a) => a.given) }))
 		.filter((k) => k.access.length > 0);
-	return { becomesProjects, access, seenBy: { everyone, members: everyone ? [] : members, link }, kept };
+	return { becomesProjects, access, seenBy: { everyone, members: everyone ? [] : members, link }, kept, outside };
 }
 
 /**
@@ -182,6 +190,13 @@ export function MoveDialog({ place, root, items, path, otherPlaces, me, members,
 					{one ? "It keeps" : "Each keeps"} the access given on it and on everything in it. Access from the folders{" "}
 					{one ? "it is" : "they are"} in now ends.
 				</p>
+				{warning.outside !== "on" && (
+					<p className="mt-3 text-sm text-attention">
+						Sharing outside the project is switched off{" "}
+						{warning.outside === "project" ? "for the whole project" : `for “${dest.place.name}”`}: public links and guest
+						invitations on what is moved stay, but open nothing there until it is switched back on.
+					</p>
+				)}
 				{problem && (
 					<p role="alert" className="mt-3 text-sm text-destructive">
 						{problem}

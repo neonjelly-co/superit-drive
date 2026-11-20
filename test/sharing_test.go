@@ -780,6 +780,7 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 			"DELETE everyone":      {"DELETE", at("/api/places/%d/access/everyone", place), ""},
 			"DELETE place":         {"DELETE", at("/api/places/%d", place), ""},
 			"POST restore":         {"POST", at("/api/places/%d/restore", place), ""},
+			"PUT sharing outside":  {"PUT", folderSwitchPath(place), `{"on":false}`},
 			"GET zip":              {"GET", zipPath(place, 0), ""},
 			"POST uploads":         {"POST", uploadsPath(place, 0) + "?name=Planted.txt&size=1", ""},
 		}

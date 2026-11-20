@@ -192,24 +192,99 @@ type Place struct {
 	Deleted time.Time
 	// Entry is, while it is in the trash, the entry in its own trash folder on the storage that holds its top folder.
 	Entry string
+	// OutsideOff says whether sharing outside the project is switched off for this shared folder by its managers, and
+	// ProjectOutsideOff whether it is for the whole project by a project admin: read with the place, so that one reading
+	// decides about both. Each is the zero Switch while it is on.
+	OutsideOff, ProjectOutsideOff Switch
 }
+
+// A Switch is sharing outside the project switched off: when, and by whom (a member's user id). The zero Switch is on.
+type Switch struct {
+	At time.Time
+	By string
+}
+
+// Off says whether it is switched off.
+func (s Switch) Off() bool { return !s.At.IsZero() }
 
 // ErrNoPlace is returned when a place does not exist.
 var ErrNoPlace = errors.New("no such place")
 
-const placeColumns = "id, kind, IFNULL(owner, ''), IFNULL(name, ''), folder, deleted_at, IFNULL(deleted_entry, '')"
+const placeColumns = "id, kind, IFNULL(owner, ''), IFNULL(name, ''), folder, deleted_at, IFNULL(deleted_entry, ''), " +
+	"(SELECT off_at FROM outside_off WHERE IFNULL(place_id, 0) = places.id), " +
+	"(SELECT off_by FROM outside_off WHERE IFNULL(place_id, 0) = places.id), " +
+	"(SELECT off_at FROM outside_off WHERE IFNULL(place_id, 0) = 0), " +
+	"(SELECT off_by FROM outside_off WHERE IFNULL(place_id, 0) = 0)"
 
 func scanPlace(row interface{ Scan(...any) error }) (Place, error) {
 	var p Place
-	var deleted sql.NullInt64
-	err := row.Scan(&p.ID, &p.Kind, &p.Owner, &p.Name, &p.Folder, &deleted, &p.Entry)
+	var deleted, offAt, projectOffAt sql.NullInt64
+	var offBy, projectOffBy sql.NullString
+	err := row.Scan(&p.ID, &p.Kind, &p.Owner, &p.Name, &p.Folder, &deleted, &p.Entry, &offAt, &offBy, &projectOffAt, &projectOffBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Place{}, ErrNoPlace
 	}
 	if deleted.Valid {
 		p.Deleted = time.UnixMilli(deleted.Int64).UTC()
 	}
+	p.OutsideOff, p.ProjectOutsideOff = switchOf(offAt, offBy), switchOf(projectOffAt, projectOffBy)
 	return p, err
+}
+
+func switchOf(at sql.NullInt64, by sql.NullString) Switch {
+	if !at.Valid {
+		return Switch{}
+	}
+	return Switch{At: time.UnixMilli(at.Int64).UTC(), By: by.String}
+}
+
+// ProjectOutsideOff says whether sharing outside the project is switched off for the whole project, and since when and
+// by whom.
+func (x *Index) ProjectOutsideOff(ctx context.Context) (Switch, error) {
+	var at sql.NullInt64
+	var by sql.NullString
+	err := x.db.QueryRowContext(ctx, "SELECT off_at, off_by FROM outside_off WHERE IFNULL(place_id, 0) = 0").Scan(&at, &by)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Switch{}, nil
+	}
+	return switchOf(at, by), err
+}
+
+// SwitchOutside switches sharing outside the project off (off: at the time given, by the member by) or back on, for
+// the whole project (placeID 0) or for a shared folder that is not in the trash (ErrNoPlace otherwise). Switching off
+// what is off already keeps when and by whom it was. changed says whether it was switched.
+func (x *Index) SwitchOutside(ctx context.Context, placeID int64, off bool, at time.Time, by string) (changed bool, err error) {
+	err = x.write(ctx, func(tx *sql.Tx) error {
+		if placeID != 0 {
+			var n int
+			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM places WHERE id = ? AND kind = ? AND deleted_at IS NULL",
+				placeID, SharedFolder).Scan(&n); err != nil {
+				return err
+			}
+			if n == 0 {
+				return ErrNoPlace
+			}
+		}
+		var res sql.Result
+		var err error
+		if off {
+			var place any // NULL: the whole project
+			if placeID != 0 {
+				place = placeID
+			}
+			res, err = tx.ExecContext(ctx, `INSERT INTO outside_off (place_id, off_at, off_by) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+				place, at.UnixMilli(), by)
+		} else {
+			res, err = tx.ExecContext(ctx, "DELETE FROM outside_off WHERE IFNULL(place_id, 0) = ?", placeID)
+		}
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		changed = n > 0
+		return nil
+	})
+	return changed, err
 }
 
 func scanPlaces(rows *sql.Rows, err error) ([]Place, error) {

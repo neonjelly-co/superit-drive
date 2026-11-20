@@ -54,7 +54,7 @@ func (s *Server) newSharedFolder(w http.ResponseWriter, r *http.Request, c call)
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, placeOf(who, p, where))
+	writeJSON(w, http.StatusCreated, s.placeOf(who, p, where))
 }
 
 type deletedPlaceJSON struct {
@@ -124,7 +124,7 @@ func (s *Server) restoreSharedFolder(w http.ResponseWriter, r *http.Request, c c
 	case err == nil:
 		where := *c.access
 		where.Deleted = false
-		writeJSON(w, http.StatusOK, placeOf(personOf(c.member), p, &where))
+		writeJSON(w, http.StatusOK, s.placeOf(personOf(c.member), p, &where))
 	case errors.As(err, &taken):
 		s.refuseTaken(w, r, taken, "Something called “"+taken.Name+"” was put where this shared folder goes back to on the Drive storage, "+
 			"so it cannot go back. Move that away on the storage first.")

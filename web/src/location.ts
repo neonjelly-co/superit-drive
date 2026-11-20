@@ -2,14 +2,16 @@ import { useCallback, useEffect, useState } from "react";
 
 /**
  * Where the person is: a folder of a place (place null for their "My files", folder null for the place's top folder),
- * "Shared with me", the trash, or a search by name. It lives in the address (`/?folder=12`, `/?place=5&folder=12`,
- * `/?shared`, `/?trash`, `/?search=offer`), so reloading keeps it and the browser's Back goes up again.
+ * "Shared with me", the trash, a search by name, or, for a project admin, sharing outside the project and the space used
+ * (oversight). It lives in the address (`/?folder=12`, `/?place=5&folder=12`, `/?shared`, `/?trash`, `/?search=offer`,
+ * `/?oversight`), so reloading keeps it and the browser's Back goes up again.
  */
 export type Where =
 	| { view: "files"; place: number | null; folder: number | null }
 	| { view: "shared" }
 	| { view: "trash" }
-	| { view: "search"; query: string };
+	| { view: "search"; query: string }
+	| { view: "oversight" };
 
 const id = (v: string | null) => {
 	const n = Number(v);
@@ -19,6 +21,7 @@ const id = (v: string | null) => {
 function read(): Where {
 	const q = new URLSearchParams(window.location.search);
 	if (q.has("trash")) return { view: "trash" };
+	if (q.has("oversight")) return { view: "oversight" };
 	if (q.has("shared")) return { view: "shared" };
 	if (q.get("search")?.trim()) return { view: "search", query: q.get("search") ?? "" };
 	return { view: "files", place: id(q.get("place")), folder: id(q.get("folder")) };
@@ -26,6 +29,7 @@ function read(): Where {
 
 function address(w: Where): string {
 	if (w.view === "trash") return "/?trash";
+	if (w.view === "oversight") return "/?oversight";
 	if (w.view === "shared") return "/?shared";
 	if (w.view === "search") return `/?${new URLSearchParams({ search: w.query })}`;
 	const q = new URLSearchParams();

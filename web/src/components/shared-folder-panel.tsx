@@ -1,9 +1,11 @@
 import { FolderOpen, Trash2, X } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import type { Place } from "../api";
+import { api, type Place } from "../api";
 import { AccessSection } from "./access-section";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
+import { switchedOffBy } from "./oversight-view";
 
 type SharedFolder = Extract<Place, { kind: "shared-folder" }>;
 
@@ -21,7 +23,8 @@ type Props = {
 /**
  * The details panel for a shared folder itself, opened from "Who can see this" beside its name: who has access to it
  * as a whole and in which role, giving it (viewer, editor or manager, to a member; viewer or editor to everyone in the
- * project), and deleting it. Its managers decide; project admins are managers of every shared folder.
+ * project), switching sharing outside the project off for it (public links and guests), and deleting it. Its managers
+ * decide; project admins are managers of every shared folder.
  */
 export function SharedFolderPanel({ place, me, onClose, onDelete, onAccessChanged }: Props) {
 	const canDelete = place.can.includes("delete-shared-folder");
@@ -54,6 +57,8 @@ export function SharedFolderPanel({ place, me, onClose, onDelete, onAccessChange
 				me={me}
 				onChanged={onAccessChanged}
 			/>
+
+			<OutsideSwitch place={place} onChanged={onAccessChanged} />
 
 			{canDelete && (
 				<div className="mt-8 border-t border-border pt-5">
@@ -104,5 +109,65 @@ function ConfirmDelete({ name, onDelete, onClose }: { name: string; onDelete: ()
 				</p>
 			)}
 		</Dialog>
+	);
+}
+
+/**
+ * Sharing outside the project for this shared folder: on or off, and, for its managers, switching it. While it is off
+ * for the whole project, it is off here whatever this switch says.
+ */
+function OutsideSwitch({ place, onChanged }: { place: SharedFolder; onChanged: () => void }) {
+	const queryClient = useQueryClient();
+	const [busy, setBusy] = useState(false);
+	const [problem, setProblem] = useState<string>();
+	const canSwitch = place.can.includes("switch-sharing-outside");
+	const own = place.sharingOutside;
+	const change = async (on: boolean) => {
+		setBusy(true);
+		setProblem(undefined);
+		try {
+			await api.switchFolderOutside(place.id, on);
+			await queryClient.invalidateQueries({ queryKey: ["places"] });
+			void queryClient.invalidateQueries({ queryKey: ["link", place.id] });
+			onChanged();
+		} catch (e) {
+			setProblem(e instanceof Error ? e.message : String(e));
+		} finally {
+			setBusy(false);
+		}
+	};
+	return (
+		<section aria-labelledby={`outside-${place.id}`} className="mt-6">
+			<h3 id={`outside-${place.id}`} className="text-sm font-semibold">
+				Sharing outside the project
+			</h3>
+			{own.on ? (
+				<p className="mt-0.5 text-sm text-muted-foreground">
+					On for this shared folder: whoever may share something in it can make a public link or invite a guest.
+				</p>
+			) : (
+				<p className="mt-0.5 text-sm text-attention">
+					Off for this shared folder: no public link in it opens and no guest gets in. {switchedOffBy(own)}
+				</p>
+			)}
+			{place.outside === "project" && (
+				<p className="mt-1 text-sm text-attention">A project admin has switched it off for the whole project, so it is off here too.</p>
+			)}
+			{canSwitch && (
+				<Button className="mt-3" disabled={busy} onClick={() => void change(!own.on)}>
+					{own.on ? "Switch it off for this shared folder" : "Switch it back on"}
+				</Button>
+			)}
+			{canSwitch && own.on && (
+				<p className="mt-2 text-sm text-muted-foreground">
+					Links and guests are not removed: they work again once it is switched back on.
+				</p>
+			)}
+			{problem && (
+				<p role="alert" className="mt-2 text-sm text-destructive">
+					{problem}
+				</p>
+			)}
+		</section>
 	);
 }

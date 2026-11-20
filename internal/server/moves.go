@@ -194,6 +194,7 @@ func (s *Server) movePreview(w http.ResponseWriter, r *http.Request, c call) {
 	who := personOf(c.member)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"becomesProjects": c.place.Kind == index.MyFiles && p.Kind == index.SharedFolder,
+		"outside":         outsideHere(p),
 		"access":          s.accessLines(who, p, path, there, links),
 		"seenBy":          seenBy(s.members.Current(), s.accessPlace(p, idsOf(path), there).WithLinks(s.accessLinks(links)...)),
 	})

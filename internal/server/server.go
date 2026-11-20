@@ -281,6 +281,10 @@ func (s *Server) guard(rt route) http.Handler {
 			return
 		}
 		if !access.Decide(c.person, rt.action, c.access) {
+			if access.SwitchedOff(c.person, rt.action, c.access) {
+				s.switchedOff(w, r, c)
+				return
+			}
 			// The same answer as for a place or an item that does not exist.
 			s.refuse(w, r, http.StatusNotFound, notHere)
 			return
@@ -461,9 +465,11 @@ func (s *Server) accessAt(ctx context.Context, p index.Place, path []int64) (*ac
 }
 
 // accessPlace describes the place p, at the item whose path is given, with the grants already read for it, at the
-// Drive's time now (for grants that end).
+// Drive's time now (for grants that end), and with sharing outside the project off where p says it is: for the whole
+// project, or for this shared folder (read with the place).
 func (s *Server) accessPlace(p index.Place, path []int64, grants []index.Grant) *access.Place {
-	where := &access.Place{Deleted: !p.Deleted.IsZero(), Path: path, Grants: make([]access.Grant, 0, len(grants)), Now: s.drive.Now()}
+	where := &access.Place{Deleted: !p.Deleted.IsZero(), Path: path, Grants: make([]access.Grant, 0, len(grants)), Now: s.drive.Now(),
+		NoSharingOutside: p.OutsideOff.Off() || p.ProjectOutsideOff.Off()}
 	list := s.members.Current()
 	for _, g := range grants {
 		where.Grants = append(where.Grants, accessGrant(g, list))

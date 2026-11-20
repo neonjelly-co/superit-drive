@@ -83,6 +83,11 @@ func (s *Server) guardVisitor(w http.ResponseWriter, r *http.Request, rt route) 
 		return
 	}
 	if !access.Decide(c.person, rt.action, c.access) || rt.serve == nil {
+		if rt.serve != nil && access.SwitchedOff(c.person, rt.action, c.access) {
+			// The token matched, and the link would open this: it is not "not here", only not now.
+			s.switchedOff(w, r, c)
+			return
+		}
 		s.refuse(w, r, http.StatusNotFound, notHere)
 		return
 	}

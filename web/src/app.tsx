@@ -21,6 +21,7 @@ import { ItemList } from "./components/item-list";
 import { MoveDialog } from "./components/move-dialog";
 import { keyOf, SharedList } from "./components/shared-list";
 import { NameDialog } from "./components/name-dialog";
+import { OversightView } from "./components/oversight-view";
 import { type Notice, NoticeBar } from "./components/notice";
 import { RollbackNotice } from "./components/rollback-notice";
 import { SearchField } from "./components/search-field";
@@ -256,7 +257,16 @@ export function App() {
 	const here = current?.name ?? placeName;
 	const project = me.data?.project;
 	useEffect(() => {
-		const name = where.view === "trash" ? "Trash" : where.view === "shared" ? "Shared with me" : where.view === "search" ? "Search" : here;
+		const name =
+			where.view === "trash"
+				? "Trash"
+				: where.view === "shared"
+					? "Shared with me"
+					: where.view === "search"
+						? "Search"
+						: where.view === "oversight"
+							? "Sharing and space"
+							: here;
 		document.title = project ? `${name} · ${project}` : name;
 	}, [where.view, here, project]);
 
@@ -549,6 +559,7 @@ export function App() {
 				onUpload={canUpload ? uploads.add : undefined}
 				onNewFolder={inFiles && can.includes("make-folder") ? () => setDialog("new-folder") : undefined}
 				onNewSharedFolder={() => setDialog("new-shared-folder")}
+				oversees={me.data?.can?.includes("oversee")}
 			/>
 			<div
 				className="relative min-w-0 flex-1"
@@ -571,7 +582,13 @@ export function App() {
 					<div className="mb-5">
 						<SearchField query={query} onSearch={onSearch} onClear={endSearch} />
 					</div>
-					{where.view === "search" ? (
+					{where.view === "oversight" ? (
+						me.data?.can?.includes("oversee") ? (
+							<OversightView />
+						) : (
+							<p className="mt-16 text-center text-sm text-muted-foreground">This is not in the Drive, or you have no access to it.</p>
+						)
+					) : where.view === "search" ? (
 						<>
 							<h1 className="text-xl font-semibold break-words">Search: “{query.trim()}”</h1>
 							<p className="mt-1 text-sm text-muted-foreground">
@@ -673,6 +690,13 @@ export function App() {
 								)}
 							</div>
 							<p className="mt-1 text-sm text-muted-foreground">{note}</p>
+							{listing.data?.outside && listing.data.outside !== "on" && (
+								<p className="mt-1 text-sm text-muted-foreground">
+									Sharing outside the project is switched off{" "}
+									{listing.data.outside === "project" ? "for the whole project" : "for this shared folder"}: public links here open
+									nothing and guests get nothing.
+								</p>
+							)}
 							{differs && acting && (
 								<p role="status" className="mt-3 flex items-center gap-3 text-sm text-muted-foreground">
 									This folder changed on the Drive storage.

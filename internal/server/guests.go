@@ -89,6 +89,10 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 		return
 	}
 	if !access.Decide(c.person, rt.action, c.access) || rt.serve == nil {
+		if rt.serve != nil && access.SwitchedOff(c.person, rt.action, c.access) {
+			s.switchedOff(w, r, c) // given to them, and not available only while sharing outside the project is off
+			return
+		}
 		s.refuse(w, r, http.StatusNotFound, notHere)
 		return
 	}
@@ -115,8 +119,8 @@ func (s *Server) guestSession(r *http.Request) (guest *index.Guest, stale bool, 
 	if _, member := s.members.Current().ByEmail(g.Address); member {
 		return nil, true, nil // a member signs in as one; their guest's access is theirs as a member (drive.AdmitMembers)
 	}
-	// Nothing given to them lets them in any more (in the trash, gone from the storage, held with its giver's My files,
-	// sharing outside the project switched off): their sessions end, everywhere, for good.
+	// Nothing given to them lets them in any more (in the trash, gone from the storage, held with its giver's My files),
+	// nor will when sharing outside the project is switched back on: their sessions end, everywhere, for good.
 	open, err := s.guestMayOpenAnything(r.Context(), g)
 	if err != nil {
 		return nil, false, err
@@ -130,8 +134,11 @@ func (s *Server) guestSession(r *http.Request) (guest *index.Guest, stale bool, 
 	return &g, false, nil
 }
 
-// guestMayOpenAnything says whether something given to the guest lets them in now: an item an invitation to them is on
-// that they may open, decided by the access package on the whole way down to it. It stops at the first.
+// guestMayOpenAnything says whether something given to the guest lets them in now, or will once sharing outside the
+// project is switched back on where it is (access.SwitchedOff): an item an invitation to them is on that they may open,
+// decided by the access package on the whole way down to it. It stops at the first. Switching sharing outside off
+// stops what a guest may do, and leaves them signed in to be told so; it works again when it is switched back on, as
+// links do.
 func (s *Server) guestMayOpenAnything(ctx context.Context, g index.Guest) (bool, error) {
 	granted, err := s.drive.GrantedToGuest(ctx, g.ID)
 	if err != nil {
@@ -157,7 +164,7 @@ func (s *Server) guestMayOpenAnything(ctx context.Context, g index.Guest) (bool,
 		if err != nil {
 			return false, err
 		}
-		if access.Decide(who, access.ListAsGuest, where) {
+		if access.Decide(who, access.ListAsGuest, where) || access.SwitchedOff(who, access.ListAsGuest, where) {
 			return true, nil
 		}
 	}
@@ -339,12 +346,14 @@ type guestSharedJSON struct {
 }
 
 // guestSharedWithMe lists everything shared with the guest that lets them in now: each the highest item an invitation
-// to them reaches on its way down (access.SharedWithMe), the most recently shared first.
+// to them reaches on its way down (access.SharedWithMe), the most recently shared first. unavailable says that
+// something else given to them would let them in but for sharing outside the project being switched off where it is:
+// it is not listed (not even by name) until it is switched back on.
 //
 //	GET /s/guest/api/shared-with-me   200 {"items": [{"id", "name", "kind", "size", "changed", "opens", "can", "place",
-//	                                                  "role", "sharedBy", "shared", "until"}]}
+//	                                                  "role", "sharedBy", "shared", "until"}], "unavailable"}
 func (s *Server) guestSharedWithMe(w http.ResponseWriter, r *http.Request, c call) {
-	shares, err := s.sharedWithGuest(r.Context(), *c.guest)
+	shares, unavailable, err := s.sharedWithGuest(r.Context(), *c.guest)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -367,44 +376,45 @@ func (s *Server) guestSharedWithMe(w http.ResponseWriter, r *http.Request, c cal
 		}
 		out = append(out, e)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+	writeJSON(w, http.StatusOK, map[string]any{"items": out, "unavailable": unavailable})
 }
 
 // sharedWithGuest is everything shared with the guest that lets them in now, decided on the whole way down to each
-// item, the most recently shared first.
-func (s *Server) sharedWithGuest(ctx context.Context, g index.Guest) ([]aShare, error) {
+// item, the most recently shared first; unavailable says that something given to them would let them in but for
+// sharing outside the project being switched off where it is.
+func (s *Server) sharedWithGuest(ctx context.Context, g index.Guest) (out []aShare, unavailable bool, err error) {
 	granted, err := s.drive.GrantedToGuest(ctx, g.ID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	who := access.Person{Guest: &access.Guest{ID: g.ID}}
-	var out []aShare
 	for _, at := range granted {
 		p, err := s.drive.Place(ctx, at.Place)
 		if errors.Is(err, index.ErrNoPlace) {
 			continue // a shared folder in the trash
 		}
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		it, err := s.drive.Item(ctx, p, at.Item)
 		if errors.Is(err, index.ErrNoItem) {
 			continue // in the trash, gone, or missing from the storage
 		}
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		path := idsOf(pathTo(it))
 		grants, err := s.drive.GrantsOn(ctx, p, path)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		where := s.accessPlace(p, path, grants)
 		if access.SharedWithMe(who, where) {
 			out = append(out, aShare{place: p, item: it, grants: grants, where: where})
 		}
+		unavailable = unavailable || access.SwitchedOff(who, access.ListAsGuest, where)
 	}
-	return out, nil
+	return out, unavailable, nil
 }
 
 // guestItem is one file or folder a guest may see: what they may do with it, their role, and the folders above it that
