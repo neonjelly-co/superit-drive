@@ -389,8 +389,7 @@ func TestAProjectAdminSwitchesSharingOutsideOffForTheWholeProject(t *testing.T) 
 // nothing, while everything else works as before. Only its managers (and the project admins, who manage every shared
 // folder) switch it, and only for a shared folder: a My files has no switch of its own, and anyone else is answered as
 // for a place that does not exist. Switched on for the folder, it stays off there while it is off for the whole
-// project.
-// Something with a link moved into it from a My files keeps its link, which opens nothing there.
+// project. Something with a link moved into it from a My files keeps its link, which opens nothing there.
 func TestAManagerSwitchesSharingOutsideOffForOneSharedFolder(t *testing.T) {
 	t.Parallel()
 	smtp := mailtest.Start(t, mailtest.Options{})
