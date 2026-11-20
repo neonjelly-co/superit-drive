@@ -22,7 +22,7 @@ import (
 // so the index comes in step with the storage as the looks always bring it (reread.go): what is gone is hidden at once
 // and dropped, with its sharing, when a later look confirms it; what is back is a new item with its folder's access;
 // nothing is ever given from the storage, and nothing taken away comes back. Until that walk has ended, with the
-// storage holding the Drive's mark throughout, the Drive also:
+// storage holding the Drive's mark throughout and every shared folder in the trash looked at, the Drive also:
 //
 //   - first looks at every place's trash, and at every shared folder in the trash: a shared folder deleted since the
 //     snapshot has its top folder back at its own path, and its entry no longer holds it, so it is out of the trash

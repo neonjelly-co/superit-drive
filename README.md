@@ -326,9 +326,9 @@ by the Drive's clock), `GET /api/me` answers members with
 ```
 
 and the interface shows it above the list, in every view, as "The files were put back to 19 November at 04:00" (the
-time in the browser's time zone): "Réka Kovács put the Drive's files back to how they were then, on 20 November.
-Anything added or changed after that is gone, and anything deleted after that is back. Files that came back may need to
-be shared again." The name is shown as text. A member can close it: it stays closed in that browser, for that rollback,
+time in the browser's time zone): "Réka Kovács put the Drive's files back to how they were then, on 20 November. Files
+added after that are gone, changes made after that are undone, and files deleted after that are back. Files that came
+back may need to be shared again." The name is shown as text. A member can close it: it stays closed in that browser, for that rollback,
 and nowhere else; a new rollback shows again. Visitors through a public link are told nothing: their pages say nothing
 about the project but who shared the item. Guests, when they come, will not be told either.
 

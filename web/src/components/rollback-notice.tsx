@@ -48,8 +48,9 @@ export function RollbackNotice({ rollback }: { rollback: Rollback }) {
 			<div className="min-w-0 flex-1">
 				<p className="font-semibold">The files were put back to {to}</p>
 				<p className="mt-1 break-words text-muted-foreground">
-					{rollback.by} put the Drive’s files back to how they were then, on {day(rollback.at)}. Anything added or changed
-					after that is gone, and anything deleted after that is back. Files that came back may need to be shared again.
+					{rollback.by} put the Drive’s files back to how they were then, on {day(rollback.at)}. Files added after that are
+					gone, changes made after that are undone, and files deleted after that are back. Files that came back may need
+					to be shared again.
 				</p>
 			</div>
 			<button
