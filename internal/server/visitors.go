@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -193,6 +194,16 @@ func (s *Server) visitorPage(w http.ResponseWriter, r *http.Request, c call) {
 			return
 		}
 		v.Zip = PublicPrefix + token + "/items/" + strconv.FormatInt(c.item.ID, 10) + "/zip"
+		// Folders first, then by name as people read it: without regard to case or accents.
+		slices.SortStableFunc(items, func(a, b index.Item) int {
+			if a.Folder != b.Folder {
+				if a.Folder {
+					return -1
+				}
+				return 1
+			}
+			return cmp.Or(strings.Compare(index.SearchKey(a.Name), index.SearchKey(b.Name)), strings.Compare(a.Name, b.Name))
+		})
 		for _, it := range items {
 			row := visitorRow{Name: it.Name, Folder: it.Folder, Href: here(it.ID)}
 			if !it.Folder {
