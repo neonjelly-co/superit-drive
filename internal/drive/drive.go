@@ -110,6 +110,9 @@ type Drive struct {
 	rereading stripes
 	rechecks  rechecks
 	mark      mark
+	// expiring lets one run at a time remove what the trash has kept for 30 days: the run at start and a person opening
+	// the trash would otherwise delete the same entry on the storage at once, and one of them fail.
+	expiring sync.Mutex
 	// background is the context of the Drive's own work in the background, which Stop ends and waits for.
 	background context.Context
 	stop       context.CancelFunc

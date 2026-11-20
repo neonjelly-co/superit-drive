@@ -398,6 +398,8 @@ func (d *Drive) Tidy(ctx context.Context, every time.Duration) {
 // every place when only is nil, shared folders in the trash included. On the storage that includes entries the index
 // does not know (left by a change the Drive did not finish), judged by the day in their names.
 func (d *Drive) removeExpired(ctx context.Context, only *index.Place) error {
+	d.expiring.Lock()
+	defer d.expiring.Unlock()
 	cutoff := d.now().Add(-KeptFor)
 	var failed error
 	removed := 0
