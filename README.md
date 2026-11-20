@@ -371,8 +371,8 @@ its siblings. Taking access away, or giving less, counts from the next request, 
 | Open a folder, download a file (or a folder as a zip), see who can see it | yes | yes | yes |
 | Upload into a folder (and replace, or keep both), make folders in it | | yes | yes |
 | Share it: give access to others, change a role, take access away | | yes | yes |
-| Make a [public link](#public-links) to it, see it (who made it, how often it was used), remove it | | yes | yes |
-| Invite a [guest](#guests) to it, change their role or end date, take it away | | yes | yes |
+| Make a [public link](#public-links) to it (not where [sharing outside the project](#sharing-outside-the-project-switched-off) is off), see it (who made it, how often it was used), remove it | | yes | yes |
+| Invite a [guest](#guests) to it, change their role or end date (neither where sharing outside the project is off), take it away | | yes | yes |
 | Rename, move or delete it: also needs editor of the folder it is in | | yes | yes |
 | Restore it from the trash: also needs editor of the folder it goes back to, and either the place's whole trash or having put it there | | yes | yes |
 
@@ -383,7 +383,7 @@ where they may upload (see [Moving into a shared folder](#moving-into-a-shared-f
 |---|---|---|---|
 | List it, download it as a zip, see who has access to it | yes | yes | yes |
 | Upload, make folders, see its trash | | yes | yes |
-| Decide who has access to it as a whole, delete it | | | yes |
+| Decide who has access to it as a whole, switch sharing outside the project off for it (or back on), delete it | | | yes |
 
 In their own "My files" the owner may do everything, including sharing any item in it, and downloading it whole as a
 zip; nobody else may do anything there, project admins included, except with what was shared with them. Every request
@@ -547,9 +547,11 @@ and everyone who can see the item, see in "who can see this" (and in the list's 
   share the item there. It stops when that is taken away from them (or they leave the project), and works again if it is
   given back; a held My files (its owner left) opens nothing. Whoever may share the item sees in its details whether the
   link works now.
-- **Sharing outside the project switched off** (a later ticket adds the switches, for the project and for one shared
-  folder): no link opens there and none can be made, but links can still be seen and removed. The same goes for guests:
-  none gets in there and none can be invited. The decision is already in `internal/access` (`Place.NoSharingOutside`).
+- **Sharing outside the project switched off** (for the whole project, or for the link's shared folder: see [Sharing
+  outside the project switched off](#sharing-outside-the-project-switched-off)): no link opens there and none can be
+  made, but links can still be seen and removed, and work again, at the same address, when it is switched back on. A
+  visitor whose link would open is told so, on a page of its own ("This link is not available", 403); anything the link
+  does not cover still answers as a link that does not exist.
 - **Uses.** For each link the Drive keeps how often it was used and when last, and nothing else about visitors. One use
   is a page opened through it (its own, or a folder's inside it), or a download, a file opened or a zip from its start;
   not a `HEAD`, not a part of a file after its start (a video seeking, a download resuming), not a refused request. Link
@@ -581,7 +583,9 @@ GET    /s/{token}/items/{item}/zip         a folder as one zip (as a member's �
 
 `{item}` must be the link's item or something inside it. A link that does not work, and anything it does not cover (a
 folder above it, a file beside it, an item of another place or in the trash), gets the one answer: 404 with the page
-"This link does not work".
+"This link does not work". The one exception is a link that would open what is asked for but for sharing outside the
+project being switched off where it is: 403 with the page "This link is not available", which says it is switched off
+for now (only after the token matched, and nothing about what it is on).
 
 **The page** is plain HTML made by the Drive (`internal/server/visitors.go`), in one column on every screen, with no
 script and nothing of the members' interface: it works with JavaScript off. It says who shared it (the maker's display
@@ -633,11 +637,15 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
 - **When an invitation lets them in**: while its item is live (not in the trash, not gone from the storage) and its place
   open (not a held My files, not a shared folder in the trash), before its end date, and where sharing outside the
   project is on. In a My files an invitation is its giver's share, as a link is: it counts only while they may still
-  share its item there, and stops when they leave the project. In a shared folder it is the project's.
+  share its item there, and stops when they leave the project. In a shared folder it is the project's. Where sharing
+  outside the project is switched off, what was given to them answers 403 with `"unavailable": true` and says so, their
+  "Shared with me" leaves it out (not even its name) and says `"unavailable": true`, and they stay signed in: it works
+  again, in the same session, when it is switched back on.
 - **Signing in.** The guests' page asks for their address and mails a code: six digits from `crypto/rand`, only the
   newest of their codes works, once, for 10 minutes, and not after five wrong tries; at most five codes are sent to an
   address an hour, and at most 100 to all addresses together. A code is sent only to a guest's address with something
-  shared with it that lets them in now, and never to a member's; the page says the same, at once, for every address
+  shared with it that lets them in now (or will once sharing outside the project is switched back on where it is), and
+  never to a member's; the page says the same, at once, for every address
   (the work is done afterwards, one address at a time, and nothing is logged about an address that is no guest's). Every
   try of a code does the same work whatever the address; past 100 wrong tries of live codes in an hour, from everyone
   together, no try is taken (429) until the hour has passed. The index keeps only each code's HMAC-SHA-256, keyed with a
@@ -649,7 +657,8 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   signing out ends that one. A session ends, for good, when it ends; when the last of their invitations is taken away
   or ends (the guest is removed with it, and their codes, sessions and uploads in progress); when nothing given to them
   lets them in any more (in the trash, gone from the storage, in the My files of someone who left, its giver may no
-  longer share it); and when their address appears in the member list. Signed out, they sign in again with a new code.
+  longer share it), sharing outside the project switched off aside; and when their address appears in the member list.
+  Signed out, they sign in again with a new code.
 - **A guest who joins the project** (their address appears in the member list) keeps their access as a member: within a
   second of the list changing (and when the Drive starts), every invitation to them becomes a grant to that member by
   user id, with its end date (the higher role, and the later end or none, where they had one already), and the guest
@@ -686,6 +695,76 @@ runs the interface's own script) and `Referrer-Policy: same-origin` (the address
 `no-referrer` would make a change's `Origin` null); the API's answers `Cache-Control: no-store`, the page `no-cache`, and
 the interface's files are kept (their names hold their content's hash). An item they cannot reach answers exactly
 as one that does not exist (404, `notHere`); without a session every route but signing in answers 401.
+
+### Sharing outside the project switched off
+
+A cautious organisation can keep everything inside: a project admin switches sharing outside the project (public links
+and guests) off for the whole project, and a shared folder's managers (the project admins among them) for that shared
+folder, such as Payroll. A My files has no switch of its own. The switches live in the Drive's index, not in its
+settings: the platform passes nothing, and they go with the index (its copy on the storage included).
+
+Where it is off (the project's switch, or the shared folder's; `access.Place.NoSharingOutside`, set in
+`server.accessPlace` from the place as the index reads it):
+
+- **No public link opens**: a visitor whose link would open what they ask for gets the page "This link is not
+  available" (403), anything else the one answer for a link that does not exist. No link is made.
+- **No guest gets in**: what was given to a guest answers 403, `{"unavailable": true, "error"}`; their "Shared with me"
+  leaves it out and says `"unavailable": true`. They stay signed in (and can sign in, and be sent a code), to be told
+  so. No guest is invited, and no invitation's role or end date changed.
+- **What was made stays as it is**: whoever may share an item still sees its link and its guests, each saying it does
+  not work now (`"works": false`), and removes them; "who can see this" and the list's sentence no longer count them.
+  Sharing with members, by name, by address or with everyone, goes on as before.
+- **Switched back on**, every link (at its own address) and every invitation (in the guest's same session) works again
+  as it did, except what was removed meanwhile, which stays removed.
+- A member who may share the item and asks to make a link, invite a guest or change an invitation is answered 409,
+  `{"outside": "project" | "folder", "error"}`, saying where it was switched off. Anyone else gets what they would get
+  with it on: `access.SwitchedOff` says it only to whoever it is the only thing in the way of.
+- Moving something from a My files into a shared folder where it is off is allowed: its link and invitations go with it
+  and stop there; the move's warning says it is off there (`"outside"`).
+- The shared folder's own switch stays with it in the trash, and goes when it is removed for good. Switched on for a
+  shared folder, it is still off there while it is off for the whole project.
+
+Every member sees whether it is on for the whole project, and who switched it off when (`GET /api/me`:
+`"sharingOutside": {"on", "by", "former", "at"}`, and `"can"`, what they may do that concerns no place: `oversee` and
+`switch-sharing-outside` for a project admin); whoever has a role on a shared folder sees its own switch the same
+way in their places (`"sharingOutside"`). Every answer about a place or an item in it (its listing, who has access, its
+link, a move's warning, the places list) says whether it is on there now: `"outside": "on" | "project" | "folder"`.
+
+```
+PUT    /api/sharing-outside                    {"on": false | true}   a project admin, for the whole project
+       200 {"sharingOutside": {"on", "by", "former", "at"}}
+PUT    /api/places/{place}/sharing-outside     {"on": false | true}   a shared folder's managers, for it
+       200 the shared folder, as the places list gives it
+```
+
+Switching it is logged (`sharing outside the project was switched off for the whole project`, with who).
+
+### What a project admin oversees
+
+A project admin cannot open anyone's My files (`access`'s table test tries every action, with sharing outside on and
+off), but sees what leaves the project, and the space each person and each shared folder takes:
+
+```
+GET    /api/oversight/shared-outside
+       200 {"sharingOutside": {…}, "items": [{"kind": "link" | "guest", "item": {"id", "name", "kind"},
+            "place": {"id", "kind", "name" (a shared folder's), "owner" | "ownerLeft" (a My files'), "outside"},
+            "sharedBy" | "former", "guest": {"id", "address"}, "role", "since", "until", "uses", "used", "works"}]}
+GET    /api/oversight/space
+       200 {"used", "capacity", "people": [{"person": {…} | "former" and "folder", "used"}],
+            "sharedFolders": [{"id", "name", "deleted", "used"}]}
+```
+
+- **Shared outside**: every public link, then every guest's invitation, on an item that is in the Drive now (not in the
+  trash, not in a shared folder in the trash, not gone from the storage): the item by name only (never the folders above
+  it, nor what is in it), whose My files or which shared folder it is in, who made or gave it, the guest's address or
+  anyone with the link, the role, since when and until when, how often it was used and when last (as its maker sees
+  it), and whether it lets anyone in now. Read from the index a page at a time and sent as it is made, however many
+  there are. It opens nothing: the ids in it are decided on like any other request.
+- **Space**: the sum of the sizes of the files in each person's My files and each shared folder, its trash included, as
+  the sidebar's meter counts it: every member (0 for one who has never opened the Drive), everyone who has left with
+  files held (by the name of their top folder on the storage, their address when they first opened the Drive), every
+  shared folder (one in the trash too), the largest first. Sums only.
+- Only project admins (`access.Oversee`); anyone else gets the one answer for what is not there.
 
 ### Opening files in the browser
 
@@ -902,7 +981,9 @@ from their own My files into a shared folder after a warning that says who will 
 video and sound open in the browser (anything else downloads), a search finds files and folders by name across
 everything a member can see, and several items can be selected to move, download as a zip or delete together. Members
 who may share a file or folder make a public link to it, which anyone opens without signing in, or invite someone
-outside the project by email address as a guest (with the mail settings), who signs in with a mailed code. Large files
+outside the project by email address as a guest (with the mail settings), who signs in with a mailed code; project
+admins see everything shared outside the project and the space each person and shared folder uses, and switch sharing
+outside the project off for the whole project (managers for one shared folder). Large files
 upload in parts that resume after a broken connection, downloads resume and seek, and folders upload
 whole and download as zips. Files changed on the WebDAV server by other programs show in the Drive as folders are
 opened, and through a slow walk now and then (see [Keeping in step with the storage](#keeping-in-step-with-the-storage)).
@@ -1131,14 +1212,16 @@ internal/members/      the member list file, re-read when it changes
 internal/mail/         the Drive's own mail over SMTP, sent in the background; mailtest/ is a throwaway SMTP server
                        for tests
 internal/access/       the one authorisation function (Decide), the role at an item (RoleAt), what Shared with me lists
-                       and what a search finds (SharedWithMe, Finds), and their table tests
+                       and what a search finds (SharedWithMe, Finds), whether sharing outside the project switched
+                       off is all that is in the way (SwitchedOff), and their table tests
 internal/server/       HTTP: routes.go lists every route; server.go's guard runs identify (under /s/, the visitor's
                        link; under /s/guest, the guest's session) → own page (for changes; through a link, only
                        reading) → place → item in it, or in its trash, or the person's upload in progress into it →
                        the access given there → access.Decide; transfers.go has downloads, zips and uploads,
                        opening.go what opens in the browser and how, search.go the search by name, links.go making
                        and removing public links, visitors.go the public prefix and the visitor's pages,
-                       invitations.go inviting guests, guests.go the guests' sign-in, pages and codes
+                       invitations.go inviting guests, guests.go the guests' sign-in, pages and codes,
+                       oversight.go sharing outside the project switched off and what a project admin oversees
 internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
                        shared folders, the access given on them; reread.go and walk.go keep the index in step with
                        the storage, and rollback.go takes in the storage put back to a snapshot
