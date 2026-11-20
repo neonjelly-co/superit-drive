@@ -852,3 +852,36 @@ func TestAStoppingDriveCopiesWhatItHasNotYet(t *testing.T) {
 		t.Fatalf("the Drive copied its index as it stopped, with no access change since the last copy: %q", got)
 	}
 }
+
+// A copy someone with the storage login planted, or changed, is adopted only if it is one the Drive could have made: one
+// whose My files is the Drive's hidden folder (where the copies of the index are), or that carries a trigger of its own,
+// is refused, kept aside, and the Drive builds its index from the files.
+func TestAPlantedCopyIsNotAdopted(t *testing.T) {
+	t.Parallel()
+	for what, c := range map[string]struct{ change, why string }{
+		"a My files in the hidden folder": {"UPDATE places SET folder = '.superit-drive' WHERE kind = 'my-files'",
+			`a place's top folder is ".superit-drive", where the Drive never puts one`},
+		"a trigger of its own": {"CREATE TRIGGER keep_links AFTER DELETE ON links BEGIN INSERT INTO links SELECT OLD.*; END",
+			"which the Drive never makes"},
+		"a shared folder outside the Drive's folder": {"UPDATE places SET folder = 'Shared folders/..' WHERE kind = 'shared-folder'",
+			`a place's top folder is "Shared folders/..", where the Drive never puts one`},
+	} {
+		t.Run(what, func(t *testing.T) {
+			t.Parallel()
+			d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora}, Env: copiesSoon("300ms", "2s")})
+			missing := visitor(d).Get(t, noSuchLink(t))
+			_, payroll, notesPage := sharedBeforeTheCopy(t, d)
+			d.Stop(t)
+			alterStoredCopy(t, d, func(db *sql.DB) { run(t, db, c.change) })
+			d.OnANewServer(t, nil)
+			harness.Eventually(t, "the log says the copy is not used, and why", func() bool {
+				logs := strings.ReplaceAll(d.Logs(), `\"`, `"`)
+				return strings.Contains(logs, "THE COPY OF THE INDEX ON THE STORAGE IS NOT USED") && strings.Contains(logs, c.why)
+			})
+			builtFromTheFiles(t, d, payroll, notesPage, missing)
+			if got := storedCopies(t, d); !slices.ContainsFunc(got, func(n string) bool { return strings.HasPrefix(n, "refused-") }) {
+				t.Fatalf("the copies' folder: %q, want the refused copy kept", got)
+			}
+		})
+	}
+}
