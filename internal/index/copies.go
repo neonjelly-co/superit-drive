@@ -15,10 +15,10 @@ import (
 // Copies of the index: one SQLite file each, whole and consistent, made while the Drive runs (WriteCopy, with SQLite's
 // VACUUM INTO, which reads the index in one read transaction and writes a new file from it: a file a backup can archive
 // as it is, unlike the live index and its write-ahead log). The data folder keeps the latest at BackupFile, and the
-// Drive puts one on the storage too, without what StripCopy clears (internal/drive/copies.go says when, and where).
+// Drive puts one on the storage too, without what ClearCopy clears (internal/drive/copies.go says when, and where).
 //
 // A copy becomes the index of a Drive whose data folder has none (internal/drive/adopt.go): only after CheckCopy finds it
-// whole and made by this Drive's own migrations, and ReadyCopy has cleared what a copy must not bring.
+// whole and made by this Drive's own migrations, and ClearCopy has cleared what a copy must not bring.
 
 // BackupFolder is the folder in the data folder that holds the copy of the index a backup archives.
 const BackupFolder = "backup"
@@ -26,6 +26,9 @@ const BackupFolder = "backup"
 // BackupFile is where the data folder dataDir keeps its copy of the index: replaced whole, by renaming a new copy over
 // it, so it is always a consistent copy, whatever a backup reads at any moment.
 func BackupFile(dataDir string) string { return filepath.Join(dataDir, BackupFolder, FileName) }
+
+// copyCacheKiB is the page cache, in KiB, of the connection that makes a copy; those that read or clear one have half.
+const copyCacheKiB = 1024
 
 // What drive_state keeps about copies.
 const (
@@ -77,7 +80,12 @@ func (x *Index) WriteCopy(ctx context.Context, file string) (CopyInfo, error) {
 	if err != nil {
 		return CopyInfo{}, err
 	}
-	_, err = conn.ExecContext(ctx, "VACUUM INTO ?", file)
+	// A small page cache for the copy (VACUUM INTO gives the new file the same): it reads and writes each page once.
+	_, err = conn.ExecContext(ctx, fmt.Sprintf("PRAGMA cache_size = -%d", copyCacheKiB))
+	if err == nil {
+		_, err = conn.ExecContext(ctx, "VACUUM INTO ?", file)
+	}
+	_, _ = conn.ExecContext(context.WithoutCancel(ctx), "PRAGMA cache_size = -2000") // SQLite's default, for the pool
 	conn.Close()
 	if err != nil {
 		os.Remove(file)
@@ -110,6 +118,7 @@ func syncFile(file string) error {
 func openCopy(file string, readOnly bool) (*sql.DB, error) {
 	pragmas := url.Values{}
 	pragmas.Add("_pragma", "busy_timeout(5000)")
+	pragmas.Add("_pragma", fmt.Sprintf("cache_size(-%d)", copyCacheKiB/2))
 	if readOnly {
 		pragmas.Set("mode", "ro")
 	} else {

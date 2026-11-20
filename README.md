@@ -396,8 +396,11 @@ mark with the id its index keeps: never onto a storage that is empty, mounted wr
 is named after that id, so the copies of another index are never removed. Making a copy streams from disk to disk, and
 putting it on the storage streams from the file, over one connection with the capped buffers every connection to the
 storage has: it takes no transfer slot (as the walk takes none), so it never makes anyone wait their turn, and its
-memory does not grow with the index ([measured](#large-transfers-and-the-memory-figure)). Its temporary files are made
-in the data folder, which is on disk, never in `/tmp`, which can be memory.
+memory does not grow with the index ([measured](#large-transfers-and-the-memory-figure)). The copy for the storage is
+copied, put on the storage, and (when a Drive starts from it) read back four MiB at a time, each part synced to disk and
+let go of by the page cache before the next: the kernel's page cache counts against the container's memory too, and a
+copy of 33 MB written in one go stopped the whole Drive for minutes in the memory test. Its temporary files are made in
+the data folder, which is on disk, never in `/tmp`, which can be memory.
 
 **What the copy on the storage leaves out.** Whoever has the storage login can read it, so it holds nothing that lets
 anyone in by itself, and nothing that only one server can honour:
@@ -1180,7 +1183,14 @@ memory and 29 to 31 MiB network buffers, and never reached the limit (Docker Des
 Walking a storage of 50,000 files in 402 folders (and one folder of 20,000, more than a look reads) took 3½ minutes and
 its highest was 38 MiB, of which 17.5 MiB the Drive's own memory and 16 MiB page cache (the index's file, which the
 kernel takes back first); eight people then opening the folder of 10,000 files at once reached 59 MiB, of which 35 MiB
-its own (Go's heap at its limit, and SQLite's caches) and 16 MiB page cache.
+its own (Go's heap at its limit, and SQLite's caches) and 16 MiB page cache. A copy of the index of 110,000 items (33.6
+MB), made by a share while 16 downloads of 64 MiB (half of them read at 8 MiB/s) and four people opening a folder of
+10,000 files went on over and over, took 1.7 seconds, into the data folder and onto the storage, and the downloads and
+lists went on meanwhile. People's use alone held the container at its limit (64 MiB, mostly page cache the kernel
+takes back), with 33.9 MiB of the Drive's own memory and 12.9 MiB network buffers; while it copied, its own memory was
+34.1 MiB: the copy streams from disk to disk with small caches of its own (1 MiB for SQLite, 128 KiB to copy a file),
+and writes in parts of 4 MiB, each synced and let go of. Written in one go, a copy that size stopped the whole Drive
+for minutes there, the page cache full of what it had not yet written.
 
 **Downloads** honour `Range` for one part of a file (`bytes=a-b`, `bytes=a-`, `bytes=-n`): 206 with `Content-Range`,
 or 416 with `Content-Range: bytes */<size>` for a part after the end. They carry the storage's `ETag` and
