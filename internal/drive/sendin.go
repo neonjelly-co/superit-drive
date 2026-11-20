@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
@@ -40,6 +41,22 @@ type intake struct {
 
 // LinkLimit is how much an upload-only link takes in, in bytes, before it stops until it is reset.
 func (d *Drive) LinkLimit() int64 { return d.linkLimit }
+
+// CheckSentName says whether name can be the name of a file a visitor sends through a link: as CheckName says for any
+// name, and without the characters that turn the direction of text (U+202A to U+202E, U+2066 to U+2069). A stranger's
+// "Invoice" + U+202E + "fdp.exe" would read as "Invoiceexe.pdf" in the members' list.
+func CheckSentName(name string) error {
+	if err := CheckName(name); err != nil {
+		return err
+	}
+	if strings.ContainsFunc(name, turnsText) {
+		return &BadName{"This name holds characters that change the direction of text. Rename the file and send it again."}
+	}
+	return nil
+}
+
+// turnsText says whether r is one of the characters that embed, override or isolate the direction of text.
+func turnsText(r rune) bool { return (r >= '\u202A' && r <= '\u202E') || (r >= '\u2066' && r <= '\u2069') }
 
 // keepFor keeps n bytes of what the link with id link may take in, for one file on its way: ErrLinkFull when what the
 // link has taken in, what is on its way and n would pass its limit. settle gives them back, counting them as taken in
@@ -90,7 +107,7 @@ func (d *Drive) keepFor(ctx context.Context, link, n int64) (settle func(stored 
 // connection ended before the whole file arrived (nothing is stored, nothing counted).
 func (d *Drive) SendIn(ctx context.Context, p index.Place, link int64, name string, body io.Reader, size int64,
 	decide func(context.Context) (index.Place, index.Item, error)) (index.Item, error) {
-	if err := CheckName(name); err != nil {
+	if err := CheckSentName(name); err != nil {
 		return index.Item{}, err
 	}
 	if _, ok := pathIn("x", name); !ok {

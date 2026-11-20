@@ -77,7 +77,7 @@ func (s *Server) sendIn(w http.ResponseWriter, r *http.Request, c call) {
 		return
 	}
 	name := r.URL.Query().Get("name")
-	if err := drive.CheckName(name); err != nil {
+	if err := drive.CheckSentName(name); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
