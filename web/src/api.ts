@@ -70,7 +70,9 @@ export type Action =
 	| "manage-access"
 	| "switch-sharing-outside"
 	| "delete-shared-folder"
-	| "restore-shared-folder";
+	| "restore-shared-folder"
+	| "hand-over-held"
+	| "delete-held";
 
 /**
  * A role that can be given: viewer or editor on a file or folder, and also manager on a shared folder as a whole.
