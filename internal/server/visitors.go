@@ -306,8 +306,8 @@ type visitorView struct {
 	// For a file: its size, and where it opens (when its kind does) and downloads.
 	Size, Open, Download string
 	// Send is true for an upload-only link's page: a place to choose or drop files and send them into the folder, and
-	// nothing of what is in it.
-	Send bool
+	// nothing of what is in it; Full when the link has taken in all it may, and the page says so instead.
+	Send, Full bool
 }
 
 type visitorLink struct{ Name, Href string }
@@ -324,16 +324,17 @@ func (s *Server) renderVisitor(w http.ResponseWriter, status int, v visitorView)
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
-	if v.Send {
+	if v.Send && !v.Full {
 		h.Set("Content-Security-Policy", s.sendPolicy)
 	}
 	w.WriteHeader(status)
 	if err := visitorTemplate.Execute(w, struct {
 		visitorView
-		Style  template.CSS
-		Script template.JS
-		Title  string
-	}{v, template.CSS(visitorStyle), template.JS(sendScript), titleOf(v)}); err != nil {
+		Style    template.CSS
+		Script   template.JS
+		Title    string
+		FullNote string
+	}{v, template.CSS(visitorStyle), template.JS(sendScript), titleOf(v), linkFull}); err != nil {
 		s.log.Info("a visitor's page was not sent whole", "error", err)
 	}
 }
@@ -450,6 +451,9 @@ var visitorTemplate = template.Must(template.New("visitor").Funcs(template.FuncM
 <h1>{{.Name}}</h1>
 {{- if .Send}}
 <p class="note">Send files to this folder. What is in it stays hidden: you cannot see its files, their names, or what anyone else sent. Nothing you send replaces anything in it.</p>
+{{- if .Full}}
+<p class="note" id="full">{{.FullNote}}</p>
+{{- else}}
 <div class="send">
 <label class="drop" id="drop"><input type="file" id="files" multiple><strong>Drop files here, or choose them</strong><span>Files only: send what is in a folder, not the folder.</span></label>
 <ul class="list" id="chosen" hidden></ul>
@@ -458,6 +462,7 @@ var visitorTemplate = template.Must(template.New("visitor").Funcs(template.FuncM
 </div>
 <noscript><p class="note">Sending files needs JavaScript, which is switched off in this browser. Switch it on, then reload this page.</p></noscript>
 <script>{{.Script}}</script>
+{{- end}}
 {{- else if .Folder}}
 <p class="actions"><a class="button" href="{{.Zip}}" download>Download all as zip</a></p>
 {{- if .Items}}

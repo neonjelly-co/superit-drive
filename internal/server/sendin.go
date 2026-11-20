@@ -45,9 +45,11 @@ var (
 )
 
 // sendInPage is an upload-only link's page: who shared it, the folder's name, and a place to choose or drop files and
-// send them. It says that what is in the folder cannot be seen, and shows none of it.
+// send them. It says that what is in the folder cannot be seen, and shows none of it. Once the link has taken in all it
+// may, it says so instead of offering to send, and has no script.
 func (s *Server) sendInPage(w http.ResponseWriter, r *http.Request, c call) {
-	s.renderVisitor(w, http.StatusOK, visitorView{Name: c.item.Name, By: s.sharer(*c.link), Folder: true, Send: true})
+	full := c.link.TakenIn >= s.drive.LinkLimit()
+	s.renderVisitor(w, http.StatusOK, visitorView{Name: c.item.Name, By: s.sharer(*c.link), Folder: true, Send: true, Full: full})
 	s.used(r, c)
 }
 
@@ -196,8 +198,8 @@ func sendPolicyFor(origin string) string {
 // place for it, without folders, which cannot be sent), and sends each one, one after another, as the body of a POST to
 // the page's own address + "/files", with its name (in Unicode's composed form, as the members' interface sends names)
 // and a turn of its own. It shows how far each has gone; one the Drive says is not its turn waits Retry-After and goes
-// again with the same turn; one cut off goes again a few times. A link that no longer works, is not available or is full
-// stops them all, with the Drive's words.
+// again with the same turn; one whose connection is lost goes again from its start, with the same turn, for a few
+// minutes. A link that no longer works, is not available or is full stops them all, with the Drive's words.
 const sendScript = `(function () {
 "use strict";
 var input = document.getElementById("files"), drop = document.getElementById("drop"), list = document.getElementById("chosen"),
@@ -292,9 +294,11 @@ function send(f) {
 		next();
 	};
 	x.onerror = function () {
-		if (++f.tries <= 5) {
+		// A connection lost, or the Drive's answer that it was not this file's turn arriving as one: again, with the same
+		// turn, often enough to keep its place in line (the Drive forgets a turn not asked about for a minute).
+		if (++f.tries <= 20) {
 			show(f, "Connection lost: trying again", "");
-			setTimeout(function () { send(f); }, 2000 * f.tries);
+			setTimeout(function () { send(f); }, Math.min(2000 * f.tries, 15000));
 			return;
 		}
 		f.failed = true;

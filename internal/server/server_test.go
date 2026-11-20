@@ -608,11 +608,16 @@ func TestTheSendPagesPolicyAllowsOnlyItsOwnScript(t *testing.T) {
 	if p := sendPolicyFor(""); !strings.Contains(p, "connect-src 'self';") {
 		t.Fatalf("the send page's policy without an address: %s", p)
 	}
-	// A view link's page has no script.
-	rec = httptest.NewRecorder()
-	s.renderVisitor(rec, http.StatusOK, visitorView{Name: "Invoices", By: "Shared by Bence", Folder: true})
-	if strings.Contains(rec.Body.String(), "<script") || rec.Header().Get("Content-Security-Policy") != "" {
-		t.Fatalf("a view link's page has a script, or a policy of its own: %q", rec.Header().Get("Content-Security-Policy"))
+	// A view link's page has no script, and nor has the page of an upload-only link that has taken in all it may.
+	for what, v := range map[string]visitorView{
+		"a view link's page":                  {Name: "Invoices", By: "Shared by Bence", Folder: true},
+		"the page of a full upload-only link": {Name: "Invoices", By: "Shared by Bence", Folder: true, Send: true, Full: true},
+	} {
+		rec = httptest.NewRecorder()
+		s.renderVisitor(rec, http.StatusOK, v)
+		if strings.Contains(rec.Body.String(), "<script") || rec.Header().Get("Content-Security-Policy") != "" {
+			t.Fatalf("%s has a script, or a policy of its own: %q", what, rec.Header().Get("Content-Security-Policy"))
+		}
 	}
 }
 
