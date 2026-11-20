@@ -782,7 +782,8 @@ list it has now, at every request, so someone added back with the same user id f
   (`access.Place.OwnerLeft`). Nothing shared from it opens: its public links answer as links that do not exist,
   invitations let no guest in (a guest with nothing else that lets them in is signed out at their next request, and
   is sent no code), what was shared with members or with everyone opens nothing and leaves their "Shared with me", and a
-  search finds nothing in it. What they shared in someone else's My files stops too (it was their share); what they did in
+  search finds nothing in it. The public links they made and the guests they invited in someone else's My files stop too
+  (they were their shares; what they gave members there stays, for that My files' owner to take away); what they did in
   a shared folder is the project's and goes on: its files, its links, its guests and what they gave on it.
 - **Back with the same user id** (a list briefly wrong, a mistake undone, a new address), they have it back as it was,
   with their trash, and everything shared from it works again; a guest who was signed out meanwhile signs in again with
@@ -829,10 +830,12 @@ that address (the person back, or another) gets `bence@example.com (2)`, so noth
 ever taken over.
 
 **Steps, and a stop midway.** An act is recorded first (with what it covers and, for a hand-over, the folder's name), then
-done on the storage (the move, then removing the trash; or removing the trash and the top folder), then in the index in
-one transaction (the items change place by a few SQL statements, however many there are: nothing of the tree is loaded
-into memory). Each step can be done again, and the Drive tells which are done by what the storage holds. While an act is
-under way:
+done on the storage (the move, then removing the trash; or removing the trash and the top folder), then in the index, by
+SQL statements that move or remove 20,000 items per transaction (nothing of the tree is loaded into memory, and no
+transaction holds the index for more than a moment: 100,000 items take about a second in all); what is moved below the
+top folder stays out of reach in the receiver's My files until the last transaction moves the top folder's items, makes
+their folder, and records the act done. Each step can be done again, and the Drive tells which are done by what the
+storage and the index hold. While an act is under way:
 
 - its held My files stays held, whatever the member list says (someone back meanwhile does not get it: the act was
   decided, and is finished; they get a new My files once it is);
