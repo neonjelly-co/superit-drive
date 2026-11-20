@@ -3,16 +3,19 @@ import { type ReactNode, useEffect, useRef } from "react";
 import { whoCanSee } from "../access";
 import type { Item, Member } from "../api";
 import { formatChanged, formatChangedFull, formatSize } from "../format";
+import { lang, t } from "../i18n";
+import { useNarrow } from "../narrow";
 import { FileIcon } from "./file-icon";
 import { FileLink, FolderButton } from "./file-link";
+import { PhoneList, PhoneMessage, PhoneRow } from "./phone-row";
 
-const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
+let collator: Intl.Collator | undefined;
 
-/** Folders first, then by name as people read it ("File 2" before "File 10"). */
+/** Folders first, then by name as people read it ("File 2" before "File 10"), in the page's language. */
 export function inOrder<T extends { kind: string; name: string }>(items: T[]): T[] {
-	return [...items].sort((a, b) =>
-		a.kind === b.kind ? collator.compare(a.name, b.name) : a.kind === "folder" ? -1 : 1,
-	);
+	collator ??= new Intl.Collator(lang, { numeric: true, sensitivity: "base" });
+	const c = collator;
+	return [...items].sort((a, b) => (a.kind === b.kind ? c.compare(a.name, b.name) : a.kind === "folder" ? -1 : 1));
 }
 
 type Props = {
@@ -28,7 +31,7 @@ type Props = {
 	onOpen: (folder: Item) => void;
 	/** The items selected, by id: one shows its details beside the list; two or more turn the header into `bar`. */
 	ticked: ReadonlySet<number>;
-	/** Selects only this item: a click on its row. */
+	/** Selects only this item: a click on its row (on a phone, its ⋯ button). */
 	onSelect: (item: Item) => void;
 	/** Adds an item to the selection, or takes it out: its tick box. */
 	onTick: (item: Item, on: boolean) => void;
@@ -41,6 +44,10 @@ type Props = {
 	members?: Member[];
 	/** True when the person may put files and folders here: the empty list says how. */
 	canAdd: boolean;
+	/** On a phone: true while the person is choosing several (after "Select", or a press and hold). */
+	selecting?: boolean;
+	/** On a phone: a press and hold on a row starts choosing several, with it ticked. */
+	onHold?: (item: Item) => void;
 };
 
 /**
@@ -50,8 +57,17 @@ type Props = {
  * anywhere else on the row selects it alone and shows its details, and who can see it, beside the list. Tick boxes
  * select several; the header's selects them all. With two or more selected, the header becomes a bar of what can be
  * done with them together.
+ *
+ * On a phone the same list folds: each row is the name with one line under it (who can see it, and the size), and a ⋯
+ * button for its details. Tick boxes show only while choosing several, after "Select" or a press and hold on a row;
+ * then a tap ticks a row, and what can be done with them is in a bar at the bottom.
  */
 export function ItemList(props: Props) {
+	const narrow = useNarrow();
+	return narrow ? <PhoneItems {...props} /> : <TableItems {...props} />;
+}
+
+function TableItems(props: Props) {
 	const { placeId, items, loading, error, onRetry, retryLabel, onOpen, ticked, onSelect, onTick, onTickAll, bar, me, members, canAdd } = props;
 	const shown = items && placeId !== undefined && !loading && !error ? items : [];
 	const tickedHere = shown.filter((i) => ticked.has(i.id)).length;
@@ -60,6 +76,7 @@ export function ItemList(props: Props) {
 		if (all.current) all.current.indeterminate = tickedHere > 0 && tickedHere < shown.length;
 	}, [tickedHere, shown.length]);
 	const several = tickedHere >= 2 && bar;
+	const allTicked = tickedHere === shown.length && shown.length > 0;
 	return (
 		<div className="mt-5 overflow-hidden rounded-xl border border-border bg-card">
 			<table className="w-full table-fixed text-sm">
@@ -77,9 +94,9 @@ export function ItemList(props: Props) {
 							<input
 								ref={all}
 								type="checkbox"
-								aria-label={tickedHere === shown.length && shown.length > 0 ? "Clear the selection" : "Select all"}
-								title={tickedHere === shown.length && shown.length > 0 ? "Clear the selection" : "Select all"}
-								checked={shown.length > 0 && tickedHere === shown.length}
+								aria-label={allTicked ? t.selection.clearSelection : t.selection.selectAll}
+								title={allTicked ? t.selection.clearSelection : t.selection.selectAll}
+								checked={allTicked}
 								disabled={shown.length === 0}
 								onChange={(e) => onTickAll(e.currentTarget.checked)}
 								className="size-4 accent-primary align-middle"
@@ -92,16 +109,16 @@ export function ItemList(props: Props) {
 						) : (
 							<>
 								<th scope="col" className="px-3 font-normal">
-									Name
+									{t.common.name}
 								</th>
 								<th scope="col" className="px-4 font-normal">
-									Who can see it
+									{t.list.whoCanSeeIt}
 								</th>
 								<th scope="col" className="px-4 font-normal">
-									Changed
+									{t.common.changed}
 								</th>
 								<th scope="col" className="px-4 text-right font-normal">
-									Size
+									{t.common.size}
 								</th>
 							</>
 						)}
@@ -116,15 +133,13 @@ export function ItemList(props: Props) {
 								onClick={onRetry}
 								className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-foreground hover:bg-muted"
 							>
-								<RotateCw aria-hidden className="size-4" /> {retryLabel ?? "Try again"}
+								<RotateCw aria-hidden className="size-4" /> {retryLabel ?? t.common.tryAgain}
 							</button>
 						</Message>
 					) : loading || !items || placeId === undefined ? (
-						<Message>Loading…</Message>
+						<Message>{t.common.loading}</Message>
 					) : items.length === 0 ? (
-						<Message>
-							{canAdd ? "Nothing here yet. Drop files here to upload, or make a folder with “New folder”." : "Nothing here yet."}
-						</Message>
+						<Message>{canAdd ? t.list.emptyCanAdd : t.list.empty}</Message>
 					) : (
 						inOrder(items).map((item) => (
 							<Row
@@ -142,6 +157,53 @@ export function ItemList(props: Props) {
 				</tbody>
 			</table>
 		</div>
+	);
+}
+
+/** The list on a phone: a name with one line under it per row, and tick boxes only while choosing several. */
+function PhoneItems(props: Props) {
+	const { placeId, items, loading, error, onRetry, retryLabel, onOpen, ticked, onSelect, onTick, me, members, canAdd, selecting, onHold } = props;
+	if (error) {
+		return (
+			<PhoneMessage>
+				<span className="text-destructive">{error.message}</span>
+				<button
+					type="button"
+					onClick={onRetry}
+					className="mt-3 inline-flex h-11 items-center gap-1.5 rounded-md border border-border px-3 text-foreground hover:bg-muted"
+				>
+					<RotateCw aria-hidden className="size-4" /> {retryLabel ?? t.common.tryAgain}
+				</button>
+			</PhoneMessage>
+		);
+	}
+	if (loading || !items || placeId === undefined) return <PhoneMessage>{t.common.loading}</PhoneMessage>;
+	if (items.length === 0) return <PhoneMessage>{canAdd ? t.list.emptyCanAddPhone : t.list.empty}</PhoneMessage>;
+	return (
+		<PhoneList>
+			{inOrder(items).map((item) => {
+				const outside = item.addedBy ? (item.addedBy.guest ? t.list.fromAGuest : t.list.throughALink) : "";
+				const line = [outside, item.seenBy ? whoCanSee(item.seenBy, me, members) : "", item.size !== undefined ? formatSize(item.size) : ""]
+					.filter(Boolean)
+					.join(" · ");
+				const on = ticked.has(item.id);
+				return (
+					<PhoneRow
+						key={item.id}
+						item={item}
+						line={line}
+						open={item.kind === "file" ? { placeId, file: item } : { folder: () => onOpen(item) }}
+						onDetails={() => onSelect(item)}
+						detailsLabel={t.list.details(item.name)}
+						selecting={selecting}
+						ticked={on}
+						onTick={() => onTick(item, !on)}
+						tickLabel={t.selection.selectItem(item.name)}
+						onHold={onHold ? () => onHold(item) : undefined}
+					/>
+				);
+			})}
+		</PhoneList>
 	);
 }
 
@@ -175,7 +237,7 @@ function Row({ placeId, item, ticked, onOpen, onSelect, onTick, seen }: RowProps
 			<td className="py-2.5 pl-4">
 				<input
 					type="checkbox"
-					aria-label={`Select ${item.name}`}
+					aria-label={t.selection.selectItem(item.name)}
 					checked={ticked}
 					onClick={(e) => e.stopPropagation()}
 					onChange={(e) => onTick(item, e.currentTarget.checked)}
@@ -216,11 +278,8 @@ function AddedFromOutside({ item }: { item: Item }) {
 	if (!item.addedBy) return null;
 	const guest = item.addedBy.guest;
 	return (
-		<span
-			title={guest ? `Added by the guest ${guest}, from outside the project` : "Sent through an upload-only link, from outside the project"}
-			className="truncate text-xs text-muted-foreground"
-		>
-			{guest ? "From a guest" : "Through a link"}
+		<span title={guest ? t.list.fromAGuestTitle(guest) : t.list.throughALinkTitle} className="truncate text-xs text-muted-foreground">
+			{guest ? t.list.fromAGuest : t.list.throughALink}
 		</span>
 	);
 }

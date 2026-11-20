@@ -14,12 +14,12 @@ const variants = {
 
 type Props = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: keyof typeof variants; small?: boolean };
 
-/** The interface's one button, in the Pilot light look. */
+/** The interface's one button, in the Pilot light look. On a phone every button is at least 44 px tall, for a finger. */
 export function Button({ variant = "outline", small, className = "", type = "button", ...props }: Props) {
 	return (
 		<button
 			type={type}
-			className={`${base} ${small ? "h-8 px-2.5" : ""} ${variants[variant]} ${className}`}
+			className={`${base} ${small ? "h-8 px-2.5" : ""} max-md:h-11 max-md:min-w-11 ${variants[variant]} ${className}`}
 			{...props}
 		/>
 	);

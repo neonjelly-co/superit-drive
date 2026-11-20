@@ -1,18 +1,21 @@
 // The guests' page: signing in with a code mailed to them, "Shared with me", and what is in what was shared, with what
-// their role lets them do. One plain column on every screen. It calls only the guests' API (under /s/guest/api), where
-// the Drive decides everything again.
+// their role lets them do. One plain column on every screen, a phone's too, in the guest's language (with the switch at
+// the top). It calls only the guests' API (under /s/guest/api), where the Drive decides everything again.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Download, ExternalLink, Folder, FolderInput, FolderPlus, LogOut, PenLine, Trash2, Upload } from "lucide-react";
 import { type FormEvent, type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 import { ApiError, api, type FolderRef, type GuestItem, guestApi } from "./api";
 import { Button } from "./components/button";
 import { ConflictDialog } from "./components/conflict-dialog";
+import { LanguageSwitch } from "./components/language-switch";
 import { Dialog } from "./components/dialog";
 import { FileIcon } from "./components/file-icon";
 import { NameDialog } from "./components/name-dialog";
 import { UploadsPanel } from "./components/uploads-panel";
 import { Wordmark } from "./components/wordmark";
-import { formatChanged, formatSize } from "./format";
+import { formatChanged, formatDayMonth, formatSize } from "./format";
+import { fill, t } from "./i18n";
+import { touchOnly } from "./narrow";
 import { droppedFiles, useUploads } from "./uploads";
 
 /** Where a guest is: their "Shared with me", or a file or folder (by place and id). It lives in the address. */
@@ -74,26 +77,29 @@ export function GuestApp() {
 			}),
 		[queryClient],
 	);
-	if (me.isPending) return <Page>Loading…</Page>;
+	if (me.isPending) return <Page>{t.common.loading}</Page>;
 	if (me.error && signedOut(me.error)) return <SignIn onSignedIn={() => void queryClient.resetQueries()} />;
 	if (me.error) return <Page><Problem error={me.error} /></Page>;
 	return <SignedIn address={me.data.address} project={me.data.project} />;
 }
 
-/** One plain column, with the Drive's name at the top. */
+/** One plain column, with the Drive's name and the switch to the other language at the top. */
 function Page({ children, project, top }: { children: ReactNode; project?: string; top?: ReactNode }) {
 	useEffect(() => {
-		document.title = project ? `Drive of ${project}` : "Drive";
+		document.title = project ? t.guest.driveOf(project) : t.app.drive;
 	}, [project]);
 	return (
-		<div className="flex min-h-screen flex-col">
+		<div className="flex min-h-dvh flex-col">
 			<header className="border-b border-border bg-card">
-				<div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
-					<p className="flex items-baseline gap-2 text-sm">
+				<div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 max-md:py-2">
+					<p className="flex min-w-0 items-baseline gap-2 text-sm">
 						<Wordmark className="text-lg" />
-						<span className="text-muted-foreground">Drive{project ? ` of ${project}` : ""}</span>
+						<span className="truncate text-muted-foreground">{project ? t.guest.driveOf(project) : t.app.drive}</span>
 					</p>
-					<div className="ml-auto flex items-center gap-2">{top}</div>
+					<div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+						{top}
+						<LanguageSwitch />
+					</div>
 				</div>
 			</header>
 			<main className="mx-auto w-full max-w-3xl flex-1 px-4 py-8">{children}</main>
@@ -118,7 +124,7 @@ function Problem({ error }: { error: unknown }) {
 }
 
 const field =
-	"h-10 w-full min-w-0 rounded-md border border-input bg-card px-3 text-base outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50";
+	"h-10 w-full min-w-0 rounded-md border border-input bg-card px-3 text-base outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 max-md:h-11";
 
 /**
  * Signing in: the guest confirms their address (filled in from the invitation's link), is mailed a code, and types it.
@@ -161,15 +167,12 @@ function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
 
 	return (
 		<Page>
-			<h1 className="text-2xl font-bold">Sign in to see what was shared with you</h1>
-			<p className="mt-2 text-muted-foreground">
-				Someone in this project shared files with your email address. Confirm it, and we mail you a code. You need no
-				account and no password.
-			</p>
+			<h1 className="text-2xl font-bold">{t.guest.signInTitle}</h1>
+			<p className="mt-2 text-muted-foreground">{t.guest.signInNote}</p>
 			{sent === undefined ? (
 				<form onSubmit={ask} className="mt-6 max-w-md">
 					<label htmlFor={addressId} className="text-sm font-medium">
-						Your email address
+						{t.guest.yourAddress}
 					</label>
 					<input
 						id={addressId}
@@ -181,7 +184,7 @@ function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
 						className={`mt-1.5 ${field} font-mono`}
 					/>
 					<Button variant="primary" type="submit" className="mt-4" disabled={busy || !address.trim()}>
-						Send me a code
+						{t.guest.sendCode}
 					</Button>
 				</form>
 			) : (
@@ -189,11 +192,11 @@ function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
 					<p role="status" className="text-sm">
 						{sent}
 					</p>
-					<p className="mt-1 text-sm text-muted-foreground">
-						Sent to <span className="font-mono">{address.trim()}</span>. Check your spam folder too.
+					<p className="mt-1 text-sm break-words text-muted-foreground">
+						{fill(t.guest.sentTo, { address: <span className="font-mono">{address.trim()}</span> })}
 					</p>
 					<label htmlFor={codeId} className="mt-5 block text-sm font-medium">
-						The code from the mail
+						{t.guest.theCode}
 					</label>
 					<input
 						id={codeId}
@@ -208,13 +211,13 @@ function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
 					/>
 					<div className="mt-4 flex flex-wrap gap-2">
 						<Button variant="primary" type="submit" disabled={busy || code.replace(/\s/g, "").length !== 6}>
-							Sign in
+							{t.guest.signIn}
 						</Button>
 						<Button variant="ghost" onClick={() => void ask()} disabled={busy}>
-							Send another code
+							{t.guest.anotherCode}
 						</Button>
 						<Button variant="ghost" onClick={() => setSent(undefined)} disabled={busy}>
-							Use another address
+							{t.guest.anotherAddress}
 						</Button>
 					</div>
 				</form>
@@ -241,11 +244,11 @@ function SignedIn({ address, project }: { address: string; project: string }) {
 			project={project}
 			top={
 				<>
-					<span className="max-w-64 truncate font-mono text-sm text-muted-foreground" title={address}>
+					<span className="max-w-64 truncate font-mono text-sm text-muted-foreground max-md:max-w-full" title={address}>
 						{address}
 					</span>
 					<Button small variant="ghost" onClick={() => void signOut()}>
-						<LogOut aria-hidden /> Sign out
+						<LogOut aria-hidden /> {t.guest.signOut}
 					</Button>
 				</>
 			}
@@ -259,8 +262,6 @@ function SignedIn({ address, project }: { address: string; project: string }) {
 	);
 }
 
-const untilDay = new Intl.DateTimeFormat("en-GB", { dateStyle: "long" });
-
 /**
  * "Shared with me": everything shared with the guest that they may open now, the most recently shared first; and, while
  * the project has switched off sharing outside the project, that something else given to them is not available now.
@@ -270,11 +271,10 @@ function Shared({ go, project }: { go: (w: Where) => void; project: string }) {
 	const items = shared.data?.items;
 	return (
 		<>
-			<h1 className="text-2xl font-bold">Shared with me</h1>
+			<h1 className="text-2xl font-bold">{t.app.sharedWithMe}</h1>
 			{shared.data?.unavailable && (
 				<p role="status" className="mt-3 text-muted-foreground">
-					Some of what was shared with you is not available right now: {project} has switched off sharing outside the
-					project. It works again once they switch it back on.
+					{t.guest.unavailable(project)}
 				</p>
 			)}
 			{shared.error ? (
@@ -282,26 +282,29 @@ function Shared({ go, project }: { go: (w: Where) => void; project: string }) {
 					<Problem error={shared.error} />
 				</div>
 			) : !items ? (
-				<p className="mt-4 text-muted-foreground">Loading…</p>
+				<p className="mt-4 text-muted-foreground">{t.common.loading}</p>
 			) : items.length === 0 ? (
-				<p className="mt-4 text-muted-foreground">Nothing on this Drive is shared with you now.</p>
+				<p className="mt-4 text-muted-foreground">{t.guest.nothingShared}</p>
 			) : (
 				<ul className="mt-6 overflow-hidden rounded-xl border border-border bg-card">
 					{items.map((it) => (
-						<li key={`${it.place}-${it.id}`} className="flex items-center gap-3 border-t border-border px-4 py-3 first:border-t-0">
+						<li key={`${it.place}-${it.id}`} className="flex items-center gap-3 border-t border-border px-4 py-3 first:border-t-0 max-md:py-2">
 							<FileIcon item={it} />
 							<div className="min-w-0 flex-1">
-								<button type="button" onClick={() => go({ view: "item", place: it.place, item: it.id })} className="max-w-full truncate text-left font-semibold underline-offset-4 hover:underline">
+								<button type="button" onClick={() => go({ view: "item", place: it.place, item: it.id })} className="max-w-full truncate text-left font-semibold underline-offset-4 hover:underline max-md:min-h-11">
 									{it.name}
 								</button>
 								<p className="text-sm text-muted-foreground">
-									{it.sharedBy} · {it.role === "editor" ? "Editor" : "Viewer"}
-									{it.until ? ` · until ${untilDay.format(new Date(it.until))}` : ""}
+									{[it.sharedBy, it.role === "editor" ? t.common.editor : t.common.viewer, ...(it.until ? [t.guest.until(formatDayMonth(it.until))] : [])].join(" · ")}
 								</p>
 							</div>
 							{it.kind === "file" && (
-								<a href={api.downloadUrl(it.place, it.id)} download className="shrink-0 text-sm font-semibold underline-offset-4 hover:underline">
-									Download
+								<a
+									href={api.downloadUrl(it.place, it.id)}
+									download
+									className="inline-flex shrink-0 items-center text-sm font-semibold underline-offset-4 hover:underline max-md:min-h-11"
+								>
+									{t.common.download}
 								</a>
 							)}
 						</li>
@@ -325,7 +328,7 @@ function ItemView({ place, itemId, go }: { place: number; itemId: number; go: (w
 			</>
 		);
 	}
-	if (!item.data) return <p className="text-muted-foreground">Loading…</p>;
+	if (!item.data) return <p className="text-muted-foreground">{t.common.loading}</p>;
 	const { item: it, path } = item.data;
 	if (it.kind === "folder") return <FolderView place={place} folder={it} above={path} go={go} />;
 	return (
@@ -341,11 +344,11 @@ function ItemView({ place, itemId, go }: { place: number; itemId: number; go: (w
 			<p className="mt-6 flex flex-wrap gap-2">
 				{it.opens && (
 					<a href={api.openUrl(place, it.id)} target="_blank" rel="noopener noreferrer" className={linkButton}>
-						<ExternalLink aria-hidden className="size-4" /> Open
+						<ExternalLink aria-hidden className="size-4" /> {t.common.open}
 					</a>
 				)}
 				<a href={api.downloadUrl(place, it.id)} download className={`${linkButton} bg-primary text-primary-foreground hover:bg-primary/80`}>
-					<Download aria-hidden className="size-4" /> Download
+					<Download aria-hidden className="size-4" /> {t.common.download}
 				</a>
 			</p>
 		</>
@@ -353,19 +356,19 @@ function ItemView({ place, itemId, go }: { place: number; itemId: number; go: (w
 }
 
 const linkButton =
-	"inline-flex h-9 items-center gap-1.5 rounded-md border border-border bg-card px-3 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50";
+	"inline-flex h-9 items-center gap-1.5 rounded-md border border-border bg-card px-3 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50 max-md:h-11 max-md:min-w-11 max-md:justify-center";
 
 /** Where the guest is: "Shared with me", then the folders from the one given to them down. */
 function Crumbs({ path, go, place }: { path: FolderRef[]; go: (w: Where) => void; place: number }) {
 	return (
-		<nav aria-label="Folders" className="flex flex-wrap items-center gap-1 text-sm text-muted-foreground">
-			<button type="button" onClick={() => go({ view: "shared" })} className="underline-offset-4 hover:underline">
-				Shared with me
+		<nav aria-label={t.common.folders} className="flex flex-wrap items-center gap-1 text-sm text-muted-foreground">
+			<button type="button" onClick={() => go({ view: "shared" })} className="underline-offset-4 hover:underline max-md:min-h-11">
+				{t.app.sharedWithMe}
 			</button>
 			{path.map((f) => (
 				<span key={f.id} className="flex items-center gap-1">
 					<ChevronRight aria-hidden className="size-3.5" />
-					<button type="button" onClick={() => go({ view: "item", place, item: f.id })} className="max-w-48 truncate underline-offset-4 hover:underline">
+					<button type="button" onClick={() => go({ view: "item", place, item: f.id })} className="max-w-48 truncate underline-offset-4 hover:underline max-md:min-h-11">
 						{f.name}
 					</button>
 				</span>
@@ -432,7 +435,7 @@ function FolderView({ place, folder, above, go }: { place: number; folder: Guest
 				{canUpload && (
 					<>
 						<Button variant="primary" onClick={() => chooser.current?.click()}>
-							<Upload aria-hidden /> Upload
+							<Upload aria-hidden /> {t.guest.upload}
 						</Button>
 						<input
 							ref={chooser}
@@ -450,14 +453,14 @@ function FolderView({ place, folder, above, go }: { place: number; folder: Guest
 				)}
 				{can.includes("make-folder-as-guest") && (
 					<Button onClick={() => setDialog({ kind: "new-folder" })}>
-						<FolderPlus aria-hidden /> New folder
+						<FolderPlus aria-hidden /> {t.guest.newFolder}
 					</Button>
 				)}
 				<a href={api.zipUrl(place, folder.id)} download className={linkButton}>
-					<Download aria-hidden className="size-4" /> Download all as zip
+					<Download aria-hidden className="size-4" /> {t.guest.downloadAll}
 				</a>
 			</div>
-			{canUpload && <p className="mt-2 text-sm text-muted-foreground">You can also drop files here.</p>}
+			{canUpload && !touchOnly() && <p className="mt-2 text-sm text-muted-foreground">{t.guest.canDrop}</p>}
 			{problem && (
 				<div className="mt-3">
 					<Problem error={new Error(problem)} />
@@ -468,9 +471,9 @@ function FolderView({ place, folder, above, go }: { place: number; folder: Guest
 					<Problem error={listing.error} />
 				</div>
 			) : !items ? (
-				<p className="mt-4 text-muted-foreground">Loading…</p>
+				<p className="mt-4 text-muted-foreground">{t.common.loading}</p>
 			) : items.length === 0 ? (
-				<p className="mt-6 text-muted-foreground">This folder is empty.</p>
+				<p className="mt-6 text-muted-foreground">{t.guest.empty}</p>
 			) : (
 				<ul className="mt-6 overflow-hidden rounded-xl border border-border bg-card">
 					{items.map((it) => (
@@ -478,14 +481,14 @@ function FolderView({ place, folder, above, go }: { place: number; folder: Guest
 							<FileIcon item={it} />
 							<div className="min-w-0 flex-[1_1_12rem]">
 								{it.kind === "folder" ? (
-									<button type="button" onClick={() => go({ view: "item", place, item: it.id })} className="max-w-full truncate text-left font-semibold underline-offset-4 hover:underline">
+									<button type="button" onClick={() => go({ view: "item", place, item: it.id })} className="max-w-full truncate text-left font-semibold underline-offset-4 hover:underline max-md:min-h-11">
 										{it.name}
 									</button>
 								) : (
 									<a
 										href={it.opens ? api.openUrl(place, it.id) : api.downloadUrl(place, it.id)}
 										{...(it.opens ? { target: "_blank", rel: "noopener noreferrer" } : { download: true })}
-										className="block max-w-full truncate font-semibold underline-offset-4 hover:underline"
+										className="block max-w-full truncate font-semibold underline-offset-4 hover:underline max-md:flex max-md:min-h-11 max-md:items-center"
 									>
 										{it.name}
 									</a>
@@ -496,22 +499,22 @@ function FolderView({ place, folder, above, go }: { place: number; folder: Guest
 							</div>
 							<div className="flex flex-wrap gap-1">
 								{it.kind === "file" && (
-									<a href={api.downloadUrl(place, it.id)} download title={`Download ${it.name}`} aria-label={`Download ${it.name}`} className={`${linkButton} h-8 px-2.5`}>
+									<a href={api.downloadUrl(place, it.id)} download title={t.list.downloadNamed(it.name)} aria-label={t.list.downloadNamed(it.name)} className={`${linkButton} h-8 px-2.5`}>
 										<Download aria-hidden className="size-4" />
 									</a>
 								)}
 								{it.can.includes("rename-as-guest") && (
-									<Button small variant="ghost" aria-label={`Rename ${it.name}`} title="Rename" onClick={() => setDialog({ kind: "rename", item: it })}>
+									<Button small variant="ghost" aria-label={t.guest.renameNamed(it.name)} title={t.common.rename} onClick={() => setDialog({ kind: "rename", item: it })}>
 										<PenLine aria-hidden />
 									</Button>
 								)}
 								{it.can.includes("move-as-guest") && (
-									<Button small variant="ghost" aria-label={`Move ${it.name}`} title="Move" onClick={() => setDialog({ kind: "move", item: it })}>
+									<Button small variant="ghost" aria-label={t.guest.moveNamed(it.name)} title={t.common.move} onClick={() => setDialog({ kind: "move", item: it })}>
 										<FolderInput aria-hidden />
 									</Button>
 								)}
 								{it.can.includes("delete-as-guest") && (
-									<Button small variant="ghost" aria-label={`Delete ${it.name}`} title="Delete" onClick={() => setDialog({ kind: "delete", item: it })}>
+									<Button small variant="ghost" aria-label={t.guest.deleteNamed(it.name)} title={t.common.delete} onClick={() => setDialog({ kind: "delete", item: it })}>
 										<Trash2 aria-hidden className="text-destructive" />
 									</Button>
 								)}
@@ -525,9 +528,9 @@ function FolderView({ place, folder, above, go }: { place: number; folder: Guest
 			{uploads.question && <ConflictDialog key={uploads.question.key} question={uploads.question} onAnswer={uploads.answer} />}
 			{dialog?.kind === "new-folder" && (
 				<NameDialog
-					title="New folder"
+					title={t.dialogs.newFolder}
 					initial=""
-					submitLabel="Make folder"
+					submitLabel={t.dialogs.makeFolder}
 					onSubmit={async (name) => {
 						await api.newFolder(place, folder.id, name);
 						changed();
@@ -537,10 +540,10 @@ function FolderView({ place, folder, above, go }: { place: number; folder: Guest
 			)}
 			{dialog?.kind === "rename" && (
 				<NameDialog
-					title={`Rename “${dialog.item.name}”`}
+					title={t.dialogs.renameTitle(dialog.item.name)}
 					initial={dialog.item.name}
 					selectStem={dialog.item.kind === "file"}
-					submitLabel="Rename"
+					submitLabel={t.common.rename}
 					onSubmit={async (name) => {
 						await api.rename(place, dialog.item.id, name);
 						changed();
@@ -578,8 +581,8 @@ function DeleteDialog({ item, onDelete, onClose }: { item: GuestItem; onDelete: 
 	const [busy, setBusy] = useState(false);
 	return (
 		<Dialog
-			title={`Delete “${item.name}”?`}
-			description="It goes to the trash of whoever shared it with you, who can restore it for 30 days. You cannot undo it yourself."
+			title={t.guest.deleteTitle(item.name)}
+			description={t.guest.deleteNote}
 			onClose={onClose}
 			onSubmit={async () => {
 				setBusy(true);
@@ -594,10 +597,10 @@ function DeleteDialog({ item, onDelete, onClose }: { item: GuestItem; onDelete: 
 			footer={
 				<>
 					<Button variant="ghost" onClick={onClose}>
-						Cancel
+						{t.common.cancel}
 					</Button>
 					<Button variant="danger" type="submit" disabled={busy}>
-						<Trash2 aria-hidden /> Delete
+						<Trash2 aria-hidden /> {t.common.delete}
 					</Button>
 				</>
 			}
@@ -623,8 +626,8 @@ function MoveDialog(props: { place: number; item: GuestItem; root: FolderRef; fr
 	return (
 		<Dialog
 			wide
-			title={`Move “${item.name}”`}
-			description="Choose a folder inside what was shared with you."
+			title={t.move.titleOne(item.name)}
+			description={t.guest.moveNote}
 			onClose={onClose}
 			onSubmit={async () => {
 				setBusy(true);
@@ -640,19 +643,19 @@ function MoveDialog(props: { place: number; item: GuestItem; root: FolderRef; fr
 			footer={
 				<>
 					<Button variant="ghost" onClick={onClose}>
-						Cancel
+						{t.common.cancel}
 					</Button>
 					<Button variant="primary" type="submit" disabled={busy || !allowed}>
-						Move here
+						{t.move.moveHere}
 					</Button>
 				</>
 			}
 		>
-			<nav aria-label="Folders" className="flex flex-wrap items-center gap-1 text-sm text-muted-foreground">
+			<nav aria-label={t.common.folders} className="flex flex-wrap items-center gap-1 text-sm text-muted-foreground">
 				{trail.map((f, i) => (
 					<span key={f.id} className="flex items-center gap-1">
 						{i > 0 && <ChevronRight aria-hidden className="size-3.5" />}
-						<button type="button" onClick={() => setTrail(trail.slice(0, i + 1))} className="underline-offset-4 hover:underline">
+						<button type="button" onClick={() => setTrail(trail.slice(0, i + 1))} className="underline-offset-4 hover:underline max-md:min-h-11">
 							{f.name}
 						</button>
 					</span>
@@ -660,16 +663,16 @@ function MoveDialog(props: { place: number; item: GuestItem; root: FolderRef; fr
 			</nav>
 			<ul className="mt-3 max-h-72 overflow-auto rounded-md border border-border">
 				{listing.isPending ? (
-					<li className="px-3 py-2 text-sm text-muted-foreground">Loading…</li>
+					<li className="px-3 py-2 text-sm text-muted-foreground">{t.common.loading}</li>
 				) : folders.length === 0 ? (
-					<li className="px-3 py-2 text-sm text-muted-foreground">No folders in here.</li>
+					<li className="px-3 py-2 text-sm text-muted-foreground">{t.guest.noFolders}</li>
 				) : (
 					folders.map((f) => (
 						<li key={f.id}>
 							<button
 								type="button"
 								onClick={() => setTrail([...trail, { id: f.id, name: f.name }])}
-								className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
+								className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted max-md:min-h-11"
 							>
 								<Folder aria-hidden className="size-4 text-muted-foreground" />
 								<span className="truncate">{f.name}</span>

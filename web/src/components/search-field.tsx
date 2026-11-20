@@ -1,5 +1,6 @@
 import { Search, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { t } from "../i18n";
 
 type Props = {
 	/** The search the address holds; empty when not searching. */
@@ -59,21 +60,21 @@ export function SearchField({ query, onSearch, onClear }: Props) {
 						onClear();
 					}
 				}}
-				placeholder="Search by name"
-				aria-label="Search files and folders by name"
+				placeholder={t.search.placeholder}
+				aria-label={t.search.label}
 				aria-keyshortcuts="/"
-				className="h-10 w-full rounded-lg border border-input bg-card pr-9 pl-9 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 [&::-webkit-search-cancel-button]:hidden"
+				className="h-10 w-full rounded-lg border border-input bg-card pr-9 pl-9 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 max-md:h-11 max-md:pr-12 max-md:text-base [&::-webkit-search-cancel-button]:hidden"
 			/>
 			{text && (
 				<button
 					type="button"
-					aria-label="Clear the search"
+					aria-label={t.search.clear}
 					onClick={() => {
 						setText("");
 						onClear();
 						input.current?.focus();
 					}}
-					className="absolute top-1/2 right-1.5 grid size-7 -translate-y-1/2 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+					className="absolute top-1/2 right-1.5 grid size-7 -translate-y-1/2 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground max-md:right-0 max-md:size-11"
 				>
 					<X aria-hidden className="size-4" />
 				</button>

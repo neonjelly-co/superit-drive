@@ -2,9 +2,12 @@ import { RotateCw } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Found } from "../api";
 import { formatChanged, formatChangedFull, formatSize } from "../format";
+import { t } from "../i18n";
+import { useNarrow } from "../narrow";
 import { Button } from "./button";
 import { FileIcon } from "./file-icon";
 import { FileLink, FolderButton } from "./file-link";
+import { PhoneList, PhoneMessage, PhoneRow } from "./phone-row";
 
 type Props = {
 	items?: Found[];
@@ -29,47 +32,71 @@ export const keyOfFound = (f: Found) => `${f.place}:${f.id}`;
  * they can open.
  */
 export function locationOf(f: Found): string {
-	const root = !f.fromTop ? "Shared with me" : f.placeKind === "my-files" ? "My files" : (f.placeName ?? "");
+	const root = !f.fromTop ? t.app.sharedWithMe : f.placeKind === "my-files" ? t.app.myFiles : (f.placeName ?? "");
 	return [root, ...f.path.map((p) => p.name)].join(" › ");
 }
 
 /**
  * What a search found: one row per file or folder with its name, where it is, when it changed and its size, the best
  * matches first. The click rule is the list's: a name opens (a folder in the list, a file in the browser or as a
- * download), where it is goes to the folder it is in, and the rest of the row selects it and shows its details.
+ * download), where it is goes to the folder it is in, and the rest of the row selects it and shows its details. On a
+ * phone, a row is the name with where it is and its size under it, and ⋯ for its details (which go to where it is).
  */
-export function SearchList({ items, loading, error, onRetry, onOpen, onGoTo, selected, onSelect }: Props) {
+export function SearchList(props: Props) {
+	const { items, loading, error, onRetry, onOpen, onGoTo, selected, onSelect } = props;
+	const narrow = useNarrow();
+	const message = error ? (
+		<>
+			<span className="text-destructive">{error.message}</span>
+			<Button className="mt-3" onClick={onRetry}>
+				<RotateCw aria-hidden /> {t.common.tryAgain}
+			</Button>
+		</>
+	) : loading || !items ? (
+		t.search.searching
+	) : items.length === 0 ? (
+		t.search.nothing
+	) : undefined;
+	if (narrow) {
+		if (message !== undefined || !items) return <PhoneMessage>{message}</PhoneMessage>;
+		return (
+			<PhoneList>
+				{items.map((f) => (
+					<PhoneRow
+						key={keyOfFound(f)}
+						item={f}
+						line={[locationOf(f), f.size !== undefined ? formatSize(f.size) : ""].filter(Boolean).join(" · ")}
+						open={f.kind === "file" ? { placeId: f.place, file: f } : { folder: () => onOpen(f) }}
+						onDetails={() => onSelect(f)}
+						detailsLabel={t.list.details(f.name)}
+						ticked={keyOfFound(f) === selected}
+					/>
+				))}
+			</PhoneList>
+		);
+	}
 	return (
 		<div className="mt-5 overflow-hidden rounded-xl border border-border bg-card">
 			<table className="w-full table-fixed text-sm">
 				<thead>
 					<tr className="h-11 border-b border-border text-left text-muted-foreground">
 						<th scope="col" className="px-4 font-normal">
-							Name
+							{t.common.name}
 						</th>
 						<th scope="col" className="w-64 px-4 font-normal">
-							Where
+							{t.search.where}
 						</th>
 						<th scope="col" className="w-32 px-4 font-normal">
-							Changed
+							{t.common.changed}
 						</th>
 						<th scope="col" className="w-28 px-4 text-right font-normal">
-							Size
+							{t.common.size}
 						</th>
 					</tr>
 				</thead>
 				<tbody>
-					{error ? (
-						<Message>
-							<span className="text-destructive">{error.message}</span>
-							<Button className="mt-3" onClick={onRetry}>
-								<RotateCw aria-hidden /> Try again
-							</Button>
-						</Message>
-					) : loading || !items ? (
-						<Message>Searching…</Message>
-					) : items.length === 0 ? (
-						<Message>Nothing you can see has this in its name. Search for a shorter part of it, or check the spelling.</Message>
+					{message !== undefined || !items ? (
+						<Message>{message}</Message>
 					) : (
 						items.map((f) => {
 							const key = keyOfFound(f);
@@ -97,7 +124,7 @@ export function SearchList({ items, loading, error, onRetry, onOpen, onGoTo, sel
 									<td className="px-4 py-2.5">
 										<button
 											type="button"
-											title={`Go to ${where}`}
+											title={t.search.goTo(where)}
 											onClick={(e) => {
 												e.stopPropagation();
 												onGoTo(f);

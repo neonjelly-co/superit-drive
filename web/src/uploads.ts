@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, type Existing, type Item, type Listing, RESUMABLE_FROM, type Session } from "./api";
+import { t } from "./i18n";
 import { composed, freeName, nameProblem } from "./names";
 
 /** One file (or empty folder) the person chose or dropped, and how its upload is going. */
@@ -47,10 +48,6 @@ export type Question = {
 };
 
 export type Answer = Existing | "skip";
-
-/** Said when an upload that cannot resume was cut off and started again. */
-const STARTED_AGAIN =
-	"The connection dropped. The Drive storage cannot continue an upload where it stopped, so this one started again from the beginning.";
 
 type Job = {
 	key: number;
@@ -163,7 +160,7 @@ export function useUploads(placeId: number | undefined, folderId: number | null,
 					const into = parent;
 					id = (async () => {
 						const problem = nameProblem(name);
-						if (problem) throw new ApiError(400, `The folder “${name}” cannot be made: ${problem}`);
+						if (problem) throw new ApiError(400, t.uploads.folderCannotBeMade(name, problem));
 						try {
 							const folder = await api.newFolder(job.placeId, into, name);
 							changed(job.placeId, into);
@@ -247,7 +244,7 @@ export function useUploads(placeId: number | undefined, folderId: number | null,
 							// unable to resume: the whole file again.
 							if (e.more.resumable === false) {
 								s = { ...s, resumable: false, partSize: file.size };
-								if (from > 0) update(key, { note: STARTED_AGAIN });
+								if (from > 0) update(key, { note: t.uploads.startedAgain });
 							}
 							offset = e.more.offset;
 							continue;
@@ -261,7 +258,7 @@ export function useUploads(placeId: number | undefined, folderId: number | null,
 					pause = Math.min(pause * 2, 30_000);
 					try {
 						const now = await api.uploadState(placeId, s.id);
-						if (!now.resumable && now.offset === 0 && progressed > 0) update(key, { note: STARTED_AGAIN });
+						if (!now.resumable && now.offset === 0 && progressed > 0) update(key, { note: t.uploads.startedAgain });
 						s = now;
 						offset = now.offset;
 						if (now.waiting) update(key, { state: "waiting", turn: true });

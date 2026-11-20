@@ -3,6 +3,7 @@ import { ChevronRight, Folder, FolderOpen, Link2, User, Users } from "lucide-rea
 import { type ReactNode, useState } from "react";
 import { roleOf, whoCanSee, whoOf, whyOf } from "../access";
 import { type Access, type Action, api, type FolderRef, type Item, type Member, type Outside, type SeenBy } from "../api";
+import { t } from "../i18n";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
 
@@ -131,20 +132,15 @@ export function MoveDialog({ place, root, items, path, otherPlaces, me, members,
 	const node = { moving: items, here, open, toggle, chosen, choose: (p: PlaceRef, f: FolderRef | null) => setDest({ place: p, folder: f }) };
 	const where = dest ? [dest.place.name, ...(dest.folder ? [dest.folder.name] : [])].join(" › ") : "";
 	const one = items.length === 1 ? items[0] : undefined;
-	const what = one ? `“${one.name}”` : `${items.length} items`;
 	const line = (a: Access, i: number, given: string) => <AccessLine key={i} a={a} me={me} given={given} />;
 
 	if (warning && dest) {
 		return (
 			<Dialog
 				wide
-				title={`Move ${what} to “${dest.place.name}”?`}
+				title={one ? t.move.toOne(one.name, dest.place.name) : t.move.toMany(items.length, dest.place.name)}
 				description={
-					warning.becomesProjects
-						? one
-							? `It leaves your My files and becomes the project's: the managers of “${dest.place.name}” decide who has access to it, and project admins can open it.`
-							: `They leave your My files and become the project's: the managers of “${dest.place.name}” decide who has access to them, and project admins can open them.`
-						: undefined
+					warning.becomesProjects ? (one ? t.move.becomesOne(dest.place.name) : t.move.becomesMany(dest.place.name)) : undefined
 				}
 				onClose={onClose}
 				onSubmit={() => void move()}
@@ -156,45 +152,38 @@ export function MoveDialog({ place, root, items, path, otherPlaces, me, members,
 							</span>
 						)}
 						<Button variant="ghost" onClick={() => setWarning(undefined)} disabled={busy}>
-							Back
+							{t.move.back}
 						</Button>
 						<Button variant="primary" type="submit" disabled={busy}>
-							{one ? "Move it" : "Move them"}
+							{one ? t.move.moveIt : t.move.moveThem}
 						</Button>
 					</>
 				}
 			>
 				<p className="text-sm">
-					<span className="font-semibold">
-						Who will see {one ? "it" : "them"} in {where}:
-					</span>{" "}
+					<span className="font-semibold">{one ? t.move.whoWillSeeOne(where) : t.move.whoWillSeeMany(where)}</span>{" "}
 					{whoCanSee(warning.seenBy, me, members)}.
 				</p>
-				<ul aria-label="Who will see it there" className="mt-2 max-h-56 overflow-auto rounded-lg border border-border px-3 text-sm">
-					{warning.access.map((a, i) => line(a, i, "given on it, and kept"))}
+				<ul aria-label={t.move.whoWillSeeLabel} className="mt-2 max-h-56 overflow-auto rounded-lg border border-border px-3 text-sm">
+					{warning.access.map((a, i) => line(a, i, t.move.givenAndKept))}
 				</ul>
 				{warning.kept.length > 0 && (
 					<>
-						<p className="mt-3 text-sm font-semibold">Some keep access given on them, so more people see those:</p>
-						<ul aria-label="What each keeps" className="mt-2 max-h-56 overflow-auto rounded-lg border border-border px-3 text-sm">
+						<p className="mt-3 text-sm font-semibold">{t.move.someKeep}</p>
+						<ul aria-label={t.move.whatEachKeeps} className="mt-2 max-h-56 overflow-auto rounded-lg border border-border px-3 text-sm">
 							{warning.kept.map((k, i) => (
 								<li key={i} className="border-b border-border py-2 last:border-0">
 									<p className="font-medium break-words">{k.name}</p>
-									<ul>{k.access.map((a, j) => line(a, j, "given on it, and kept"))}</ul>
+									<ul>{k.access.map((a, j) => line(a, j, t.move.givenAndKept))}</ul>
 								</li>
 							))}
 						</ul>
 					</>
 				)}
-				<p className="mt-3 text-sm text-muted-foreground">
-					{one ? "It keeps" : "Each keeps"} the access given on it and on everything in it. Access from the folders{" "}
-					{one ? "it is" : "they are"} in now ends.
-				</p>
+				<p className="mt-3 text-sm text-muted-foreground">{one ? t.move.keepsOne : t.move.keepsMany}</p>
 				{warning.outside !== "on" && (
 					<p className="mt-3 text-sm text-attention">
-						Sharing outside the project is switched off{" "}
-						{warning.outside === "project" ? "for the whole project" : `for “${dest.place.name}”`}: public links and guest
-						invitations on what is moved stay, but open nothing there until it is switched back on.
+						{warning.outside === "project" ? t.move.offForProject : t.move.offForFolder(dest.place.name)}
 					</p>
 				)}
 				{problem && (
@@ -209,12 +198,8 @@ export function MoveDialog({ place, root, items, path, otherPlaces, me, members,
 	return (
 		<Dialog
 			wide
-			title={`Move ${what}`}
-			description={
-				one
-					? `Choose the folder to put ${one.kind === "folder" ? "this folder and everything in it" : "it"} in.`
-					: "Choose the folder to put them in. Folders go with everything in them."
-			}
+			title={one ? t.move.titleOne(one.name) : t.move.titleMany(items.length)}
+			description={one ? (one.kind === "folder" ? t.move.chooseForFolder : t.move.chooseForFile) : t.move.chooseForMany}
 			onClose={onClose}
 			onSubmit={() => void submit()}
 			footer={
@@ -225,25 +210,22 @@ export function MoveDialog({ place, root, items, path, otherPlaces, me, members,
 						</span>
 					)}
 					<Button variant="ghost" onClick={onClose} disabled={busy}>
-						Cancel
+						{t.common.cancel}
 					</Button>
 					<Button variant="primary" type="submit" disabled={busy || !dest || staying}>
-						{dest && dest.place.id !== place.id ? "Next" : "Move here"}
+						{dest && dest.place.id !== place.id ? t.move.next : t.move.moveHere}
 					</Button>
 				</>
 			}
 		>
-			<ul aria-label="Folders" className="max-h-72 overflow-auto rounded-lg border border-border py-1 text-sm">
+			<ul aria-label={t.common.folders} className="max-h-72 overflow-auto rounded-lg border border-border py-1 text-sm">
 				<FolderNode {...node} place={place} can="upload" folder={root} depth={0} />
 			</ul>
 			{otherPlaces.length > 0 && (
 				<>
-					<p className="mt-4 text-sm font-semibold">Or into a shared folder</p>
-					<p className="mt-0.5 text-sm text-muted-foreground">
-						{one ? "It then belongs" : "They then belong"} to the project, not to you. You see who will have access before{" "}
-						{one ? "it moves" : "they move"}.
-					</p>
-					<ul aria-label="Shared folders" className="mt-2 max-h-56 overflow-auto rounded-lg border border-border py-1 text-sm">
+					<p className="mt-4 text-sm font-semibold">{t.move.orShared}</p>
+					<p className="mt-0.5 text-sm text-muted-foreground">{one ? t.move.thenProjectsOne : t.move.thenProjectsMany}</p>
+					<ul aria-label={t.common.sharedFolders} className="mt-2 max-h-56 overflow-auto rounded-lg border border-border py-1 text-sm">
 						{otherPlaces.map((p) => (
 							<FolderNode key={p.id} {...node} place={p} can="move-in" folder={null} depth={0} />
 						))}
@@ -296,11 +278,11 @@ function FolderNode(props: NodeProps) {
 	const name = folder?.name ?? place.name;
 	const canPut = depth === 0 ? (listing.data?.can.includes(can) ?? false) : (props.canPut ?? false);
 	const note = isMoving
-		? "the folder being moved"
+		? t.move.beingMoved
 		: own && id === here
-			? "where it is now"
+			? t.move.whereNow
 			: !canPut && (depth === 0 ? listing.data !== undefined : true)
-				? "you cannot add to it"
+				? t.move.cannotAdd
 				: undefined;
 	const Icon = isOpen ? FolderOpen : Folder;
 
@@ -311,9 +293,9 @@ function FolderNode(props: NodeProps) {
 					type="button"
 					onClick={() => toggle(key)}
 					disabled={isMoving}
-					aria-label={isOpen ? `Close ${name}` : `Open ${name}`}
+					aria-label={isOpen ? t.move.closeFolder(name) : t.move.openFolder(name)}
 					aria-expanded={isOpen}
-					className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-muted disabled:invisible"
+					className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-muted disabled:invisible max-md:size-11"
 				>
 					<ChevronRight aria-hidden className={`size-4 transition-transform ${isOpen ? "rotate-90" : ""}`} />
 				</button>
@@ -322,7 +304,7 @@ function FolderNode(props: NodeProps) {
 					onClick={() => choose(place, folder)}
 					disabled={isMoving || !canPut}
 					aria-pressed={chosen === key}
-					className={`flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pr-2 pl-1 text-left disabled:text-muted-foreground ${chosen === key ? "font-semibold" : "hover:bg-muted/60"}`}
+					className={`flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pr-2 pl-1 text-left disabled:text-muted-foreground max-md:min-h-11 ${chosen === key ? "font-semibold" : "hover:bg-muted/60"}`}
 				>
 					<Icon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
 					<span className="truncate">{name}</span>
@@ -331,9 +313,9 @@ function FolderNode(props: NodeProps) {
 			</div>
 			{isOpen && (
 				<ul>
-					{listing.isPending && <Line depth={depth + 1}>Loading…</Line>}
+					{listing.isPending && <Line depth={depth + 1}>{t.common.loading}</Line>}
 					{listing.error && <Line depth={depth + 1}>{listing.error.message}</Line>}
-					{listing.data && children.length === 0 && depth === 0 && <Line depth={depth + 1}>No folders here yet.</Line>}
+					{listing.data && children.length === 0 && depth === 0 && <Line depth={depth + 1}>{t.move.noFolders}</Line>}
 					{children.map((c) => (
 						<FolderNode
 							key={c.id}

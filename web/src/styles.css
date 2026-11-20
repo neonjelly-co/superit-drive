@@ -68,3 +68,13 @@
     @apply font-sans bg-background text-foreground;
   }
 }
+
+/* The details sheet on a phone slides up from the bottom (side-panel.tsx). */
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: none;
+  }
+}

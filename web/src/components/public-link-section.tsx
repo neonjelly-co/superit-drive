@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Link2 } from "lucide-react";
 import { useId, useState } from "react";
-import { LINK_KIND_MEANS, nameOf } from "../access";
+import { nameOf } from "../access";
 import { api, type LinkKind, type PublicLink } from "../api";
 import { formatCapacity, formatChangedFull, formatSize } from "../format";
+import { t } from "../i18n";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
 
@@ -72,46 +73,39 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 
 	const current = link.data;
 	const address = current ? (current.address ?? madeHere.get(keyOf(placeId, itemId, current))) : undefined;
-	const reaches = what === "folder" ? "this folder and everything in it" : "this file";
 
 	return (
 		<section aria-labelledby={`${addressId}-title`} className="mt-6">
 			<h3 id={`${addressId}-title`} className="text-sm font-semibold">
-				Public link
+				{t.link.title}
 			</h3>
 			{link.error ? (
 				<p className="mt-2 text-sm text-destructive">{link.error.message}</p>
 			) : link.isPending ? (
-				<p className="mt-2 text-sm text-muted-foreground">Loading…</p>
+				<p className="mt-2 text-sm text-muted-foreground">{t.common.loading}</p>
 			) : !current ? (
 				<>
-					<p className="mt-0.5 text-sm text-muted-foreground">
-						{what === "folder"
-							? "Anyone with the link can use it without signing in, until the link is removed."
-							: `Anyone with the link can open and download ${reaches}, without signing in, until the link is removed.`}
-					</p>
+					<p className="mt-0.5 text-sm text-muted-foreground">{what === "folder" ? t.link.folderNone : t.link.fileNone}</p>
 					{canMake ? (
 						<>
 							{what === "folder" && <KindChoice name={`${addressId}-kind`} value={kind} disabled={busy} onChange={setKind} />}
 							<Button className="mt-3" disabled={busy} onClick={() => void make(false, what === "folder" ? kind : "view")}>
-								<Link2 aria-hidden /> Make a public link
+								<Link2 aria-hidden /> {t.link.make}
 							</Button>
 						</>
 					) : (
-						<p className="mt-2 text-sm text-muted-foreground">Sharing outside the project is switched off here.</p>
+						<p className="mt-2 text-sm text-muted-foreground">{t.link.switchedOff}</p>
 					)}
 				</>
 			) : (
 				<>
 					<p className="mt-0.5 text-sm text-muted-foreground">
-						{current.kind === "upload-only"
-							? "Anyone with the link can send files into this folder, without signing in. They cannot see what is in it."
-							: `Anyone with the link can open and download ${reaches}, without signing in.`}
+						{current.kind === "upload-only" ? t.link.uploadOnly : what === "folder" ? t.link.viewFolder : t.link.viewFile}
 					</p>
 					{address ? (
 						<div className="mt-3">
 							<label htmlFor={addressId} className="sr-only">
-								The link’s address
+								{t.link.address}
 							</label>
 							<div className="flex gap-2">
 								<input
@@ -119,26 +113,20 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 									readOnly
 									value={address}
 									onFocus={(e) => e.currentTarget.select()}
-									className="h-9 min-w-0 flex-1 rounded-md border border-input bg-muted px-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+									className="h-9 min-w-0 flex-1 rounded-md border border-input bg-muted px-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 max-md:h-11"
 								/>
 								<Button
 									onClick={() => {
 										void navigator.clipboard?.writeText(address).then(() => setCopied(true));
 									}}
 								>
-									{copied ? <Check aria-hidden /> : <Copy aria-hidden />} {copied ? "Copied" : "Copy"}
+									{copied ? <Check aria-hidden /> : <Copy aria-hidden />} {copied ? t.link.copied : t.link.copy}
 								</Button>
 							</div>
-							<p className="mt-2 text-sm text-attention">
-								Copy it now. For safety the Drive does not keep the address, so it cannot show it again once you
-								leave this page.
-							</p>
+							<p className="mt-2 text-sm text-attention">{t.link.copyNow}</p>
 						</div>
 					) : (
-						<p className="mt-2 text-sm">
-							The address was shown when the link was made. To send it to someone else, use the one you sent, or make
-							a new link: the old address then stops working.
-						</p>
+						<p className="mt-2 text-sm">{t.link.addressShown}</p>
 					)}
 					{what === "folder" && canMake && (
 						<KindChoice
@@ -150,20 +138,25 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 						/>
 					)}
 					<dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-						<dt className="text-muted-foreground">Made</dt>
+						<dt className="text-muted-foreground">{t.link.made}</dt>
 						<dd>
-							{formatChangedFull(current.made)}
-							{current.madeBy ? ` by ${nameOf(current.madeBy)}` : current.former ? " by someone no longer in the project" : ""}
+							{current.madeBy
+								? t.link.madeBy(formatChangedFull(current.made), nameOf(current.madeBy))
+								: current.former
+									? t.link.madeByFormer(formatChangedFull(current.made))
+									: formatChangedFull(current.made)}
 						</dd>
-						<dt className="text-muted-foreground">Used</dt>
+						<dt className="text-muted-foreground">{t.link.used}</dt>
 						<dd>
 							{current.uses === 0
-								? "Not yet"
-								: `${current.uses === 1 ? "Once" : `${current.uses} times`}, last on ${formatChangedFull(current.used ?? current.made)}`}
+								? t.link.notYet
+								: current.uses === 1
+									? t.link.usedOnce(formatChangedFull(current.used ?? current.made))
+									: t.link.usedTimes(current.uses, formatChangedFull(current.used ?? current.made))}
 						</dd>
 						{current.kind === "upload-only" && current.takenIn !== undefined && current.limit !== undefined && (
 							<>
-								<dt className="text-muted-foreground">Taken in</dt>
+								<dt className="text-muted-foreground">{t.link.takenIn}</dt>
 								<dd>
 									<TakenIn takenIn={current.takenIn} limit={current.limit} />
 								</dd>
@@ -171,29 +164,24 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 						)}
 					</dl>
 					{current.kind === "upload-only" && current.full && (
-						<p className="mt-2 text-sm text-attention">
-							It takes no more files until you make room. What was sent through it stays in the folder.
-						</p>
+						<p className="mt-2 text-sm text-attention">{t.link.full}</p>
 					)}
 					{!current.works && (
-						<p className="mt-2 text-sm text-attention">
-							It opens nothing at the moment: whoever made it can no longer share this, or sharing outside the project
-							is switched off here. Remove it if it is no longer needed.
-						</p>
+						<p className="mt-2 text-sm text-attention">{t.link.notWorking}</p>
 					)}
 					<div className="mt-3 flex flex-wrap gap-2">
 						{canMake && current.kind === "upload-only" && (current.takenIn ?? 0) > 0 && (
 							<Button disabled={busy} onClick={() => setAsking("reset")}>
-								Make room for more
+								{t.link.makeRoom}
 							</Button>
 						)}
 						{canMake && (
 							<Button disabled={busy} onClick={() => setAsking("replace")}>
-								Make a new link
+								{t.link.makeNew}
 							</Button>
 						)}
 						<Button variant="danger" disabled={busy} onClick={() => setAsking("remove")}>
-							Remove link
+							{t.link.remove}
 						</Button>
 					</div>
 				</>
@@ -205,11 +193,9 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 			)}
 			{asking && current && (
 				<Dialog
-					title={QUESTIONS[asking].title}
+					title={questions()[asking].title}
 					description={
-						asking === "reset" && current.limit !== undefined
-							? `It takes in up to ${formatCapacity(current.limit)} again, counted from now. The files it took in stay where they are.`
-							: QUESTIONS[asking].description
+						asking === "reset" && current.limit !== undefined ? t.link.resetNote(formatCapacity(current.limit)) : questions()[asking].description
 					}
 					onClose={() => setAsking(undefined)}
 					onSubmit={() => {
@@ -220,9 +206,9 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 					}}
 					footer={
 						<>
-							<Button onClick={() => setAsking(undefined)}>Cancel</Button>
+							<Button onClick={() => setAsking(undefined)}>{t.common.cancel}</Button>
 							<Button type="submit" variant={asking === "remove" ? "danger" : "primary"} disabled={busy}>
-								{QUESTIONS[asking].confirm}
+								{questions()[asking].confirm}
 							</Button>
 						</>
 					}
@@ -233,25 +219,12 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 }
 
 /** What each change asks before it is made. A reset's description says the link's limit, so it is made there. */
-const QUESTIONS: Record<Asking, { title: string; description: string; confirm: string }> = {
-	remove: {
-		title: "Remove the public link?",
-		description: "Nobody can open it any more, and it cannot be brought back. A new link would get a new address.",
-		confirm: "Remove link",
-	},
-	replace: {
-		title: "Make a new public link?",
-		description: "The address you sent stops working for good. Only the new address opens it.",
-		confirm: "Make a new link",
-	},
-	show: {
-		title: "Let people with the link see this folder?",
-		description:
-			"Everyone who has the address can then open and download everything in this folder, including what others sent through it. The address stays the same.",
-		confirm: "Let them see it",
-	},
-	reset: { title: "Make room for more files?", description: "", confirm: "Make room" },
-};
+const questions = (): Record<Asking, { title: string; description: string; confirm: string }> => ({
+	remove: { title: t.link.removeTitle, description: t.link.removeNote, confirm: t.link.remove },
+	replace: { title: t.link.replaceTitle, description: t.link.replaceNote, confirm: t.link.makeNew },
+	show: { title: t.link.showTitle, description: t.link.showNote, confirm: t.link.showConfirm },
+	reset: { title: t.link.resetTitle, description: "", confirm: t.link.resetConfirm },
+});
 
 /** The choice of what a folder's public link lets people do. */
 function KindChoice({
@@ -267,9 +240,9 @@ function KindChoice({
 }) {
 	return (
 		<fieldset className="mt-3" disabled={disabled}>
-			<legend className="text-sm font-medium">People with the link can</legend>
+			<legend className="text-sm font-medium">{t.link.peopleCan}</legend>
 			{(["view", "upload-only"] as const).map((k) => (
-				<label key={k} className="flex cursor-pointer gap-2.5 rounded-md py-1.5 text-sm">
+				<label key={k} className="flex cursor-pointer gap-2.5 rounded-md py-1.5 text-sm max-md:py-3">
 					<input
 						type="radio"
 						name={name}
@@ -279,8 +252,8 @@ function KindChoice({
 						className="mt-0.5 size-4 shrink-0 accent-foreground"
 					/>
 					<span>
-						<span className="font-medium">{LINK_KIND_MEANS[k].name}</span>
-						<span className="block text-muted-foreground">{LINK_KIND_MEANS[k].means}</span>
+						<span className="font-medium">{k === "view" ? t.link.viewName : t.link.uploadName}</span>
+						<span className="block text-muted-foreground">{k === "view" ? t.link.viewMeans : t.link.uploadMeans}</span>
 					</span>
 				</label>
 			))}
@@ -291,13 +264,13 @@ function KindChoice({
 /** How much an upload-only link has taken in, against its limit. */
 function TakenIn({ takenIn, limit }: { takenIn: number; limit: number }) {
 	const share = limit > 0 ? Math.min(1, takenIn / limit) : 1;
-	const words = `${takenIn === 0 ? "Nothing yet" : formatSize(takenIn)} of ${formatCapacity(limit)}`;
+	const words = t.link.takenInOf(takenIn === 0 ? t.link.nothingYet : formatSize(takenIn), formatCapacity(limit));
 	return (
 		<>
 			<span>{words}</span>
 			<div
 				role="meter"
-				aria-label="Taken in through the link"
+				aria-label={t.link.takenInLabel}
 				aria-valuemin={0}
 				aria-valuemax={limit}
 				aria-valuenow={Math.min(takenIn, limit)}
