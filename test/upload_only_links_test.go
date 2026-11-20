@@ -725,6 +725,10 @@ func TestFilesRacingThroughALinkNeverPassItsLimit(t *testing.T) {
 	if got := takenIn(t, b, x.place, x.clients.ID); got != limit {
 		t.Fatalf("taken in after the cut-off file and one that fits: %d", got)
 	}
+	// A stranger hanging up writes nothing to the log: anyone with the address could fill it so.
+	if logs := d.Logs(); strings.Contains(logs, "ended before") || strings.Contains(logs, "before it all arrived") {
+		t.Fatalf("the Drive logged a file cut off by its sender:\n%s", logs)
+	}
 	if got := clientsOnStorage(t, d); slices.Contains(got, "cut.bin") || slices.Contains(got, "late.bin") || !slices.Contains(got, "fits.bin") {
 		t.Fatalf("Clients after a file was cut off: %q", got)
 	}
