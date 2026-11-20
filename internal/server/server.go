@@ -171,8 +171,9 @@ func (s *Server) Handler() http.Handler {
 		}
 		mux.Handle(rt.pattern, s.guard(rt))
 	}
-	// Anything else is still identified first, so an outsider learns nothing from a wrong address; under the public
-	// prefix, it is answered as a link that does not exist.
+	// Anything else is still identified first, so an outsider learns nothing from a wrong address. Under the public
+	// prefix, anything else is a visitor's too: its pattern holds no token, so it is looked up as a token that is not
+	// there, the same way as any other, and answered as a link that does not exist (or 405, for a change).
 	mux.Handle("/", s.guard(route{pattern: "/", action: access.Enter, serve: s.notFound}))
 	mux.Handle(PublicPrefix, s.guard(route{pattern: PublicPrefix, link: "token", action: access.SeeThroughLink}))
 	return securityHeaders(mux)

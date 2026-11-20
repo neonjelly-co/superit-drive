@@ -583,8 +583,12 @@ func TestALinkFollowsItsItem(t *testing.T) {
 		t.Fatalf("Price list.pdf through its link after it was replaced: %d %s", res.Status, res.Body)
 	}
 
-	// Moved from Bence's My files into a shared folder, it becomes the project's, and its link goes with it.
+	// Moved from Bence's My files into a shared folder, it becomes the project's, and its link goes with it: the warning
+	// before the move says so.
 	team := madeSharedFolder(t, b, "Team")
+	if p, _ := preview(t, b, x.place, x.bakery.ID, team.ID, 0); !p.SeenBy.Link || !slices.Contains(accessLines(p.Access), "link viewer (here)") {
+		t.Fatalf("who would see Bakery in Team: %+v", p)
+	}
 	ok(t, "moving Bakery into Team", moveInto(t, b, x.place, x.bakery.ID, team.ID, 0))
 	if p := readPage(t, v, page); p.name != "Bakery Ltd" || !slices.Contains(p.rows, "Notes.txt") {
 		t.Fatalf("the link after Bakery moved into Team: %+v", p)
@@ -643,6 +647,12 @@ func TestWhoMayMakeSeeAndRemoveALink(t *testing.T) {
 	}
 	if l := list(t, b, x.place, 0); named(t, l.Items, "Clients").SeenBy.Link {
 		t.Fatal("Clients, above the link, is said to be seen by anyone with it")
+	}
+	if items, _ := sharedWithMe(t, o); len(items) != 1 || items[0].Name != "Bakery" || !items[0].SeenBy.Link {
+		t.Fatalf("Dóra's Shared with me: %+v", items)
+	}
+	if found, _, _ := search(t, o, "Ledger"); len(found) != 1 || !found[0].SeenBy.Link {
+		t.Fatalf("Dóra's search for Ledger: %+v", found)
 	}
 
 	// An editor of Bakery makes a link inside it, and the owner sees it, with who made it, and removes it.
