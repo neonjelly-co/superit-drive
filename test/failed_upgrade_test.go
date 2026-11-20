@@ -230,10 +230,12 @@ func TestANewerCopyThatCannotBeMovedAsideStaysWhereItIs(t *testing.T) {
 	x, _, _ := sharedBeforeTheCopy(t, d)
 	u := upgradeFailed(t, d, x, true)
 
+	// A file in the way for every second of the next twenty, a name being the time to the second.
 	folder := ".superit-drive/index/" + storageID(t, d)
-	until := time.Now().Add(20 * time.Second)
+	from := time.Now().UTC().Truncate(time.Second)
+	until := from.Add(20 * time.Second)
 	inTheWay := map[string]bool{}
-	for at := time.Now().UTC().Truncate(time.Second); at.Before(until); at = at.Add(time.Second) {
+	for at := from; at.Before(until); at = at.Add(time.Second) {
 		name := "newer-version-" + at.UTC().Format("20060102T150405Z") + "-" + copyFileName(u.seq)
 		d.Storage.Put(t, folder+"/"+name, "in the way")
 		inTheWay[name] = true
@@ -255,7 +257,7 @@ func TestANewerCopyThatCannotBeMovedAsideStaysWhereItIs(t *testing.T) {
 	}
 
 	// Nothing is in the way any more: the copy after the next access change moves it aside.
-	time.Sleep(time.Until(until))
+	time.Sleep(time.Until(until) + 100*time.Millisecond)
 	before := len(copiesMade(d))
 	ok(t, "sharing Notes.txt with Dóra", share(t, d.As(bence), x.place, x.notes.ID, dora, "viewer"))
 	copiesSettled(t, d, before)
