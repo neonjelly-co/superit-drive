@@ -14,9 +14,11 @@ import (
 // visitors do.
 type Link struct {
 	ID int64
-	// Item is the id of the item the link is on, and Place the place that item is in now.
+	// Item is the id of the item the link is on, and Place the place that item is in now; Folder says whether that item
+	// is a folder.
 	Item, Place int64
-	// Kind is what it lets visitors do: "view".
+	Folder      bool
+	// Kind is what it lets visitors do: ViewLink or UploadLink.
 	Kind string
 	// Made is when it was made, and MadeBy the user id of the member who made it.
 	Made   time.Time
@@ -24,7 +26,16 @@ type Link struct {
 	// Uses is how often it was used, and Used when it last was (zero before its first use), as written so far.
 	Uses int64
 	Used time.Time
+	// TakenIn is, for an upload-only link, how many bytes of files it has taken in since it was made or last reset.
+	TakenIn int64
 }
+
+// The kinds of link: a view link lets visitors see and download what it is on; an upload-only link, on a folder only,
+// lets them put new files into it and see nothing.
+const (
+	ViewLink   = "view"
+	UploadLink = "upload-only"
+)
 
 // ErrNoLink is returned when there is no such link.
 var ErrNoLink = errors.New("no such link")
@@ -32,14 +43,19 @@ var ErrNoLink = errors.New("no such link")
 // ErrLinkExists is returned when an item that has a link is given another without replacing it.
 var ErrLinkExists = errors.New("the item has a public link already")
 
+// ErrLinkKind is returned for a link of a kind that cannot be on its item: an upload-only link on a file, or a kind
+// there is not.
+var ErrLinkKind = errors.New("a link of this kind cannot be on this item")
+
 // linkColumns are read by scanLink, in this order. Every query of links joins the item it is on, for its place.
-const linkColumns = "links.id, links.item_id, items.place_id, links.kind, links.made_at, links.made_by, links.uses, links.used_at"
+const linkColumns = "links.id, links.item_id, items.place_id, items.is_folder, links.kind, links.made_at, links.made_by, links.uses, " +
+	"links.used_at, links.taken_in"
 
 func scanLink(row interface{ Scan(...any) error }, more ...any) (Link, error) {
 	var l Link
 	var made int64
 	var used sql.NullInt64
-	err := row.Scan(append([]any{&l.ID, &l.Item, &l.Place, &l.Kind, &made, &l.MadeBy, &l.Uses, &used}, more...)...)
+	err := row.Scan(append([]any{&l.ID, &l.Item, &l.Place, &l.Folder, &l.Kind, &made, &l.MadeBy, &l.Uses, &used, &l.TakenIn}, more...)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Link{}, ErrNoLink
 	}
@@ -105,14 +121,24 @@ func (x *Index) LinksInside(ctx context.Context, placeID, folderID int64) ([]Lin
 		placeID, folderID))
 }
 
+// linkFits says whether a link of kind can be on it: a view link on anything, an upload-only link on a folder only.
+func linkFits(kind string, it Item) bool {
+	return kind == ViewLink || (kind == UploadLink && it.Folder)
+}
+
 // MakeLink records a new link of kind on a live item of the place (ErrNoItem otherwise), whose token's SHA-256 is hash,
-// made by the member by at the time given. When the item has a link already, replace says to remove it first, and so
-// end its address; without it, nothing changes and the error is ErrLinkExists.
+// made by the member by at the time given. An upload-only link goes on a folder only (ErrLinkKind otherwise). When the
+// item has a link already, replace says to remove it first, and so end its address; without it, nothing changes and the
+// error is ErrLinkExists.
 func (x *Index) MakeLink(ctx context.Context, placeID, itemID int64, hash []byte, kind, by string, at time.Time, replace bool) (Link, error) {
 	var id int64
 	err := x.write(ctx, func(tx *sql.Tx) error {
-		if _, err := item(ctx, tx, placeID, itemID); err != nil {
+		it, err := item(ctx, tx, placeID, itemID)
+		if err != nil {
 			return err
+		}
+		if !linkFits(kind, it) {
+			return ErrLinkKind
 		}
 		if replace {
 			if _, err := tx.ExecContext(ctx, "DELETE FROM links WHERE item_id = ?", itemID); err != nil {
@@ -136,6 +162,61 @@ func (x *Index) MakeLink(ctx context.Context, placeID, itemID int64, hash []byte
 	}
 	return scanLink(x.db.QueryRowContext(ctx, "SELECT "+linkColumns+`
 		FROM links JOIN items ON items.id = links.item_id WHERE links.id = ?`, id))
+}
+
+// SetLinkKind changes what the link on a live item of the place lets visitors do, keeping its address, its uses and what
+// it has taken in: ErrNoLink when the item has none, ErrLinkKind for an upload-only link on a file.
+func (x *Index) SetLinkKind(ctx context.Context, placeID, itemID int64, kind string) (Link, error) {
+	err := x.write(ctx, func(tx *sql.Tx) error {
+		it, err := item(ctx, tx, placeID, itemID)
+		if err != nil {
+			return err
+		}
+		if !linkFits(kind, it) {
+			return ErrLinkKind
+		}
+		// Only when it changes: the same kind again is no access change.
+		_, err = tx.ExecContext(ctx, "UPDATE links SET kind = ? WHERE item_id = ? AND kind != ?", kind, itemID, kind)
+		return err
+	})
+	if err != nil {
+		return Link{}, err
+	}
+	return x.LinkOn(ctx, itemID)
+}
+
+// ResetLink starts the count of what the link on a live item of the place has taken in again from 0: ErrNoLink when the
+// item has none.
+func (x *Index) ResetLink(ctx context.Context, placeID, itemID int64) (Link, error) {
+	err := x.write(ctx, func(tx *sql.Tx) error {
+		if _, err := item(ctx, tx, placeID, itemID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, "UPDATE links SET taken_in = 0 WHERE item_id = ?", itemID)
+		return err
+	})
+	if err != nil {
+		return Link{}, err
+	}
+	return x.LinkOn(ctx, itemID)
+}
+
+// LinkByID finds a link by its id, wherever its item is (ErrNoLink when there is none).
+func (x *Index) LinkByID(ctx context.Context, id int64) (Link, error) {
+	return scanLink(x.db.QueryRowContext(ctx, "SELECT "+linkColumns+`
+		FROM links JOIN items ON items.id = links.item_id WHERE links.id = ?`, id))
+}
+
+// TakenIn adds n bytes to what the link with id has taken in. A link removed meanwhile is left out. It is not an access
+// change: the trigger that counts those leaves taken_in out.
+func (x *Index) TakenIn(ctx context.Context, id, n int64) error {
+	if n <= 0 {
+		return nil
+	}
+	return x.write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE links SET taken_in = taken_in + ? WHERE id = ?", n, id)
+		return err
+	})
 }
 
 // RemoveLink removes the link on a live item of the place, if it has one: its address is dead for good.

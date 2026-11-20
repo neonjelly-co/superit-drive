@@ -129,10 +129,17 @@ type Drive struct {
 	stopAt func(point string)
 }
 
-// By is who does something that is recorded: a member, by user id, or a guest (Member is then "").
+// By is who does something that is recorded: a member, by user id, a guest (Member is then ""), or a visitor through
+// the public link with the id Link (both are then empty).
 type By struct {
 	Member string
 	Guest  index.Guest
+	Link   int64
+}
+
+// added is who added an item from outside the project, as the index labels it: a guest, or a visitor through a link.
+func (b By) added() index.AddedBy {
+	return index.AddedBy{Guest: b.Guest.Address, Link: b.Link != 0}
 }
 
 // Now is the Drive's clock: what it dates things by, and decides end dates on.

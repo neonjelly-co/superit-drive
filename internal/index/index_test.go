@@ -36,7 +36,7 @@ func place(t *testing.T, x *Index, owner string) Place {
 
 func put(t *testing.T, x *Index, p Place, folderID int64, name string, folder bool, size int64) Item {
 	t.Helper()
-	it, err := x.PutItem(context.Background(), p.ID, folderID, Seen{Name: name, Folder: folder, Size: size, Changed: time.Now()}, time.Now(), "")
+	it, err := x.PutItem(context.Background(), p.ID, folderID, Seen{Name: name, Folder: folder, Size: size, Changed: time.Now()}, time.Now(), AddedBy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -860,7 +860,7 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 	never := func(string) bool { return false }
 	for what, err := range map[string]error{
 		"an upload into Bakery, through Bence's My files": func() error {
-			_, err := x.PutItem(ctx, bence.ID, bakery.ID, Seen{Name: "Late.txt"}, now, "")
+			_, err := x.PutItem(ctx, bence.ID, bakery.ID, Seen{Name: "Late.txt"}, now, AddedBy{})
 			return err
 		}(),
 		"a listing of Bakery, through Bence's My files": func() error {
@@ -1165,5 +1165,75 @@ func TestTheWalkOrder(t *testing.T) {
 		if _, ok := ParseWalkStep(bad); ok {
 			t.Errorf("%q read as a step", bad)
 		}
+	}
+}
+
+// A folder's link is a view link or an upload-only one; a file's only a view link. Changing the kind keeps the link's
+// address, its uses and what it has taken in; a reset starts that count again.
+func TestALinksKind(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	p := place(t, x, "u1")
+	folder := put(t, x, p, 0, "Clients", true, 0)
+	file := put(t, x, p, 0, "Offer.pdf", false, 5)
+	now := time.Now()
+	hash := func(b byte) []byte { return bytes.Repeat([]byte{b}, 32) }
+
+	for what, kind := range map[string]string{"an upload-only link": UploadLink, "a kind there is not": "edit", "no kind": ""} {
+		if _, err := x.MakeLink(ctx, p.ID, file.ID, hash(1), kind, "u1", now, false); !errors.Is(err, ErrLinkKind) {
+			t.Errorf("%s on a file: %v", what, err)
+		}
+	}
+	if _, err := x.MakeLink(ctx, p.ID, folder.ID, hash(1), "edit", "u1", now, false); !errors.Is(err, ErrLinkKind) {
+		t.Errorf("a link of a kind there is not on a folder: %v", err)
+	}
+	if _, err := x.MakeLink(ctx, p.ID, file.ID, hash(2), ViewLink, "u1", now, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.SetLinkKind(ctx, p.ID, file.ID, UploadLink); !errors.Is(err, ErrLinkKind) {
+		t.Errorf("a file's link made upload-only: %v", err)
+	}
+	if l, _ := x.LinkOn(ctx, file.ID); l.Kind != ViewLink {
+		t.Errorf("the file's link after that: %+v", l)
+	}
+
+	up, err := x.MakeLink(ctx, p.ID, folder.ID, hash(3), UploadLink, "u1", now, false)
+	if err != nil || up.Kind != UploadLink || !up.Folder || up.TakenIn != 0 {
+		t.Fatalf("an upload-only link on a folder: %+v %v", up, err)
+	}
+	if err := x.TakenIn(ctx, up.ID, 700); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.AddUses(ctx, map[int64]Use{up.ID: {Count: 2, Last: now}}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink)
+	if err != nil || view.ID != up.ID || view.Kind != ViewLink || view.TakenIn != 700 || view.Uses != 2 {
+		t.Fatalf("the link made a view link: %+v %v", view, err)
+	}
+	if l, _, err := x.LinkByToken(ctx, hash(3)); err != nil || l.ID != up.ID {
+		t.Fatalf("the link's address after its kind changed: %+v %v", l, err)
+	}
+	back, err := x.SetLinkKind(ctx, p.ID, folder.ID, UploadLink)
+	if err != nil || back.Kind != UploadLink {
+		t.Fatalf("the link made upload-only again: %+v %v", back, err)
+	}
+	reset, err := x.ResetLink(ctx, p.ID, folder.ID)
+	if err != nil || reset.TakenIn != 0 || reset.Uses != 2 {
+		t.Fatalf("the link reset: %+v %v", reset, err)
+	}
+	other := put(t, x, p, 0, "Bakery", true, 0)
+	if _, err := x.SetLinkKind(ctx, p.ID, other.ID, ViewLink); !errors.Is(err, ErrNoLink) {
+		t.Errorf("the kind of a link a folder does not have: %v", err)
+	}
+	if _, err := x.ResetLink(ctx, p.ID, other.ID); !errors.Is(err, ErrNoLink) {
+		t.Errorf("resetting a link a folder does not have: %v", err)
+	}
+	// Taken in through a link removed meanwhile: nothing, and no error.
+	if err := x.RemoveLink(ctx, p.ID, folder.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.TakenIn(ctx, up.ID, 5); err != nil {
+		t.Fatalf("taken in through a link removed meanwhile: %v", err)
 	}
 }
