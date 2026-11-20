@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -341,11 +342,6 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
 	} else {
 		checking = s.drive.Recheck(*c.place, folder)
 	}
-	items, err := s.drive.Children(r.Context(), *c.place, folder)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
 	inside, err := s.drive.GrantsInside(r.Context(), *c.place, folder)
 	if err != nil {
 		s.fail(w, r, err)
@@ -376,16 +372,68 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request, c call) {
 	}
 	who := personOf(c.member)
 	list := s.members.Current()
-	out := make([]listedJSON, 0, len(items))
-	for _, it := range items {
-		where := here.Below(it.ID, givenOn[it.ID]).WithLinks(linkOn[it.ID]...)
-		out = append(out, listedJSON{itemJSON: itemOf(it), Can: can(who, where), SeenBy: seenBy(list, where)})
-	}
 	open, fromTop := openPath(who, c.access, folders)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"items": out, "path": pathOf(open), "fromTop": fromTop,
-		"role": access.RoleAt(who, c.access), "can": can(who, c.access), "checking": checking,
+	head, err := json.Marshal(map[string]any{
+		"path": pathOf(open), "fromTop": fromTop, "role": access.RoleAt(who, c.access), "can": can(who, c.access),
+		"checking": checking,
 	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	// A folder can hold thousands of items (10,000 put on the storage directly, more uploaded through the Drive): they
+	// are read from the index a page at a time and sent as they are made, so a list costs the Drive the same little
+	// memory whatever its length, however many are asked for at once.
+	first, more, err := s.drive.ChildrenPage(r.Context(), *c.place, folder, nil, listPage)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	out := bufio.NewWriterSize(w, 32<<10)
+	_, _ = out.Write(head[:len(head)-1])
+	_, _ = out.WriteString(`,"items":[`)
+	sent := 0
+	for page := first; ; {
+		for _, it := range page {
+			where := here.Below(it.ID, givenOn[it.ID]).WithLinks(linkOn[it.ID]...)
+			item, err := json.Marshal(listedJSON{itemJSON: itemOf(it), Can: can(who, where), SeenBy: seenBy(list, where)})
+			if err != nil {
+				s.cutShort(r, err)
+			}
+			if sent > 0 {
+				_ = out.WriteByte(',')
+			}
+			if _, err := out.Write(item); err != nil {
+				return // the person has gone
+			}
+			sent++
+		}
+		if !more {
+			break
+		}
+		last := page[len(page)-1]
+		if page, more, err = s.drive.ChildrenPage(r.Context(), *c.place, folder, &last, listPage); err != nil {
+			s.cutShort(r, err)
+		}
+	}
+	_, _ = out.WriteString("]}\n")
+	_ = out.Flush()
+}
+
+// listPage is how many items of a folder a listing reads from the index at a time.
+const listPage = 500
+
+// cutShort ends an answer that has begun, after a failure that leaves it unfinished: the connection is ended, so the
+// browser sees it failed rather than take a part for the whole.
+func (s *Server) cutShort(r *http.Request, err error) {
+	if r.Context().Err() == nil {
+		s.log.Error("an answer was cut short", "route", r.Pattern, "error", err)
+	}
+	panic(http.ErrAbortHandler)
 }
 
 // openPath is the part of a path of folders (from the top of a place down) that the person can open. where must be

@@ -327,10 +327,11 @@ func (d *Drive) Item(ctx context.Context, p index.Place, id int64) (index.Item, 
 	return d.index.Item(ctx, p.ID, id)
 }
 
-// Children is what the index holds in a folder of the place (nil: its top folder), folders first, then by name. It
-// does not ask the storage, and takes no lock: a look at the folder on the storage (Recheck) brings the index in step.
-func (d *Drive) Children(ctx context.Context, p index.Place, folder *index.Item) ([]index.Item, error) {
-	return d.index.Children(ctx, p.ID, folderID(folder))
+// ChildrenPage is what the index holds in a folder of the place (nil: its top folder), folders first, then by name: at
+// most limit items, after the item after (nil: from the first), and whether there are more. It does not ask the storage,
+// and takes no lock: a look at the folder on the storage (Recheck) brings the index in step.
+func (d *Drive) ChildrenPage(ctx context.Context, p index.Place, folder *index.Item, after *index.Item, limit int) ([]index.Item, bool, error) {
+	return d.index.ChildrenAfter(ctx, p.ID, folderID(folder), after, limit)
 }
 
 // ensureTop makes the place's top folder on the storage if it has gone (someone removed it directly), before something

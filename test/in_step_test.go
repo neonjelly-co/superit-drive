@@ -211,6 +211,26 @@ func TestAFileReplacedOnTheStorage(t *testing.T) {
 	}
 	sameAsNoLink(t, "b.txt's link once another file took its name", v.Get(t, pageB), missing)
 	sameAsNoLink(t, "b.txt's link, its file", v.Get(t, inLink(pageB, b.ID, "/download")), missing)
+
+	// A member's own upload where a hidden item was is a new item too: it never takes over the hidden one's link.
+	e := uploaded(t, c, placeID, "e.txt", []byte("first"))
+	_, pageE := madeLink(t, d, c, placeID, e.ID, false)
+	d.Storage.Delete(t, rekasTop+"/e.txt", false)
+	list(t, c, placeID, 0)
+	if again := uploaded(t, c, placeID, "e.txt", []byte("uploaded anew")); again.ID == e.ID {
+		t.Fatal("an upload where a hidden item was took over its id")
+	}
+	sameAsNoLink(t, "e.txt's link once an upload took its name", v.Get(t, pageE), missing)
+
+	// A change asked for on a file gone from the storage answers that it is gone, and hides it.
+	f := uploaded(t, c, placeID, "f.txt", []byte("f"))
+	d.Storage.Delete(t, rekasTop+"/f.txt", false)
+	if res := rename(t, c, placeID, f.ID, "g.txt"); res.Status != http.StatusNotFound || !strings.Contains(errorOf(t, res), "no longer") {
+		t.Fatalf("renaming a file gone from the storage: %d %s", res.Status, res.Body)
+	}
+	if l := c.Get(t, listPath(placeID, 0)); strings.Contains(string(l.Body), `"f.txt"`) {
+		t.Fatalf("the list from the index still holds f.txt: %s", l.Body)
+	}
 }
 
 // The storage holds the Drive's mark, .superit-drive/storage-id, with the id its index keeps. Without it (a storage

@@ -69,9 +69,8 @@ func (d *Drive) Refresh(ctx context.Context, p index.Place, folder *index.Item) 
 	if errors.Is(err, ErrGone) || errors.Is(err, index.ErrNoItem) {
 		return ErrGone
 	}
-	if err != nil && ctx.Err() == nil && !errors.Is(err, index.ErrChanged) {
-		d.log.Warn("a folder could not be looked at on the storage; the index is used as it is", "place", p.ID,
-			"folder", folderID(folder), "error", err)
+	if err != nil && ctx.Err() == nil {
+		d.lookFailed(p, folderID(folder), err) // logged now and then; the index is used as it is
 	}
 	return ctx.Err()
 }

@@ -22,7 +22,7 @@ import (
 //
 // Where it is (the last folder it finished) is kept in the index after every folder, so a walk interrupted by a restart
 // goes on from there. Its memory does not grow with the storage: it keeps one folder's entries at a time, at most
-// MaxFolderEntries.
+// MaxFolderEntries. It logs when it starts (or goes on), every walkProgress folders, and when it ends, with what it found.
 
 // Walking says when the walk runs.
 type Walking struct {
@@ -41,11 +41,14 @@ var DefaultWalking = Walking{First: time.Minute, Every: 6 * time.Hour, Pause: 50
 // maxRest is the longest the walk rests after one folder.
 const maxRest = time.Minute
 
+// walkProgress is how many folders the walk looks at between the lines it logs on its way.
+const walkProgress = 1000
+
 // What the index keeps about the walk (index.State).
 const (
 	walkCursor   = "walk_cursor"   // the last step finished, while a walk is under way
-	walkStarted  = "walk_started"  // when the walk under way started (unix milliseconds)
-	walkFinished = "walk_finished" // when the last walk ended (unix milliseconds)
+	walkStarted  = "walk_started"  // when the walk under way started (unix milliseconds, by the computer's own clock)
+	walkFinished = "walk_finished" // when the last walk ended (the same)
 )
 
 // Walk walks the storage now and then, as w says, until ctx ends.
@@ -96,7 +99,7 @@ func (d *Drive) walk(ctx context.Context, pause time.Duration) error {
 	if resuming {
 		d.log.Info("the walk through the storage goes on from where it was", "after", step.String())
 	} else {
-		if err := d.index.SetState(ctx, walkStarted, strconv.FormatInt(d.now().UnixMilli(), 10)); err != nil {
+		if err := d.index.SetState(ctx, walkStarted, strconv.FormatInt(time.Now().UnixMilli(), 10)); err != nil {
 			return err
 		}
 		if err := d.index.SetState(ctx, walkCursor, step.String()); err != nil {
@@ -119,6 +122,10 @@ func (d *Drive) walk(ctx context.Context, pause time.Duration) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if n := w.folders + w.trashes; n%walkProgress == 0 {
+			d.log.Info("the walk through the storage goes on", "folders", w.folders, "trashes", w.trashes, "at", next.String(),
+				"took", time.Since(began).Round(time.Second).String())
+		}
 		step = next
 		if err := d.index.SetState(ctx, walkCursor, step.String()); err != nil {
 			return err
@@ -134,7 +141,7 @@ func (d *Drive) walk(ctx context.Context, pause time.Duration) error {
 	}
 	d.unknownTopFolders(ctx)
 
-	if err := d.index.SetState(ctx, walkFinished, strconv.FormatInt(d.now().UnixMilli(), 10)); err != nil {
+	if err := d.index.SetState(ctx, walkFinished, strconv.FormatInt(time.Now().UnixMilli(), 10)); err != nil {
 		return err
 	}
 	if err := d.index.SetState(ctx, walkCursor, ""); err != nil {

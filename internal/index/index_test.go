@@ -1032,6 +1032,25 @@ func TestFirstChildren(t *testing.T) {
 	if got, more, _ := x.FirstChildren(ctx, p.ID, 0, 4); more || len(got) != 4 {
 		t.Fatalf("all 4: %d, more %v", len(got), more)
 	}
+	// Page after page, the whole list in the same order, each once: folders first, then files.
+	put(t, x, p, 0, "A", true, 0)
+	all, _ := x.Children(ctx, p.ID, 0)
+	var paged []string
+	var after *Item
+	for {
+		page, more, err := x.ChildrenAfter(ctx, p.ID, 0, after, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		paged = append(paged, namesOf(page)...)
+		if !more {
+			break
+		}
+		after = &page[len(page)-1]
+	}
+	if want := namesOf(all); !slices.Equal(paged, want) || !slices.Equal(want, []string{"A", "B", "a.txt", "b.txt", "c.txt"}) {
+		t.Fatalf("page by page: %q, all at once: %q", paged, want)
+	}
 }
 
 // The trash follows the storage by entry: an item whose entry is gone is hidden, and dropped only when a later look
