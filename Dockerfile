@@ -26,9 +26,11 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
  && mkdir -p /out/data /out/tmp && chmod 1777 /out/tmp
 
 FROM scratch
-# Certificates to check the storage's HTTPS; a writable /tmp for SQLite; /data for the index.
+# Certificates to check the storage's HTTPS; a /tmp the Drive's user can write, where SQLite puts a temporary file when
+# one change or one sort is too large to keep in memory (COPY copies what is in a folder, not the folder itself, so the
+# folder made here gets its owner from --chown); /data for the index.
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /out/tmp /tmp
+COPY --from=build --chown=65532:65532 /out/tmp /tmp
 COPY --from=build --chown=65532:65532 /out/data /data
 COPY --from=build /out/superit-drive /superit-drive
 USER 65532:65532

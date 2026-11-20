@@ -15,7 +15,9 @@ guest, My files, shared folder, Drive storage, trash). The Drive also runs witho
 - One Go binary. The interface (TypeScript and React, in `web/`) is compiled into it as static files.
 - Files live on the storage as a readable folder tree with real names. The index, one SQLite file in the data
   folder, holds the places, the folder tree, the access given on places and items and (as later tickets add them)
-  links and guests. The storage wins for which files exist; the index alone holds access.
+  links and guests. The storage wins for which files exist; the index alone holds access. Lists come from the index,
+  and the Drive looks at the storage again when a folder is opened and in a slow walk now and then, so changes made on
+  the storage directly reach the index (see [Keeping in step with the storage](#keeping-in-step-with-the-storage)).
 - Members do not sign in to the Drive. A reverse proxy in front of it signs them in and adds headers saying who they
   are (see below). Everyone else comes in under one public prefix, `/s/`, which the reverse proxy opens without sign-in:
   so far, visitors with a public link (see [Public links](#public-links)). Every route passes through one authorisation
@@ -123,6 +125,7 @@ Shared folders/
     uploads/
         3f9c0b…e1                           one file per upload while its bytes arrive, named after a random id;
                                             moved into its folder when whole
+    storage-id                              the Drive's mark: the id of the storage, which the index keeps too
 ```
 
 Files and folders keep their real names, up to 255 bytes, exactly as given; the interface sends names in Unicode's
@@ -144,16 +147,111 @@ on. A file never replaces a folder. The name is looked at again when the upload 
 **The trash.** Deleting moves the item, with everything in it, into the place's trash on the storage; restoring
 moves it back to the folder it came from (or the place's top folder when that folder is gone), adding ` (2)` to its
 name if the name is taken there. Items keep their ids throughout. The Drive removes an item for good 30 days after it
-was deleted: when it starts, every hour, and before showing the Trash view. Entries in a trash that the index does not
-know (left by a change the Drive did not finish) are removed once the day in their names is 30 days past.
+was deleted: when it starts, every hour, and before showing the Trash view. An entry in a trash that the index does
+not know (left by a change the Drive did not finish, put back by a rollback, or put there directly), named as an entry
+and holding exactly one file or folder, is shown in the Trash as deleted on the day its name says, by nobody the Drive
+knows, going back to the place's top folder; any other is removed once the day in its name is 30 days past.
 
 **Space used** is the Drive's own sum of the sizes of the files its index knows, in every place, the trash included,
 shown in the sidebar as "about" against `DRIVE_CAPACITY` (or alone, without it). Files put on the storage directly
-count once the Drive has listed their folder; uploads in progress count once they are in their folder.
+count once the Drive has looked at their folder (opened, or walked through); files gone from it count until they are
+dropped from the index; uploads in progress count once they are in their folder.
 
 An upload nothing has arrived for in a day is removed, with its file, when the Drive starts and every hour; so is a
 file in the uploads folder the index does not know (left by an upload the Drive did not finish) once the storage says
 it has not changed for a day. The index copy gets a hidden folder of its own beside `trash/` with its ticket.
+
+### Keeping in step with the storage
+
+The storage wins for which files exist and what is in them; the index alone holds access. People and programs with the
+storage login can change files behind the Drive's back, and the storage can be put back to an earlier state, so the
+Drive looks at it again (`internal/drive/reread.go`, `walk.go`):
+
+- **When a folder is opened.** Its list answers from the index at once, and the folder is looked at on the storage in
+  the background: `"checking": true` says a look is under way. The interface then asks once more with `?wait`, which
+  waits (at most ten seconds) until the look is done, starts no other, and answers the list as the index has it then
+  (`checking` is still true only when the look is not done; a folder the look found gone answers 404). The interface
+  shows that list at once, unless the person is acting on the list (an item selected, a dialog open, a change under
+  way): then a line above it says "This folder changed on the Drive storage", with "Show the changes", and the list
+  changes when they are done. At most four looks run in the background at once and 64 folders wait for one; a folder
+  opened again while it is looked at gets one more look after, never more.
+
+  ```
+  GET    /api/places/{place}/items[?wait]                 200 {"items", "path", "fromTop", "role", "can", "checking"}
+  GET    /api/places/{place}/items/{folder}/items[?wait]
+  ```
+- **The walk.** Now and then the Drive looks at every folder of every place, and at every place's trash, one at a time:
+  a minute after it starts, then six hours after each walk ends. After each folder it rests half a second, or three
+  times as long as the folder took when that is longer (at most a minute), so a slow storage is asked less often. Its
+  requests are listings (`PROPFIND` with `Depth: 1`, a few hundred bytes per entry) and, rarely, a look at one address;
+  never a file's bytes, so it takes no transfer slot and holds one connection to the storage at a time. A walk of
+  100,000 files in 5,000 folders takes at least 42 minutes. Where it is (the last folder it finished) is kept in the
+  index, so a walk a restart cut short goes on from there. It logs when it starts (or goes on), every 1,000 folders,
+  and when it ends, with what it found: `folders`, `trashes`, `added`, `changed`, `back`, `hidden`, `dropped`, `unread` (folders the storage
+  did not answer for), `tooLarge` and `untrusted` (folders not looked at for want of the mark, below).
+- **Zips** look at each folder they put in, as they go.
+
+What one look does, in one folder:
+
+- **New on the storage**: a file or folder the index does not know is added, with nothing given on it, so it has the
+  access of the folder it is in and nothing else. Access is never read from the storage.
+- **Changed on the storage**: a file whose size or time changed keeps its id, as when an upload through the Drive
+  replaces it: a file written over in place keeps its sharing and its public link, which serves the new content.
+- **Gone from the storage**: what the index knows and the look does not find is hidden at once (not listed, opened,
+  found, nor reached through a share or a link) and kept, with its id, what was given on it and its link. It is dropped
+  from the index (with everything in it, what was given on it, its public link and uploads in progress into it; what
+  in the trash would go back into it goes back to the top folder) only when a look at least ten minutes later still
+  misses it, and a request for its own address finds nothing there (or another item now has its name there). Nothing
+  is ever dropped on an error, a listing cut short, or a single look.
+- **Back on the storage**: a hidden item that the storage shows again exactly as the Drive last knew it (the same name,
+  kind, size and time of its last change, as a storage that answered wrong for a while gives it back) is the same item
+  again, with its sharing and its link. Anything else that takes its name (a file put there anew, even with the same
+  content; a folder made anew) is a new item, so a public link never serves a file that merely took the name. A file
+  renamed or moved on the storage is one item gone and another new: its sharing and its link do not follow it.
+- **The Drive's own changes win**: a look reads the storage without holding the place's lock, then takes it to compare
+  and apply. What the Drive changed in the folder since the look began, or is changing right now (a name in it being
+  uploaded, renamed, moved, deleted or restored, or the folder or one above it being moved), is left as it is. An
+  upload's bytes arrive in the hidden uploads folder, so a look never sees a half-finished file.
+- **Names the Drive would refuse** (empty, `.` or `..`, holding `/`, a line break or another control character, not
+  text, longer than 255 bytes) are left out: never listed, opened, zipped, found or counted, and left on the storage.
+- **Bounds**: a look reads a folder's entries as they arrive and keeps at most 10,000 of them; a folder holding more is
+  not looked at (nothing in it changes in the index, and the walk logs it). Folders are taken in at most 255 deep below
+  a place's top folder. A place's top folder gone from the storage is a place emptied; a look only reads, and the top
+  folder is made again when something is put into it.
+- **Only on the Drive's own storage**: the storage holds the Drive's mark, `.superit-drive/storage-id`, written when the
+  first place is made, holding the id the index keeps. A look that would change anything checks it first; without it,
+  or with another id (a storage that is empty, mounted wrongly, someone else's, or put back to before the Drive marked
+  it), nothing is added, hidden or dropped, and the log says so every ten minutes, with the id the file should hold:
+  written back, looks go on. Most looks change nothing, and then ask and write nothing more.
+
+The trash and the hidden folders are on the storage too. The Trash view looks at each place's trash on the storage
+before it answers, and the walk looks at every place's trash. An item of a trash whose entry is gone, or no longer
+holds it as the Drive knew it, is hidden from the Trash (restoring it answers as for something not there) and dropped
+as above; back as it was, it is back. An entry the index does not know is shown in the Trash as [above](#layout-on-the-storage).
+What is put into the uploads folder directly is never shown, and removed once a day old. Nothing put on the storage
+makes a place or gives anyone access: a folder in `Shared folders/` or `My files/` that belongs to no place is seen by
+nobody, and the walk logs how many there are (and the names of those in `Shared folders/`; those in `My files/` are
+named after email addresses); a folder called `.superit-drive` inside a place is a folder like any other there. A folder
+`My files/<address>` that is there before that member first opens the Drive becomes their My files, as when an index
+is built anew from a storage that holds files: only they see it.
+
+Search and "Shared with me" read only the index: what appears on the storage is found once a look took it in (its
+folder opened, or the walk); what goes is not found from the first look that missed it.
+
+**After the storage is put back to an earlier state** (a snapshot rolled back; the Drive is stopped meanwhile, and the
+walk goes on a minute after it starts): files that were added or changed since are gone or as they were; the looks
+hide what the index knows that is gone, and drop it with its sharing ten minutes later; files that are back (deleted or
+moved since) are new items with their folder's access only; files changed since keep their ids with their older
+content; trash entries made since are gone (their items hidden, then dropped), and entries that are back (restored or
+removed for good since) show in the Trash as entries put there directly; an upload in progress whose file went starts
+again from its beginning. Sharing itself is never put back. The mark is in every snapshot taken after the Drive's first
+place, so looks go on after a rollback; one to before that changes nothing until the mark is written back.
+
+**Connections to the storage.** A server closes a connection kept open between requests after a while, and can do so
+just as the Drive sends on it; the Drive then cannot tell whether the server acted. So every request that changes the
+storage (`PUT`, `MKCOL`, `MOVE`, `DELETE`) goes on a new connection of its own, which a server never closes for being
+idle, and is never sent twice. Reads (`GET`, `PROPFIND`) use kept connections, closed by the Drive after four seconds
+idle, and are sent once more on a new connection when the server closed the kept one first.
 
 ### Shared folders, sharing and who may do what
 
@@ -249,7 +347,7 @@ whether it was given right there or comes from a folder above (named when the pe
 listing gives each item what the person may do with it (`can`) and who can see it (`seenBy`: everyone, or the members
 by user id), and the folder's own `role` and `can`. Grants live in the index as one row per grantee per item (or per
 place as a whole), keyed on the item's id, so they follow it through rename, move, replace and the trash, and go
-with it when it is removed for good or the storage no longer has it.
+with it when it is removed for good or dropped because the storage no longer has it.
 
 **Shared with me.** It lists what others shared with the person, by name or with everyone in the project, that they
 reach only through that share: an item in someone else's "My files", or in a shared folder they have no role on as a
@@ -286,9 +384,10 @@ and everything in it, for good. A shared folder always keeps someone in charge: 
 less, is refused when nobody in the member list would be left managing it (there is always someone while the project
 has an admin). Access shared on items in it stays with them while it is in the trash, and comes back with them.
 
-Each place has a lock in memory: every change inside it (giving or taking access included, and a listing, which makes a
-missing top folder again) holds it shared, and moving the whole shared folder into the trash or out of it holds it alone, waiting up to ten seconds for
-the changes under way. A change that starts after the shared folder went to the trash finds it gone.
+Each place has a lock in memory: every change inside it (giving or taking access included, and a look at the storage
+as it writes what it found into the index) holds it shared, and moving the whole shared folder into the trash or out
+of it holds it alone, waiting up to ten seconds for the changes under way. A change that starts after the shared folder
+went to the trash finds it gone.
 
 ### Moving into a shared folder
 
@@ -339,8 +438,10 @@ and everyone who can see the item, see in "who can see this" (and in the list's 
   address. Neither the address nor the token is ever written to the log.
 - **It follows its item**, by the item's id: through rename, move (out of a My files into a shared folder too), and
   replacing a file with an upload. It covers what is in the item where it is now. While the item is in the trash, or in a
-  shared folder in the trash, the link opens nothing; restored, it works again at the same address. Removed for good,
-  or gone from the storage, the item takes its link with it.
+  shared folder in the trash, the link opens nothing; restored, it works again at the same address. While the item is
+  gone from the storage it opens nothing either; dropped from the index (see [Keeping in step with the
+  storage](#keeping-in-step-with-the-storage)), or removed for good, the item takes its link with it, and no file put
+  under its name later is ever reached through it.
 - **Whose it is.** A shared folder belongs to the project, and so do the links made in it: they work whoever made them,
   also after their maker left the project. In a My files a link is its maker's share: it works only while they may still
   share the item there. It stops when that is taken away from them (or they leave the project), and works again if it is
@@ -388,7 +489,8 @@ name, never an email address or user id; the project's name when the maker has n
 folders from the link's item down to the one shown (never anything above), "Download all as zip" for a folder, and what
 is in it: folders open their own page, files have Download, and Open when their kind opens in the browser. A folder's
 page lists at most 1,000 items (the zip holds them all). It lists what the index knows: what was put on the storage
-directly shows once a member has opened its folder; the zip reads the storage. English for now.
+directly shows once a member has opened its folder, or the walk has passed it; the zip looks at the storage. English
+for now.
 
 Every answer under `/s/` carries `X-Robots-Tag: noindex, nofollow` (and the page `<meta name="robots">`),
 `Referrer-Policy: no-referrer` (the address is the secret), `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
@@ -472,8 +574,10 @@ It finds files and folders by name (never by what is in them) across everything 
   Mac program wrote its name decomposed; each word searched for must be somewhere in the name. The best first: the
   whole name (or without its extension), its start, the start of a word, anywhere, each word somewhere; then by name.
 - **At most 50 results**, and `more` when there are others; no pages. Count, order and `more` come only from what the
-  person can see. The search reads the index, not the storage (what a listing has not seen yet is not found), and takes
-  no place's lock.
+  person can see. The search reads the index, not the storage, and takes no place's lock: what was put on the storage
+  directly is found once its folder was opened or the walk passed it (within a walk's interval and length, see
+  [Keeping in step with the storage](#keeping-in-step-with-the-storage)); what went from it is not found from the first
+  look that missed it.
 
 ### Selecting several
 
@@ -543,8 +647,12 @@ figure (`internal/transfers`):
 
 Measured with `make test-memory` (below): the image in a container with `--memory=64m --memory-swap=64m`, against the
 stand-in storage, idles at about 4.5 MiB; with 40 downloads (half of them read at 8 MiB/s) and 10 resumable uploads
-of 256 MiB each at once, it peaked at 46 to 47 MiB over two runs, of which about 13 MiB was the Drive's own memory
-and 29 to 30 MiB network buffers, and never reached the limit (Docker Desktop on an Apple Silicon Mac, arm64).
+of 256 MiB each at once, it peaked at 46 to 49.6 MiB over three runs, of which about 13 to 16 MiB was the Drive's own
+memory and 29 to 31 MiB network buffers, and never reached the limit (Docker Desktop on an Apple Silicon Mac, arm64).
+Walking a storage of 50,000 files in 402 folders (and one folder of 20,000, more than a look reads) took 3½ minutes and
+its highest was 38 MiB, of which 17.5 MiB the Drive's own memory and 16 MiB page cache (the index's file, which the
+kernel takes back first); eight people then opening the folder of 10,000 files at once reached 59 MiB, of which 35 MiB
+its own (Go's heap at its limit, and SQLite's caches) and 16 MiB page cache.
 
 **Downloads** honour `Range` for one part of a file (`bytes=a-b`, `bytes=a-`, `bytes=-n`): 206 with `Content-Range`,
 or 416 with `Content-Range: bytes */<size>` for a part after the end. They carry the storage's `ETag` and
@@ -552,7 +660,7 @@ or 416 with `Content-Range: bytes */<size>` for a part after the end. They carry
 parts, or anything else in `Range`, get the whole file, as HTTP allows.
 
 **Zips.** A folder, a place's top folder, or some items of a folder download as one zip, made as it is sent: each
-folder is listed from the storage on the way, and each file streamed from the storage, stored as it is (no
+folder is looked at on the storage on the way, and each file streamed from the storage, stored as it is (no
 compression). Folders are in it too, empty ones included. A backslash in a name becomes `_` in the zip. A zip holds
 at most 10,000 files and folders (each costs a little memory until the zip's end); a larger folder is refused with
 400, and is downloaded a folder inside it at a time. It has no length, and a zip cut short ends the connection, so the
@@ -606,7 +714,8 @@ video and sound open in the browser (anything else downloads), a search finds fi
 everything a member can see, and several items can be selected to move, download as a zip or delete together. Members
 who may share a file or folder make a public link to it, which anyone opens without signing in. Guests are not built
 yet. Large files upload in parts that resume after a broken connection, downloads resume and seek, and folders upload
-whole and download as zips.
+whole and download as zips. Files changed on the WebDAV server by other programs show in the Drive as folders are
+opened, and through a slow walk now and then (see [Keeping in step with the storage](#keeping-in-step-with-the-storage)).
 
 It needs:
 
@@ -778,13 +887,19 @@ runs it with `--memory=64m --memory-swap=64m` against the stand-in storage. It u
 off and resumed, then sends 40 downloads (half of them read slowly) and 10 resumable uploads of 256 MiB each through
 it at once, then two zips of a folder holding 256 MiB, checks every byte and that the container was not killed, and
 reports the container's memory from its cgroup (the peak, and the highest during each part, split into the Drive's
-own memory, network buffers, page cache and kernel). It takes about two minutes and leaves only the images
-`superit-drive:memory-test` and `superit-drive-test-webdav`.
+own memory, network buffers, page cache and kernel). A second test there puts 70,000 files on the stand-in storage (one
+folder of 10,000, 200 folders of 200, and one folder of 20,000, more than a look reads), lets the released Drive walk
+them all, then has four people open the folder of 10,000 at once, and reports the same. Both take about eight minutes
+and leave only the images `superit-drive:memory-test` and `superit-drive-test-webdav`.
 
 The harness builds the Drive with the build tag `testclock`, which is the only difference from a released Drive: in
 it, `SUPERIT_DRIVE_TEST_CLOCK_SHIFT` (a Go duration such as `744h`) moves the Drive's clock forward, so a test can
-restart a Drive (`Drive.Restart`) 31 days later and see the trash emptied. A Drive built without the tag reads no such
-variable.
+restart a Drive (`Drive.Restart`) 31 days later and see the trash emptied, or ten minutes later and see an item gone
+from the storage dropped; and `SUPERIT_DRIVE_TEST_WALK_EVERY` and `SUPERIT_DRIVE_TEST_WALK_PAUSE` (Go durations) make the
+walk through the storage start that soon, run that often and rest that long after each folder. A Drive built without
+the tag reads no such variable. Tests change the storage directly with the harness's own WebDAV client
+(`Drive.Storage`), including a `MOVE` that keeps a file's time (a storage that answered wrong for a while) and `Fill`,
+which puts thousands of files straight onto the stand-in storage's disk.
 
 **Running it locally.**
 
@@ -800,7 +915,8 @@ interface and passes `/api` to the Drive with the headers for `DEV_USER_ID` (in 
 `DRIVE_ADDRESS` there is `http://localhost:5173`: it is the page the browser is on, so uploads from it are accepted.
 
 **The image.** `docker build` makes one image holding one static binary, CA certificates, and empty `/data` and
-`/tmp`, running as user 65532. `make image` tags it `superit-drive:dev`; the [worked example](#a-worked-example)
+`/tmp`, both owned by user 65532, which it runs as (SQLite writes a temporary file in `/tmp` when one change or one sort
+is too large to keep in memory). `make image` tags it `superit-drive:dev`; the [worked example](#a-worked-example)
 expects the name `ghcr.io/neonjelly-co/superit-drive:<version>`. It starts with the environment variables above and a
 member list file:
 
@@ -830,7 +946,8 @@ internal/server/       HTTP: routes.go lists every route; server.go's guard runs
                        search.go the search by name, links.go making and removing public links, visitors.go the
                        public prefix and the visitor's pages
 internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
-                       shared folders, the access given on them
+                       shared folders, the access given on them; reread.go and walk.go keep the index in step with
+                       the storage
 internal/index/        the SQLite index (search.go: names as a search compares them, and the walk down a scope);
                        schema changes are numbered files in migrations/, run with foreign keys
                        off (SQLite's recipe for rebuilding a table) and checked with foreign_key_check before each
