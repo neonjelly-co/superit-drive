@@ -516,6 +516,7 @@ func TestAMemberWithoutARoleCannotTellASharedFolderFromNone(t *testing.T) {
 		return map[string]try{
 			"DELETE /api/places/{place}":                         {"DELETE", at("/api/places/%d", place), ""},
 			"POST /api/places/{place}/restore":                   {"POST", at("/api/places/%d/restore", place), ""},
+			"PUT /api/places/{place}/sharing-outside":            {"PUT", folderSwitchPath(place), `{"on":false}`},
 			"GET /api/places/{place}/access":                     {"GET", at("/api/places/%d/access", place), ""},
 			"PUT /api/places/{place}/access/members/{member}":    {"PUT", accessPath(place, dora), `{"role":"manager"}`},
 			"DELETE /api/places/{place}/access/members/{member}": {"DELETE", accessPath(place, bence), ""},
