@@ -167,10 +167,13 @@ func (s *Server) acted(w http.ResponseWriter, r *http.Request, a index.Act, err 
 	list := s.members.Current()
 	switch {
 	case errors.Is(err, drive.ErrNotHeld):
-		s.refuse(w, r, http.StatusConflict, "Whose files these were is a member of the project again: they are theirs, as they were.")
+		s.refuse(w, r, http.StatusConflict, "The person these files belong to is a member of the project again: the files are theirs, as they were.")
 	case errors.Is(err, drive.ErrActing):
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "These files are being handed over or deleted already.",
-			"act": actJSONOf(a, list)})
+		out := map[string]any{"error": "These files, or the My files they were to go to, are being handed over or deleted already. Try again once that is done."}
+		if a.ID != 0 {
+			out["act"] = actJSONOf(a, list)
+		}
+		writeJSON(w, http.StatusConflict, out)
 	case errors.Is(err, drive.ErrBusy):
 		s.refuse(w, r, http.StatusConflict, "Something in these files is still being changed. Try again in a moment.")
 	case errors.Is(err, drive.ErrPlaceGone), errors.Is(err, index.ErrNoPlace):

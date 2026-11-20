@@ -203,31 +203,40 @@ func (x *Index) RenameAct(ctx context.Context, id int64, toName string) error {
 	return nil
 }
 
+// actBatch is how many items one transaction of a hand-over or a deletion moves or removes, so that no transaction
+// holds the index for long (other writers wait at most five seconds), however large the held My files is.
+const actBatch = 20_000
+
 // HandedOver records that a hand-over under way is done: its files are on the storage in the folder ToName of the
-// receiver's top folder (whose time of last change is changed), and its held My files' trash is gone from it. In one
-// change:
+// receiver's top folder (whose time of last change is changed), and its held My files' trash is gone from it:
 //
 //   - nothing given on the held My files or on anything in it comes along: every grant (to members, to everyone, to
 //     guests: a guest whose last invitation it was goes with it, and their sessions), every public link, and every upload
 //     in progress into it are removed;
 //   - its trash, with everything in it, is removed: it is not handed over;
-//   - a folder item ToName is made in the receiver's top folder (a live row of that name there is out of date, and goes
-//     first), and every other item of the held My files moves into the receiver's My files, keeping its id, the items
-//     of its top folder into that folder;
-//   - the act is done, and the held My files is gone.
+//   - every item below its top folder moves into the receiver's My files, keeping its id and its folder, actBatch at a
+//     time: out of reach there until the folder it is in follows, as everything is reached from a place's top folder
+//     down;
+//   - last, in one change: a folder item ToName is made in the receiver's top folder (a live row of that name there is
+//     out of date, and goes first), the items of the held top folder move into it, the act is done, and the held My files
+//     is gone.
 //
-// It reads and writes rows in the database only, however many there are: nothing is loaded into memory.
+// Each step is a transaction of its own that can be done again: a stop between them leaves the act under way, and
+// calling HandedOver again goes on. It reads and writes rows in the database only: nothing is loaded into memory.
 func (x *Index) HandedOver(ctx context.Context, id int64, changed, at time.Time) error {
-	return x.write(ctx, func(tx *sql.Tx) error {
-		a, err := scanAct(tx.QueryRowContext(ctx, "SELECT "+actColumns+" FROM held_acts WHERE id = ? AND done_at IS NULL AND act = ?", id, HandOver))
-		if err != nil {
-			return err
-		}
+	a, err := x.Act(ctx, id)
+	if err != nil {
+		return err
+	}
+	if a.Kind != HandOver || !a.Done.IsZero() || a.Place == 0 {
+		return fmt.Errorf("hand-over %d: %w", id, ErrNoAct)
+	}
+	err = x.write(ctx, func(tx *sql.Tx) error {
 		var n int
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM places WHERE id = ? AND kind = ? AND deleted_at IS NULL", a.ToPlace, MyFiles).Scan(&n); err != nil {
 			return err
 		}
-		if n == 0 || a.Place == 0 {
+		if n == 0 {
 			return fmt.Errorf("hand-over %d: %w", id, ErrNoPlace)
 		}
 		for _, q := range []string{
@@ -241,6 +250,31 @@ func (x *Index) HandedOver(ctx context.Context, id int64, changed, at time.Time)
 				return err
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for {
+		var moved int64
+		err := x.write(ctx, func(tx *sql.Tx) error {
+			res, err := tx.ExecContext(ctx, `
+				UPDATE items SET place_id = ? WHERE id IN (SELECT id FROM items WHERE place_id = ? AND parent_id IS NOT NULL LIMIT ?)`,
+				a.ToPlace, a.Place, actBatch)
+			if err != nil {
+				return err
+			}
+			moved, err = res.RowsAffected()
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if moved < actBatch {
+			break
+		}
+	}
+	return x.write(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM items WHERE place_id = ? AND parent_id IS NULL AND name = ? AND trashed_at IS NULL AND missing_at IS NULL`,
 			a.ToPlace, a.ToName); err != nil {
@@ -252,13 +286,16 @@ func (x *Index) HandedOver(ctx context.Context, id int64, changed, at time.Time)
 			a.ToPlace, a.ToName, changed.Unix()).Scan(&folder); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE items SET place_id = ?, parent_id = IFNULL(parent_id, ?) WHERE place_id = ?`, a.ToPlace, folder, a.Place); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE items SET place_id = ?, parent_id = ? WHERE place_id = ?`, a.ToPlace, folder, a.Place); err != nil {
 			return err
 		}
 		// Done first: the place going sets place_id to NULL, which only a done act may have.
-		if _, err := tx.ExecContext(ctx, "UPDATE held_acts SET done_at = ? WHERE id = ?", at.UnixMilli(), id); err != nil {
+		res, err := tx.ExecContext(ctx, "UPDATE held_acts SET done_at = ? WHERE id = ? AND done_at IS NULL", at.UnixMilli(), id)
+		if err != nil {
 			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return fmt.Errorf("hand-over %d: %w", id, ErrNoAct)
 		}
 		_, err = tx.ExecContext(ctx, "DELETE FROM places WHERE id = ?", a.Place)
 		return err
@@ -266,16 +303,45 @@ func (x *Index) HandedOver(ctx context.Context, id int64, changed, at time.Time)
 }
 
 // DeletedHeld records that a deletion under way is done: the held My files' top folder and its trash are gone from the
-// storage. The held My files goes, with everything in it, what was given on it, its links, its guests' invitations
-// (a guest whose last invitation it was goes with it) and uploads in progress into it.
+// storage. The held My files goes, with everything in it (actBatch items at a time, files first, each a transaction of
+// its own: a stop between them leaves the act under way, and calling DeletedHeld again goes on), what was given on it,
+// its links, its guests' invitations (a guest whose last invitation it was goes with it) and uploads in progress into it.
 func (x *Index) DeletedHeld(ctx context.Context, id int64, at time.Time) error {
+	a, err := x.Act(ctx, id)
+	if err != nil {
+		return err
+	}
+	if a.Kind != DeleteHeld || !a.Done.IsZero() || a.Place == 0 {
+		return fmt.Errorf("deletion %d: %w", id, ErrNoAct)
+	}
+	// Files first: removing a folder takes everything still in it along, in the same transaction.
+	for _, which := range []string{"is_folder = 0", "1"} {
+		for {
+			var removed int64
+			err := x.write(ctx, func(tx *sql.Tx) error {
+				res, err := tx.ExecContext(ctx, `DELETE FROM items WHERE id IN (SELECT id FROM items WHERE place_id = ? AND `+which+` LIMIT ?)`,
+					a.Place, actBatch)
+				if err != nil {
+					return err
+				}
+				removed, err = res.RowsAffected()
+				return err
+			})
+			if err != nil {
+				return err
+			}
+			if removed < actBatch {
+				break
+			}
+		}
+	}
 	return x.write(ctx, func(tx *sql.Tx) error {
-		a, err := scanAct(tx.QueryRowContext(ctx, "SELECT "+actColumns+" FROM held_acts WHERE id = ? AND done_at IS NULL AND act = ?", id, DeleteHeld))
+		res, err := tx.ExecContext(ctx, "UPDATE held_acts SET done_at = ? WHERE id = ? AND done_at IS NULL", at.UnixMilli(), id)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE held_acts SET done_at = ? WHERE id = ?", at.UnixMilli(), id); err != nil {
-			return err
+		if n, _ := res.RowsAffected(); n != 1 {
+			return fmt.Errorf("deletion %d: %w", id, ErrNoAct)
 		}
 		_, err = tx.ExecContext(ctx, "DELETE FROM places WHERE id = ? AND kind = ?", a.Place, MyFiles)
 		return err
