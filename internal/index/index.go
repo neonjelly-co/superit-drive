@@ -80,16 +80,44 @@ func (x *Index) Close() error { return x.db.Close() }
 // rows first, with everything that refers to them (ON DELETE CASCADE): rebuilding places would empty items. Each
 // migration's foreign keys are checked before it commits instead, and the connection gets them back after.
 func (x *Index) migrate(ctx context.Context) (err error) {
-	names, err := fs.Glob(migrations, "migrations/*.sql")
-	if err != nil {
-		return err
-	}
-	sort.Strings(names)
 	conn, err := x.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+	return migrateConn(ctx, conn, Version())
+}
+
+// Version is the schema version this Drive's migrations bring an index to: the number of the last one.
+func Version() int {
+	names, _ := migrationNames()
+	if len(names) == 0 {
+		return 0
+	}
+	n, _ := migrationNumber(names[len(names)-1])
+	return n
+}
+
+func migrationNames() ([]string, error) {
+	names, err := fs.Glob(migrations, "migrations/*.sql")
+	sort.Strings(names)
+	return names, err
+}
+
+func migrationNumber(name string) (int, error) {
+	n, err := strconv.Atoi(strings.SplitN(filepath.Base(name), "_", 2)[0])
+	if err != nil {
+		return 0, fmt.Errorf("migration %s does not start with its number", name)
+	}
+	return n, nil
+}
+
+// migrateConn runs, on conn, the migrations up to and including number upTo that the database has not had yet.
+func migrateConn(ctx context.Context, conn *sql.Conn, upTo int) (err error) {
+	names, err := migrationNames()
+	if err != nil {
+		return err
+	}
 	var version int
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
@@ -109,11 +137,11 @@ func (x *Index) migrate(ctx context.Context) (err error) {
 		}
 	}()
 	for _, name := range names {
-		n, err := strconv.Atoi(strings.SplitN(filepath.Base(name), "_", 2)[0])
+		n, err := migrationNumber(name)
 		if err != nil {
-			return fmt.Errorf("migration %s does not start with its number", name)
+			return err
 		}
-		if n <= version {
+		if n <= version || n > upTo {
 			continue
 		}
 		script, err := migrations.ReadFile(name)
