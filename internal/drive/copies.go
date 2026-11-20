@@ -42,6 +42,13 @@ import (
 // copy the Drive refused to adopt is moved aside there, as refused-<when>-<its name>, and kept.
 const CopiesFolder = HiddenFolder + "/index"
 
+// copiesFolderOf is the folder of the copies of the index whose storage id is id; ok is false for an id that cannot name
+// one folder (a mark someone wrote by hand), whose copies are neither written nor adopted.
+func copiesFolderOf(id string) (string, bool) {
+	folder, ok := pathIn(CopiesFolder, id)
+	return folder, ok && CheckName(id) == nil
+}
+
 // copyName is the name of the copy numbered seq in its storage id's folder.
 func copyName(seq int64) string { return fmt.Sprintf("copy-%012d.sqlite", seq) }
 
@@ -263,7 +270,10 @@ func (k *keeper) toStorage(ctx context.Context, info index.CopyInfo) (string, er
 		return "", err
 	}
 
-	folder := CopiesFolder + "/" + info.StorageID
+	folder, ok := copiesFolderOf(info.StorageID)
+	if !ok {
+		return "", errNotOurs
+	}
 	part := folder + "/upload-" + randomHex(8) + ".part"
 	name := folder + "/" + copyName(info.Seq)
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)

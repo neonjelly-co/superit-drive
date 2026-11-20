@@ -194,30 +194,46 @@ func localCopy(ctx context.Context, dataDir string, log *slog.Logger) (*candidat
 // One that does not pass is moved aside on the storage and kept, and the log says loudly why. A copy made by a newer
 // Drive is an error.
 func storageCopy(ctx context.Context, dataDir string, s *storage.Client, log *slog.Logger, mark string, local *candidate) (*candidate, error) {
-	folder := CopiesFolder + "/" + mark
-	entries, err := patiently(ctx, log, func(ctx context.Context) ([]storage.Entry, error) {
-		entries, err := s.List(ctx, folder, 10_000)
+	folder, ok := copiesFolderOf(mark)
+	if !ok {
+		log.Error("THE STORAGE'S MARK CANNOT NAME A FOLDER OF COPIES OF AN INDEX: none is adopted, and the Drive builds its index from the files, with no shares",
+			"mark", StorageIDFile)
+		return nil, nil
+	}
+	// The newest copy, read as the listing arrives: a folder of any size costs no more than one entry.
+	type found struct {
+		newest storage.Entry
+		seq    int64
+	}
+	f, err := patiently(ctx, log, func(ctx context.Context) (found, error) {
+		f := found{seq: -1}
+		err := s.Each(ctx, folder, func(e storage.Entry) error {
+			if n, ok := copySeqOf(e.Name); ok && !e.Folder && n > f.seq {
+				f.newest, f.seq = e, n
+			}
+			return nil
+		})
 		if errors.Is(err, storage.ErrNotFound) {
-			return nil, nil
+			return found{seq: -1}, nil
 		}
-		return entries, err
+		return f, err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("the data folder holds no index, and the copies of the index on the storage could not be listed; "+
 			"the Drive does not start without knowing whether one is there: %w", err)
 	}
-	var newest storage.Entry
-	var seq int64 = -1
-	for _, e := range entries {
-		if n, ok := copySeqOf(e.Name); ok && !e.Folder && n > seq {
-			newest, seq = e, n
-		}
-	}
+	newest, seq := f.newest, f.seq
 	if seq < 0 {
 		return nil, nil
 	}
 	if local != nil && local.info.StorageID == mark && local.info.Seq >= seq {
 		return nil, nil // the data folder's copy is as new: nothing to download
+	}
+	if newest.Size > maxCopy {
+		log.Error("THE COPY OF THE INDEX ON THE STORAGE IS NOT USED: it is larger than any copy the Drive makes. The Drive "+
+			"builds its index from the files on the storage, and starts with no shares; the copy is left there", "copy", folder+"/"+newest.Name,
+			"bytes", newest.Size)
+		return nil, nil
 	}
 	where := folder + "/" + newest.Name
 	file := temporary(dataDir)
@@ -274,6 +290,10 @@ func foreignCopies(ctx context.Context, s *storage.Client, log *slog.Logger) {
 	}
 }
 
+// maxCopy is the largest copy of the index the Drive downloads to adopt: far more than an index of millions of items
+// takes, and a bound on what a file planted there can fill the server's disk with.
+const maxCopy = 4 << 30
+
 // download reads the file at p on the storage into a new file at to, synced to disk.
 func download(ctx context.Context, s *storage.Client, p, to string) error {
 	f, err := s.Open(ctx, p)
@@ -285,8 +305,12 @@ func download(ctx context.Context, s *storage.Client, p, to string) error {
 	if err != nil {
 		return err
 	}
-	n, err := io.Copy(out, f.Body)
-	if err == nil && f.Size >= 0 && n != f.Size {
+	n, err := io.Copy(out, io.LimitReader(f.Body, maxCopy+1))
+	switch {
+	case err != nil:
+	case n > maxCopy:
+		err = fmt.Errorf("it is larger than %d bytes, more than any copy the Drive makes", int64(maxCopy))
+	case f.Size >= 0 && n != f.Size:
 		err = fmt.Errorf("read %d bytes of %d", n, f.Size)
 	}
 	if err == nil {

@@ -144,8 +144,9 @@ func copyInfo(ctx context.Context, q queryRower) (CopyInfo, error) {
 	}
 	c.StorageID = id.String
 	if seq.Valid {
-		if c.Seq, err = strconv.ParseInt(seq.String, 10, 64); err != nil {
-			return c, fmt.Errorf("the copy's number %q: %w", seq.String, err)
+		// A number far past what copies ever reach would overflow as the next one is counted.
+		if c.Seq, err = strconv.ParseInt(seq.String, 10, 64); err != nil || c.Seq < 0 || c.Seq > 1<<53 {
+			return c, fmt.Errorf("the copy's number %q is not one a copy has", seq.String)
 		}
 	}
 	if c.Version >= 11 { // access_changes came with migration 0011

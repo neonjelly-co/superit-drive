@@ -316,6 +316,9 @@ func TestOnlyACopyTheDriveMadePasses(t *testing.T) {
 			alter(t, f, "CREATE TRIGGER keep_links AFTER DELETE ON links BEGIN INSERT INTO links SELECT OLD.*; END")
 		}, ErrCopyDamaged},
 		{"a check taken off", func(f string) { alter(t, f, "DROP INDEX grants_one_per_grantee") }, ErrCopyDamaged},
+		{"numbered past any copy", func(f string) {
+			alter(t, f, "UPDATE drive_state SET value = '9223372036854775807' WHERE key = 'copy_seq'")
+		}, ErrCopyDamaged},
 		{"a My files in the Drive's hidden folder", func(f string) {
 			alter(t, f, "UPDATE places SET folder = '.superit-drive' WHERE kind = 'my-files'")
 		}, ErrCopyDamaged},
