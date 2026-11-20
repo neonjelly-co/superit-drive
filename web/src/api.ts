@@ -1,5 +1,16 @@
 // The Drive's JSON API, as the interface uses it. The server side is internal/server/routes.go.
 
+/**
+ * Where the API is: "/api" for members, signed in through the reverse proxy; the guests' own, under the public prefix,
+ * for the guests' page (forGuests). A guest's routes are a member's under it, for what they may do.
+ */
+let base = "/api";
+
+/** Makes every call go to the guests' API: the guests' page calls it once, before anything else. */
+export function forGuests() {
+	base = "/s/guest/api";
+}
+
 export type Me = {
 	userId: string;
 	email: string;
@@ -8,6 +19,8 @@ export type Me = {
 	project: string;
 	/** There for seven days after the Drive storage was put back to a snapshot. */
 	rollback?: Rollback;
+	/** Whether guests can be invited on this Drive: not without mail that works, and why. */
+	guests: { invite: boolean; why: string };
 };
 
 /** The Drive storage put back to a snapshot: who did it (text from the platform), and when (ISO 8601). */
@@ -40,6 +53,7 @@ export type Action =
 	| "share"
 	| "make-link"
 	| "manage-link"
+	| "invite-guest"
 	| "manage-access"
 	| "delete-shared-folder"
 	| "restore-shared-folder";
@@ -77,10 +91,13 @@ export type DeletedPlace = {
 export type Member = { userId: string; email: string; displayName: string; role: "admin" | "member" };
 
 /**
- * Who can see an item, for the list's sentence: everyone in the project, or these members (by user id); and `link`
- * when anyone with a public link (on it, or on a folder above it) can.
+ * Who can see an item, for the list's sentence: everyone in the project, or these members (by user id); `link` when
+ * anyone with a public link (on it, or on a folder above it) can; and how many guests can.
  */
-export type SeenBy = { everyone: boolean; members: string[]; link?: boolean };
+export type SeenBy = { everyone: boolean; members: string[]; link?: boolean; guests?: number };
+
+/** A guest: someone outside the project invited by email address. */
+export type Guest = { id: number; address: string };
 
 /** One line of "who can see this", for an item or a shared folder as a whole. */
 export type Access = {
@@ -101,7 +118,21 @@ export type Access = {
 	from?: FolderRef;
 	/** Given to someone no longer in the project. */
 	former?: boolean;
+	/** For a guest, invited by address. */
+	guest?: Guest;
+	/** When it ends, for access given with an end date (ISO 8601). */
+	until?: string;
+	/**
+	 * For a guest, to whoever may share the item: whether it lets them in now, and how often they used it, and when
+	 * last.
+	 */
+	works?: boolean;
+	uses?: number;
+	used?: string;
 };
+
+/** What typing an address in "Give access" came to: a member's address is shared with them, any other invites a guest. */
+export type Invited = { access: Access[]; member?: Person; guest?: Guest; invited?: boolean };
 
 /** Who access is given to: everyone in the project, or one member. */
 export type Grantee = { everyone: true } | { userId: string };
@@ -119,6 +150,8 @@ export type Item = {
 	seenBy?: SeenBy;
 	/** True for a file of a kind that opens in the browser (an ordinary image, a PDF, plain text, a video, a sound). */
 	opens?: boolean;
+	/** For members: which guest added it (uploaded or made), by their address then. */
+	addedBy?: { guest: string };
 };
 
 /** A folder in a path, such as the breadcrumb. */
@@ -235,6 +268,8 @@ export class ApiError extends Error {
 			offset?: number;
 			/** False when the storage cannot resume, and the upload starts again from the beginning. */
 			resumable?: boolean;
+			/** For a guest: they are not signed in (401), and must sign in first. */
+			signIn?: boolean;
 		} = {},
 	) {
 		super(message);
@@ -280,13 +315,14 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 			offset: data?.offset,
 			resumable: data?.resumable,
 			retryAfter: Number(res.headers.get("Retry-After")) || undefined,
+			signIn: data?.signIn,
 		});
 	}
 	return data as T;
 }
 
 const accessPath = (placeId: number, itemId: number | null) =>
-	itemId === null ? `/api/places/${placeId}/access` : `/api/places/${placeId}/items/${itemId}/access`;
+	itemId === null ? `${base}/places/${placeId}/access` : `${base}/places/${placeId}/items/${itemId}/access`;
 
 const granteePath = (placeId: number, itemId: number | null, to: Grantee) =>
 	"everyone" in to
@@ -343,7 +379,7 @@ function send<T>(
 
 /** The address of a folder of a place: the place itself for its top folder (null). */
 const inFolder = (placeId: number, folderId: number | null) =>
-	folderId === null ? `/api/places/${placeId}` : `/api/places/${placeId}/items/${folderId}`;
+	folderId === null ? `${base}/places/${placeId}` : `${base}/places/${placeId}/items/${folderId}`;
 
 /**
  * Uploads one file into a folder of a place in one request: its bytes as the request's body, its name in the address.
@@ -366,20 +402,20 @@ function upload(
 	return send<Uploaded>("POST", `${inFolder(placeId, folderId)}/files?${query}`, file, 201, onProgress, signal);
 }
 
-const sessionPath = (placeId: number, id: string) => `/api/places/${placeId}/uploads/${id}`;
+const sessionPath = (placeId: number, id: string) => `${base}/places/${placeId}/uploads/${id}`;
 
 export const api = {
-	me: () => call<Me>("GET", "/api/me"),
-	members: () => call<{ members: Member[] }>("GET", "/api/members").then((r) => r.members),
+	me: () => call<Me>("GET", `${base}/me`),
+	members: () => call<{ members: Member[] }>("GET", `${base}/members`).then((r) => r.members),
 	/** My files first, then every shared folder the person has a role on. */
-	places: () => call<{ places: Place[] }>("GET", "/api/places").then((r) => r.places),
+	places: () => call<{ places: Place[] }>("GET", `${base}/places`).then((r) => r.places),
 	/** Makes a shared folder; the person becomes its manager. */
-	newSharedFolder: (name: string) => call<Place>("POST", "/api/places", { name }),
+	newSharedFolder: (name: string) => call<Place>("POST", `${base}/places`, { name }),
 	/** Moves a shared folder, with everything in it, into the trash. */
-	deleteSharedFolder: (placeId: number) => call<DeletedPlace>("DELETE", `/api/places/${placeId}`),
+	deleteSharedFolder: (placeId: number) => call<DeletedPlace>("DELETE", `${base}/places/${placeId}`),
 	/** The shared folders in the trash that the person may restore. */
-	deletedSharedFolders: () => call<{ places: DeletedPlace[] }>("GET", "/api/places/deleted").then((r) => r.places),
-	restoreSharedFolder: (placeId: number) => call<Place>("POST", `/api/places/${placeId}/restore`),
+	deletedSharedFolders: () => call<{ places: DeletedPlace[] }>("GET", `${base}/places/deleted`).then((r) => r.places),
+	restoreSharedFolder: (placeId: number) => call<Place>("POST", `${base}/places/${placeId}/restore`),
 	/** Who can see an item (or, with itemId null, a shared folder as a whole). */
 	access: (placeId: number, itemId: number | null) =>
 		call<{ access: Access[] }>("GET", accessPath(placeId, itemId)).then((r) => r.access),
@@ -389,18 +425,32 @@ export const api = {
 	/** Takes away what was given right there; access from a folder above stays. */
 	takeAccess: (placeId: number, itemId: number | null, from: Grantee) =>
 		call<{ access: Access[] }>("DELETE", granteePath(placeId, itemId, from)).then((r) => r.access),
+	/**
+	 * Gives access to a file or folder to whoever has the address typed: a member's is shared with them; any other
+	 * invites a guest by mail, until `ends` (ISO 8601) when given.
+	 */
+	invite: (placeId: number, itemId: number, address: string, role: Role, ends?: string) =>
+		call<Invited>("POST", `${accessPath(placeId, itemId)}/guests`, { address, role, ends: ends ?? null }),
+	/** Gives a guest's invitation a new role and end date (none: no end date). */
+	changeInvitation: (placeId: number, itemId: number, guest: number, role: Role, ends?: string) =>
+		call<{ access: Access[] }>("PUT", `${accessPath(placeId, itemId)}/guests/${guest}`, { role, ends: ends ?? null }).then(
+			(r) => r.access,
+		),
+	/** Takes a guest's invitation away: when it was their last, they are signed out at once. */
+	uninvite: (placeId: number, itemId: number, guest: number) =>
+		call<{ access: Access[] }>("DELETE", `${accessPath(placeId, itemId)}/guests/${guest}`).then((r) => r.access),
 	/** The public link on an item, or null. */
 	link: (placeId: number, itemId: number) =>
-		call<{ link: PublicLink | null }>("GET", `/api/places/${placeId}/items/${itemId}/link`).then((r) => r.link),
+		call<{ link: PublicLink | null }>("GET", `${base}/places/${placeId}/items/${itemId}/link`).then((r) => r.link),
 	/**
 	 * Makes a public link on an item; with replace, in place of the one it has, whose address then stops working. The
 	 * answer holds the address, once.
 	 */
 	makeLink: (placeId: number, itemId: number, replace: boolean) =>
-		call<{ link: PublicLink }>("POST", `/api/places/${placeId}/items/${itemId}/link`, { replace }).then((r) => r.link),
+		call<{ link: PublicLink }>("POST", `${base}/places/${placeId}/items/${itemId}/link`, { replace }).then((r) => r.link),
 	/** Removes the public link on an item: its address stops working for good. */
-	removeLink: (placeId: number, itemId: number) => call<null>("DELETE", `/api/places/${placeId}/items/${itemId}/link`),
-	usage: () => call<Usage>("GET", "/api/usage"),
+	removeLink: (placeId: number, itemId: number) => call<null>("DELETE", `${base}/places/${placeId}/items/${itemId}/link`),
+	usage: () => call<Usage>("GET", `${base}/usage`),
 	/**
 	 * What is in a folder of a place (null: its top folder), from the Drive's index; opening it also has it looked at on
 	 * the storage. With wait, the list once that look is done (the Drive waits up to ten seconds for it).
@@ -410,31 +460,31 @@ export const api = {
 	newFolder: (placeId: number, folderId: number | null, name: string) =>
 		call<Item>("POST", `${inFolder(placeId, folderId)}/folders`, { name }),
 	rename: (placeId: number, itemId: number, name: string) =>
-		call<Item>("POST", `/api/places/${placeId}/items/${itemId}/rename`, { name }),
+		call<Item>("POST", `${base}/places/${placeId}/items/${itemId}/rename`, { name }),
 	/**
 	 * Moves an item into a folder (null: the top folder) of its own place, or of toPlace: out of the person's own My
 	 * files into a shared folder, after the warning.
 	 */
 	move: (placeId: number, itemId: number, to: number | null, toPlace?: number) =>
-		call<Item & { place: number }>("POST", `/api/places/${placeId}/items/${itemId}/move`, toPlace === undefined ? { to } : { to, place: toPlace }),
+		call<Item & { place: number }>("POST", `${base}/places/${placeId}/items/${itemId}/move`, toPlace === undefined ? { to } : { to, place: toPlace }),
 	/** Who would see an item in a folder of toPlace (null: its top folder), before it moves there. */
 	movePreview: (placeId: number, itemId: number, toPlace: number, to: number | null) => {
 		const query = new URLSearchParams({ place: String(toPlace) });
 		if (to !== null) query.set("to", String(to));
-		return call<MovePreview>("GET", `/api/places/${placeId}/items/${itemId}/move?${query}`);
+		return call<MovePreview>("GET", `${base}/places/${placeId}/items/${itemId}/move?${query}`);
 	},
 	/**
 	 * Files and folders whose names match, across everything the person can see: the best 50 first, and `more` when a
 	 * longer search would find others.
 	 */
-	search: (q: string) => call<{ items: Found[]; more: boolean }>("GET", `/api/search?${new URLSearchParams({ q })}`),
+	search: (q: string) => call<{ items: Found[]; more: boolean }>("GET", `${base}/search?${new URLSearchParams({ q })}`),
 	/** What others shared with the person that they reach only through it, the most recently shared first. */
-	sharedWithMe: () => call<{ items: SharedItem[] }>("GET", "/api/shared-with-me").then((r) => r.items),
+	sharedWithMe: () => call<{ items: SharedItem[] }>("GET", `${base}/shared-with-me`).then((r) => r.items),
 	/** Moves an item into the place's trash. */
-	remove: (placeId: number, itemId: number) => call<TrashItem>("DELETE", `/api/places/${placeId}/items/${itemId}`),
-	trash: (placeId: number) => call<{ items: TrashItem[] }>("GET", `/api/places/${placeId}/trash`).then((r) => r.items),
+	remove: (placeId: number, itemId: number) => call<TrashItem>("DELETE", `${base}/places/${placeId}/items/${itemId}`),
+	trash: (placeId: number) => call<{ items: TrashItem[] }>("GET", `${base}/places/${placeId}/trash`).then((r) => r.items),
 	restore: (placeId: number, itemId: number) =>
-		call<{ item: Item; path: FolderRef[] }>("POST", `/api/places/${placeId}/trash/${itemId}/restore`),
+		call<{ item: Item; path: FolderRef[] }>("POST", `${base}/places/${placeId}/trash/${itemId}/restore`),
 	upload,
 	/**
 	 * Starts a resumable upload of a large file into a folder of a place. As for an upload in one request, a name that
@@ -456,12 +506,12 @@ export const api = {
 	/** Cancels a resumable upload: what arrived of it is removed. */
 	cancelUpload: (placeId: number, id: string) => call<null>("DELETE", sessionPath(placeId, id)),
 	/** The address that downloads a file under its original name, whatever kind of file it is. */
-	downloadUrl: (placeId: number, itemId: number) => `/api/places/${placeId}/items/${itemId}/download`,
+	downloadUrl: (placeId: number, itemId: number) => `${base}/places/${placeId}/items/${itemId}/download`,
 	/**
 	 * The address that shows a file in the browser, for a kind that opens there (`opens`); any other file downloads
 	 * from it.
 	 */
-	openUrl: (placeId: number, itemId: number) => `/api/places/${placeId}/items/${itemId}/open`,
+	openUrl: (placeId: number, itemId: number) => `${base}/places/${placeId}/items/${itemId}/open`,
 	/**
 	 * The address that downloads a folder of a place (null: its top folder) as one zip; with items, only those items
 	 * of it.
@@ -471,4 +521,53 @@ export const api = {
 		for (const id of items ?? []) query.append("item", String(id));
 		return `${inFolder(placeId, folderId)}/zip${items ? `?${query}` : ""}`;
 	},
+};
+
+/** What a guest may do with a file or folder given to them (internal/access): each decided again on every request. */
+export type GuestAction =
+	| "list-as-guest"
+	| "download-as-guest"
+	| "upload-as-guest"
+	| "make-folder-as-guest"
+	| "rename-as-guest"
+	| "move-as-guest"
+	| "delete-as-guest";
+
+/** A file or folder as a guest sees it: what they may do with it, and nothing about who else can see it. */
+export type GuestItem = Item & { can: GuestAction[] };
+
+/** What is in a folder given to a guest, and the folders down to it that they may open, from the one given to them. */
+export type GuestListing = {
+	items: GuestItem[];
+	path: FolderRef[];
+	role: "viewer" | "editor" | "";
+	can: GuestAction[];
+	checking?: boolean;
+};
+
+/**
+ * An item of a guest's "Shared with me": what was shared with them that lets them in now. `sharedBy` is the name of who
+ * shared it (or the project's); `until` when their access ends, when it does.
+ */
+export type GuestShared = GuestItem & { place: number; role: "viewer" | "editor"; sharedBy: string; shared: string; until?: string };
+
+/** The guests' own calls, under the public prefix (after forGuests). Their uploads and downloads are api's. */
+export const guestApi = {
+	/** Who is signed in; an ApiError with `signIn` when nobody is. */
+	me: () => call<{ address: string; project: string }>("GET", `${base}/me`),
+	/** Asks for a code mailed to the address: the answer is the same whatever the address. */
+	askForCode: (address: string) => call<{ message: string }>("POST", `${base}/code`, { address }),
+	/** Signs in with the code: the Drive keeps the guest signed in on this browser for 30 days. */
+	signIn: (address: string, code: string) => call<{ address: string }>("POST", `${base}/sign-in`, { address, code }),
+	signOut: () => call<null>("POST", `${base}/sign-out`),
+	sharedWithMe: () => call<{ items: GuestShared[] }>("GET", `${base}/shared-with-me`).then((r) => r.items),
+	/** One file or folder, with the folders above it that the guest may open. */
+	item: (placeId: number, itemId: number) =>
+		call<{ item: GuestItem; path: FolderRef[]; role: string }>("GET", `${base}/places/${placeId}/items/${itemId}`),
+	list: (placeId: number, folderId: number, wait?: boolean) =>
+		call<GuestListing>("GET", `${base}/places/${placeId}/items/${folderId}/items${wait ? "?wait" : ""}`),
+	/** Moves an item into a folder inside what was given to the guest. */
+	move: (placeId: number, itemId: number, to: number) => call<Item>("POST", `${base}/places/${placeId}/items/${itemId}/move`, { to }),
+	/** Deletes an item into its owner's trash. */
+	remove: (placeId: number, itemId: number) => call<null>("DELETE", `${base}/places/${placeId}/items/${itemId}`),
 };
