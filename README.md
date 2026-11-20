@@ -18,6 +18,8 @@ guest, My files, shared folder, Drive storage, trash). The Drive also runs witho
   links and guests. The storage wins for which files exist; the index alone holds access. Lists come from the index,
   and the Drive looks at the storage again when a folder is opened and in a slow walk now and then, so changes made on
   the storage directly reach the index (see [Keeping in step with the storage](#keeping-in-step-with-the-storage)).
+- The index is copied into the data folder, for backups, and onto the storage, so that a Drive on a new server starts
+  with the sharing the lost one had (see [The copy of the index](#the-copy-of-the-index)).
 - Members do not sign in to the Drive. A reverse proxy in front of it signs them in and adds headers saying who they
   are (see below). Everyone else comes in under one public prefix, `/s/`, which the reverse proxy opens without sign-in:
   visitors with a public link (see [Public links](#public-links)), and guests, who sign in there with a code mailed to
@@ -96,7 +98,7 @@ a test keeps the two equal.)
 | `DRIVE_PROJECT_NAME` | yes | Name of the project (the organisation) the Drive belongs to. |
 | `DRIVE_HEADER_SECRET` | yes | Secret the reverse proxy adds as `Drive-Secret`. At least 32 characters. The key that keeps guests' codes (see [Guests](#guests)) is made from it, so changing it ends the codes on their way (not the sessions). |
 | `DRIVE_MEMBERS_FILE` | yes | Path of the member list file. |
-| `DRIVE_DATA_DIR` | yes | Folder for the index. The container image sets it to `/data`. |
+| `DRIVE_DATA_DIR` | yes | Folder for the index, and its copy in `backup/` (see [Backing up the Drive](#backing-up-the-drive)). The container image sets it to `/data`. |
 | `DRIVE_LISTEN` | no, `:8080` | Address the web server listens on. |
 | `DRIVE_SMTP_HOST` | no | Mail server the Drive sends its own mail through (see [Mail](#mail)), such as `smtp.example.com`. Empty: the Drive sends no mail; sharing with members and public links work without it, and inviting guests is unavailable. |
 | `DRIVE_SMTP_PORT` | no, `587` | Port of the mail server. |
@@ -133,6 +135,9 @@ Shared folders/
     uploads/
         3f9c0b…e1                           one file per upload while its bytes arrive, named after a random id;
                                             moved into its folder when whole
+    index/
+        1a5ff6fe…73/                        the copies of the index whose storage id this is (the mark's)
+            copy-000000000042.sqlite        the latest copy of the index (see "The copy of the index")
     storage-id                              the Drive's mark: the id of the storage, which the index keeps too
 ```
 
@@ -168,7 +173,8 @@ dropped from the index; uploads in progress count once they are in their folder.
 
 An upload nothing has arrived for in a day is removed, with its file, when the Drive starts and every hour; so is a
 file in the uploads folder the index does not know (left by an upload the Drive did not finish) once the storage says
-it has not changed for a day. The index copy gets a hidden folder of its own beside `trash/` with its ticket.
+it has not changed for a day. The copies of the index have a hidden folder of their own, `index/` (see [The copy of the
+index](#the-copy-of-the-index)); the looks and the walk never read `.superit-drive/`, and no route reaches it.
 
 ### Keeping in step with the storage
 
@@ -322,6 +328,10 @@ on with them; a walk that could not, the next one, six hours later, begins with 
   snapshot taken after the Drive wrote it still stops every look, as without a rollback.
 - **Places made since** (a shared folder, a member's first My files) stay, emptied: a place is never removed for want of
   its top folder. A shared folder's managers can delete it.
+- **The copy of the index on the storage** is the snapshot's again, older than the index. The Drive never adopts it (it
+  starts with its own index), and copies its index as it starts, which replaces it; after a rollback to before the mark,
+  once the walk has written the mark back. A Drive started later from that copy (a server lost) has the sharing as it is
+  now, and knows the rollback was taken in.
 
 **The notice.** For seven days from `DRIVE_ROLLBACK_AT` (from when the Drive took it in, when that time is still to come
 by the Drive's clock), `GET /api/me` answers members with
@@ -342,6 +352,163 @@ just as the Drive sends on it; the Drive then cannot tell whether the server act
 storage (`PUT`, `MKCOL`, `MOVE`, `DELETE`) goes on a new connection of its own, which a server never closes for being
 idle, and is never sent twice. Reads (`GET`, `PROPFIND`) use kept connections, closed by the Drive after four seconds
 idle, and are sent once more on a new connection when the server closed the kept one first.
+
+### The copy of the index
+
+The index alone holds who has access to what, and it lives on one server. So the Drive keeps copies of it
+(`internal/drive/copies.go`):
+
+- **in its data folder**, at `backup/index.sqlite`: the whole index as one SQLite file, made while the Drive runs with
+  SQLite's `VACUUM INTO` (which reads the index in one read transaction, so the copy is the index as it was at one
+  moment) and renamed over the one before, so whatever reads it, at any moment, reads one whole copy. It is the file a
+  backup of the server archives (see [Backing up the Drive](#backing-up-the-drive));
+- **on the storage**, at `.superit-drive/index/<storage id>/copy-<number>.sqlite`: the same copy without what lets
+  guests in now or belongs to one server (below), for a Drive on a new server to start from (see [Starting from a
+  copy](#starting-from-a-copy)).
+
+**When.** Both together: when the Drive starts; soon after access changes; and every night at 03:00 UTC, whatever
+changed. An access change is anything that changes who may reach what: a share given, changed or taken away; a public
+link made, replaced or removed; a guest invited, their invitation changed, or gone with it; a shared folder made,
+deleted, restored or removed for good, and its managers; a switch of sharing outside the project; a held My files
+handed over or deleted; and an item renamed, moved, deleted or restored (what was given on it, and on what is in it,
+hangs on its id, which an older copy would not find where the storage now has it). The index counts them itself, in
+the transaction that makes them (migration `0011`: triggers on its tables), so none is missed, whatever makes it: a
+look at the storage that drops something shared counts too. A burst of them makes one copy: it is written once nothing
+changed for 30 seconds, and no change waits more than five minutes for its copy, however much changes meanwhile. Files
+added, folders made and how often links and invitations were used are not access changes: a copy older than them
+finds the files on the storage, with the access of their folder, and the counts are a night behind at most.
+
+**How fresh.** At any moment both copies hold every access change made more than five minutes before (and every one
+made more than 30 seconds before a pause in them), and everything else as it was at the last copy: the last access
+change's, or last night's at the latest. The log says each copy, with why it was made, its number and its size. When the
+storage does not take a copy (it does not answer, or does not hold the Drive's mark), the data folder's copy is
+written all the same, and the copy is put on the storage five minutes later, or once the mark is back.
+
+**On the storage, safely.** A copy is written under a name of its own (`upload-<random>.part`, one `PUT`), then moved
+to its name (`MOVE`, never replacing anything), and only then is the copy before it removed: a whole copy is there
+throughout, and a copy cut off midway never has a copy's name. Each copy has the number after the last, kept in the
+index; the folder holds one copy, two for a moment. A copy goes on the storage only while the storage holds the Drive's
+mark with the id its index keeps: never onto a storage that is empty, mounted wrongly or someone else's, and the folder
+is named after that id, so the copies of another index are never removed. Making a copy streams from disk to disk, and
+putting it on the storage streams from the file, over one connection with the capped buffers every connection to the
+storage has: it takes no transfer slot (as the walk takes none), so it never makes anyone wait their turn, and its
+memory does not grow with the index ([measured](#large-transfers-and-the-memory-figure)). Its temporary files are made
+in the data folder, which is on disk, never in `/tmp`, which can be memory.
+
+**What the copy on the storage leaves out.** Whoever has the storage login can read it, so it holds nothing that lets
+anyone in by itself, and nothing that only one server can honour:
+
+| Left out | Why |
+|---|---|
+| Guests' sessions (`guest_sessions`: each token's SHA-256) | A session is one browser's on one server. A hash cannot be turned back into a token, but a planted session would sign someone in; a Drive on a new server starts with none, and guests sign in again with a new code. |
+| Codes mailed to guests (`guest_codes`: HMACs) | They last ten minutes, and are keyed from `DRIVE_HEADER_SECRET`, which a new server does not have. |
+| The limits on trying codes (`guest_limits`) | Counters of the last hour on one server. |
+| Uploads in progress (`uploads`) | Their uploader's browser on the old server; their files in `.superit-drive/uploads/` are removed a day after they were last written to, as any the index does not know. |
+| Where the walk is (`walk_cursor`, `walk_started`, `walk_finished`) | By one server's clock; a Drive started from a copy walks the storage at once, from the top. |
+
+What is left out is overwritten with zeros in the copy's file (SQLite's `secure_delete`), not only unlisted.
+Everything else is kept: the places, the folder tree, the trash, every grant (to members, to everyone, and guests'
+invitations with their end dates), public links (by their token's SHA-256: the address is in no copy, so a copy opens no
+link by itself, and the same address works again on a new server), guests by address, the switches of sharing outside
+the project, the record of acts on held My files (and an act under way, which a Drive started from the copy finishes),
+how often links and invitations were used, the storage's id, and what the Drive knows of rollbacks (`rollback`,
+`rollback_walk`, `storage_marked`): a Drive started from the copy knows a rollback it was told about is old news, and
+goes on with the walk after one that was under way.
+
+### Starting from a copy
+
+A Drive whose data folder holds no `index.sqlite` makes its index from a copy before it starts (`internal/drive/adopt.go`),
+when there is one:
+
+- the data folder's own copy, `backup/index.sqlite` (a backup of the server put back: see [Backing up the
+  Drive](#backing-up-the-drive));
+- the latest copy on the storage, in the folder of the id in the storage's mark, and only one whose index keeps that
+  same id. When the data folder's copy belongs to that storage too, the newer of the two (by number) is taken, the data
+  folder's when they are the same copy.
+
+A copy becomes the index only once it passes a check: SQLite's integrity and foreign key checks; a schema exactly what
+this Drive's migrations make for its version (so no table, index, trigger or view of its own); every place's top
+folder, and every held act's, one name in `My files/` or `Shared folders/` (never the Drive's hidden folder, nor outside
+its folder); a number that copies reach. One made by an older Drive is brought up to date, as any index is. A copy from
+the storage is then cleared of what a copy leaves out (in case someone put it there), and the Drive walks the storage at
+once, every trash first, as after a rollback: what changed on the storage since the copy was made comes in as the looks
+always bring it (a file put there since has the access of its folder; what is gone is hidden at once, its sharing and
+its link with it, and dropped ten minutes later), and an item deleted since, which the copy has where it was, is found
+in its entry of the trash as itself, with what was given on it and its link, which work again when it is restored. The
+log says which copy it was, when it was copied, and how many places, items, shares, managers, links, guests and acts it
+brought; guests sign in again with a new code.
+
+- **A copy made by a newer Drive** (its schema is newer than this one's): the Drive does not start, and says so. An
+  index built without it would soon put a copy without the shares in its place. Start a version as new as the one that
+  made it.
+- **A damaged copy**, **one of another storage's index**, or **one larger than 4 GiB**: not adopted. It is moved aside on
+  the storage, to `refused-<when>-<its name>` (or beside the data folder's copy, as `index.sqlite.refused-<when>`), and
+  kept; the Drive builds its index from the files, and the log says so loudly (`level=ERROR`, in capitals).
+- **No copy**: the Drive builds its index from the files on the storage: each member's My files is the folder of their
+  address when they first open the Drive, with what is in it; there are no shares, links or guests, and folders in
+  `Shared folders/` belong to no shared folder (the walk logs them).
+- **Copies, but no mark on the storage**: none is adopted (whose they are cannot be told), the log says so loudly, and
+  the copies stay. If the storage is this Drive's, stop it, write the id of the copies to adopt (the name of their
+  folder) into `.superit-drive/storage-id`, and start it again with an empty data folder.
+- **The storage cannot be read** (after three tries in about ten seconds): the Drive does not start, and says why. An
+  index made without knowing whether there is a copy would replace it. A container started again by its supervisor
+  (Docker's `--restart`) tries again.
+
+A Drive that starts with its index never adopts a copy: a running Drive, or one started again (a new version, a new
+capacity, a rollback). After a rollback the storage's copy is the snapshot's, older than the index (see [After a
+rollback](#after-a-rollback)).
+
+**What someone with write access to the storage can do with a copy.** Anyone with the storage login reads and changes
+every file, and so the copies. A running Drive never reads a copy; a Drive started with an empty data folder adopts what
+is there. Through a copy they planted or changed, they can give more than the files they already hold:
+
+- access to any file in the Drive to any member (a grant), or a member's My files to another member, or the manager role
+  on shared folders;
+- public links whose address they chose (anyone with it reaches those files through the Drive, until the link is
+  removed), and invitations to addresses they control (to sign in, a guest still needs the code mailed to that address);
+- sharing outside the project switched back on, where it was off;
+- an act under way that hands over or deletes a held My files (it changes only what is in the Drive's folder), and a
+  record of acts that never happened, or without those that did;
+- a copy that keeps a Drive from starting (one that claims a newer schema), or one that is refused (the Drive starts with
+  no shares).
+
+They cannot: add members or project admins (the member list comes from the platform); sign anyone in as a guest
+(sessions and codes are cleared); reach outside the Drive's folder, or into its hidden folder (the check); or put code
+into the index (no trigger or view of its own). What bounds it: a copy is adopted only with an empty data folder; the
+check; the log line that counts what it brought; and project admins see every public link and every guest's invitation
+in "Shared outside the project". Nothing prevents it: a copy signed with a key made from `DRIVE_HEADER_SECRET` would
+not open on a new server, whose daemon makes a new secret. The storage login opens the sharing as well as the files;
+Superit gives customers no login to the Storage Box.
+
+### Backing up the Drive
+
+The data folder holds:
+
+| File | What it is | Archive it? |
+|---|---|---|
+| `index.sqlite`, `index.sqlite-wal`, `index.sqlite-shm` | The live index and SQLite's write-ahead log. | **No.** SQLite writes the log and the file at different moments: copies of the two read one after the other, while the Drive runs, can be a damaged index, or lose changes. |
+| `backup/index.sqlite` | The copy of the index: whole and consistent at every moment, renamed over the one before. It holds every access change but those of the last five minutes (see [The copy of the index](#the-copy-of-the-index)). | **Yes**, while the Drive runs; nothing needs to be stopped. |
+| `.copy-<random>.sqlite` | A copy being made, cleared or adopted; removed when the Drive starts. | No. |
+
+**What the Superit agent must do.**
+
+- **Back up, and snapshot before an upgrade**: archive the data folder (`/mnt/data/superit-drive`) without `index.sqlite`,
+  `index.sqlite-wal` and `index.sqlite-shm`, with the Drive running. With `tar -C /mnt/data`:
+  `--exclude=superit-drive/index.sqlite --exclude=superit-drive/index.sqlite-wal --exclude=superit-drive/index.sqlite-shm superit-drive`.
+  Everything else in the folder (`backup/index.sqlite`, and the agent's own `.superit-storage.json`) goes in the archive.
+- **Restore** (the same server, or a new one): stop the Drive; replace the data folder with the archive's, so that it
+  holds `backup/index.sqlite` and no `index.sqlite` (owner `65532:65532`, mode `700`, as for any start); start the Drive
+  with the same storage settings (the header secret may be new). Starting, it makes its index from `backup/index.sqlite`,
+  or from the copy on the storage when that one is newer (the storage's copy is usually fresher than a nightly backup,
+  unless the storage was rolled back since); the log says which. From the data folder's copy, guests stay signed in.
+  Never put an archived `index.sqlite` back, nor a copy at `index.sqlite` while an `index.sqlite-wal` is there.
+- **A new server without a backup**: start the Drive with an empty data folder and the same storage settings: it makes
+  its index from the copy on the storage.
+- **The upgrade test** (snapshot, wipe, restore, check that a share is there and a file downloads) passes with the above
+  as it is: the share is in `backup/index.sqlite` once the copy after it has been written, 30 seconds after the share (or
+  at once when the Drive is stopped and started again before the snapshot).
+
+Running the Drive yourself, back up `backup/index.sqlite` the same way, and restore it as above.
 
 ### Shared folders, sharing and who may do what
 
@@ -702,7 +869,7 @@ as one that does not exist (404, `notHere`); without a session every route but s
 A cautious organisation can keep everything inside: a project admin switches sharing outside the project (public links
 and guests) off for the whole project, and a shared folder's managers (the project admins among them) for that shared
 folder, such as Payroll. A My files has no switch of its own. The switches live in the Drive's index, not in its
-settings: the platform passes nothing, and they go wherever the index goes (its copy on the storage, once there is one).
+settings: the platform passes nothing, and they go wherever the index goes (its copies, and a Drive started from one).
 
 Where it is off (the project's switch, or the shared folder's; `access.Place.NoSharingOutside`, set in
 `server.accessPlace` from the place as the index reads it):
@@ -1092,7 +1259,9 @@ It needs:
   wait up to ten minutes for its answer when the Drive is busy.
 - **The member list file**, in a folder of its own mounted into the container.
 - **The data folder**, `/data` in the container, kept between restarts. It holds the index, which alone knows who
-  has access to what; keep a backup of it.
+  has access to what, and a copy of it, `backup/index.sqlite`, which is what to back up (see [Backing up the
+  Drive](#backing-up-the-drive)). The Drive also keeps a copy on the WebDAV server, and starts from it with an empty data
+  folder (see [The copy of the index](#the-copy-of-the-index)).
 
 The settings are in the [table above](#settings).
 
@@ -1251,7 +1420,10 @@ reports the container's memory from its cgroup (the peak, and the highest during
 own memory, network buffers, page cache and kernel). A second test there puts 70,000 files on the stand-in storage (one
 folder of 10,000, 200 folders of 200, and one folder of 20,000, more than a look reads), lets the released Drive walk
 them all, then has four people open the folder of 10,000 at once, and reports the same. Both take about eight minutes
-and leave only the images `superit-drive:memory-test` and `superit-drive-test-webdav`.
+and leave only the images `superit-drive:memory-test` and `superit-drive-test-webdav`. A third puts 110,000 files on
+the storage (11 folders of 10,000), lets the Drive walk them all, then, while 16 downloads (half of them read slowly) and
+four people opening a folder of 10,000 go on over and over, has a share make the Drive copy its index into its data
+folder and onto the storage, and reports the same; it takes about three minutes.
 
 The harness builds the Drive with the build tag `testclock`, which is the only difference from a released Drive: in
 it, `SUPERIT_DRIVE_TEST_CLOCK_SHIFT` (a Go duration such as `744h`) moves the Drive's clock forward, so a test can
@@ -1259,12 +1431,16 @@ restart a Drive (`Drive.Restart`) 31 days later and see the trash emptied, or te
 from the storage dropped; `SUPERIT_DRIVE_TEST_STOP_AT` stops the Drive at once, as if it were killed, at a named point of
 its work (`hand-over moved`, `hand-over trash removed`, `delete removed`), so a test sees it finish what it left when it
 starts again; and `SUPERIT_DRIVE_TEST_WALK_EVERY` and `SUPERIT_DRIVE_TEST_WALK_PAUSE` (Go durations) make the
-walk through the storage start that soon, run that often and rest that long after each folder. A Drive built without
-the tag reads no such variable. Tests change the storage directly with the harness's own WebDAV client
+walk through the storage start that soon, run that often and rest that long after each folder; and
+`SUPERIT_DRIVE_TEST_COPY_QUIET`, `SUPERIT_DRIVE_TEST_COPY_LATEST` and `SUPERIT_DRIVE_TEST_COPY_RETRY` (Go durations) make
+the copy of the index follow access changes that soon (see [The copy of the index](#the-copy-of-the-index)). A Drive
+built without the tag reads no such variable. Tests change the storage directly with the harness's own WebDAV client
 (`Drive.Storage`), including a `MOVE` that keeps a file's time (a storage that answered wrong for a while), `Fill`,
 which puts thousands of files straight onto the stand-in storage's disk, and `Snapshot` and `RollBack`, which copy the
 Drive's folder on that disk with every time kept and put it back, as a Storage Box's snapshots do (stop the Drive first,
-`Drive.Stop`, then `Restart` it with the rollback settings).
+`Drive.Stop`, then `Restart` it with the rollback settings). `Drive.OnANewServer` starts the Drive again as a new server
+would, after the old one was lost: the same storage and settings, an empty data folder and a new header secret;
+`Drive.Kill` stops it as a server that dies does, writing nothing more.
 
 **Running it locally.**
 
@@ -1316,9 +1492,11 @@ internal/server/       HTTP: routes.go lists every route; server.go's guard runs
                        held.go the held My files of people who left, handed over or deleted
 internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
                        shared folders, the access given on them; reread.go and walk.go keep the index in step with
-                       the storage, rollback.go takes in the storage put back to a snapshot, and held.go hands
-                       over or deletes the held My files of people who left
-internal/index/        the SQLite index (search.go: names as a search compares them, and the walk down a scope);
+                       the storage, rollback.go takes in the storage put back to a snapshot, held.go hands
+                       over or deletes the held My files of people who left, copies.go writes the copies of the
+                       index, and adopt.go makes the index from one when the data folder holds none
+internal/index/        the SQLite index (search.go: names as a search compares them, and the walk down a scope;
+                       copies.go: copies of it, made, cleared and checked);
                        schema changes are numbered files in migrations/, run with foreign keys
                        off (SQLite's recipe for rebuilding a table) and checked with foreign_key_check before each
                        commits

@@ -27,7 +27,8 @@ import (
 //     Drive started on a new server with an empty data folder to adopt (adopt.go).
 //
 // Both are written at once: when the Drive starts, soon after access changes (index.AccessChanges: a burst of them makes
-// one copy, Copying.Quiet after the last, and none waits longer than Copying.Latest), and every night (Copying.Night).
+// one copy, Copying.Quiet after the last, and none waits longer than Copying.Latest), every night (Copying.Night), and
+// as the Drive stops when access changed since the last copy.
 // A copy is put on the storage only while the storage holds the Drive's mark with the id the copy's index keeps: never
 // on a storage that is empty, mounted wrongly or someone else's. One the storage did not take is tried again
 // (Copying.Retry). The copy on the storage is written under a name of its own and moved into place when whole; the one
@@ -90,7 +91,8 @@ var walkState = []string{walkCursor, walkStarted, walkFinished}
 var errNotOurs = errors.New("the storage does not hold the Drive's mark with the id of its index")
 
 // KeepCopies writes copies of the index into the data folder dataDir and onto the storage, as c says, until ctx ends:
-// one at once, then after access changes and every night.
+// one at once, then after access changes and every night, and a last one as ctx ends when access changed since the last
+// (so ctx should end after the last request has been answered).
 func (d *Drive) KeepCopies(ctx context.Context, dataDir string, c Copying) {
 	removeTemporary(dataDir)
 	k := &keeper{d: d, dir: dataDir, c: c, copied: -1}
@@ -105,6 +107,7 @@ func (d *Drive) KeepCopies(ctx context.Context, dataDir string, c Copying) {
 		select {
 		case <-ctx.Done():
 			t.Stop()
+			k.last()
 			return
 		case <-t.C:
 		}
@@ -157,6 +160,21 @@ type keeper struct {
 	// notBefore holds the next copy back after one that could not be made at all (a full disk), so it is not tried on
 	// every poll.
 	notBefore time.Time
+}
+
+// finalCopyWithin bounds the copy the Drive writes as it stops.
+const finalCopyWithin = 10 * time.Second
+
+// last writes a copy as the Drive stops, when the index has access changes the last copy lacks: a snapshot of the data
+// folder taken once the Drive has stopped (as before an upgrade) then holds every one of them, and so does the storage.
+func (k *keeper) last() {
+	n, err := k.d.index.AccessChanges(context.Background())
+	if err != nil || n == k.copied {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), finalCopyWithin)
+	defer cancel()
+	k.write(ctx, "the Drive stops")
 }
 
 // nextNight is the first time after now that is at, in UTC, from midnight.

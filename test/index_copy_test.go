@@ -261,7 +261,6 @@ func TestALostServerComesBackFromTheCopyOnTheStorage(t *testing.T) {
 	})
 }
 
-
 // sharedBeforeTheCopy is Bence's files with Clients shared with Dóra and a public link on Notes.txt, and Réka's shared
 // folder Payroll, given to Dóra, all of it in the copy of the index on the storage. It returns the link's page.
 func sharedBeforeTheCopy(t *testing.T, d *harness.Drive) (x bences, payroll placeJSON, notesPage string) {
@@ -476,7 +475,7 @@ func TestWhatChangedSinceTheCopyComesIn(t *testing.T) {
 	})
 	b = d.As(bence)
 	deleted(t, b, x.place, x.ledger.ID)
-	d.Stop(t)
+	d.Kill(t) // the server dies: no copy as it stops
 	nextSecond(t, d)
 	d.Storage.Put(t, "My files/bence@example.com/Clients/New offer.pdf", "new offer")
 	d.Storage.Delete(t, "My files/bence@example.com/Notes.txt", false)
@@ -799,5 +798,39 @@ func TestNoRouteReachesTheHiddenFolder(t *testing.T) {
 				t.Errorf("%s reached the hidden folder at %s: %d", who, p, res.Status)
 			}
 		}
+	}
+}
+
+// A Drive that stops (as before an upgrade, whose snapshot of the data folder is taken once it has stopped) copies its
+// index as it stops when access changed since the last copy: the copy then holds every change, the last share made just
+// before included. A Drive that dies (killed) writes nothing more.
+func TestAStoppingDriveCopiesWhatItHasNotYet(t *testing.T) {
+	t.Parallel()
+	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora}, Env: copiesSoon("1m", "10m")})
+	b := d.As(bence)
+	x := bencesFiles(t, d)
+	ok(t, "sharing Clients with Dóra", share(t, b, x.place, x.clients.ID, dora, "viewer"))
+	d.Stop(t)
+	if got := copiesMade(d); !slices.Contains(got, "the Drive stops") {
+		t.Fatalf("the Drive stopped without copying its index: %q", got)
+	}
+	// The snapshot holds the data folder without the live index; restored from it, the share is there.
+	for _, name := range []string{"index.sqlite", "index.sqlite-wal", "index.sqlite-shm"} {
+		os.Remove(filepath.Join(d.DataDir, name))
+	}
+	d.Restart(t, nil)
+	adopted(t, d, "data folder")
+	if got := sharedNames(t, d.As(dora)); !slices.Equal(got, []string{entry("Clients", x.place)}) {
+		t.Fatalf("Dóra's Shared with me, restored from the copy written as the Drive stopped: %q", got)
+	}
+
+	// Stopped again with nothing new since the copy it made as it started: no copy.
+	harness.Eventually(t, "the copy as the Drive started", func() bool {
+		return strings.Count(strings.Join(copiesMade(d), "\n"), "the Drive started") > 0
+	})
+	n := len(copiesMade(d))
+	d.Stop(t)
+	if got := copiesMade(d)[n:]; slices.Contains(got, "the Drive stops") {
+		t.Fatalf("the Drive copied its index as it stopped, with no access change since the last copy: %q", got)
 	}
 }

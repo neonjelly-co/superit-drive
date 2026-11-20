@@ -157,14 +157,16 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	}()
 	defer func() { stopWalk(); <-walkDone }() // before the index closes
 
-	// Writes a copy of the index into the data folder and onto the storage: now, after access changes, and every night.
+	// Writes a copy of the index into the data folder and onto the storage: now, after access changes, every night, and as
+	// the Drive stops.
 	copying := drive.DefaultCopying
 	if quiet, latest, retry, ok := clock.Copying(); ok {
 		copying.Quiet, copying.Latest, copying.Retry, copying.Poll = quiet, latest, retry, min(copying.Poll, quiet/4)
 		log.Warn("this is a test build: the copy of the index follows access changes at the pace the test sets",
 			"quiet", quiet.String(), "latest", latest.String(), "retry", retry.String())
 	}
-	copyCtx, stopCopies := context.WithCancel(ctx)
+	// It stops after the last request has been answered (as the uses below), and copies once more if access changed.
+	copyCtx, stopCopies := context.WithCancel(context.WithoutCancel(ctx))
 	copiesDone := make(chan struct{})
 	go func() {
 		defer close(copiesDone)

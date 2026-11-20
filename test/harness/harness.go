@@ -398,6 +398,18 @@ func (d *Drive) stop() {
 	}
 }
 
+// Kill stops the Drive at once, as a server that dies does: it writes nothing more. Restart starts it again.
+func (d *Drive) Kill(t *testing.T) {
+	t.Helper()
+	select {
+	case <-d.exited:
+		return
+	default:
+	}
+	_ = d.cmd.Process.Kill()
+	<-d.exited
+}
+
 // Logs is everything the Drive printed so far, before restarts included.
 func (d *Drive) Logs() string { return d.earlierLogs + d.logs.String() }
 

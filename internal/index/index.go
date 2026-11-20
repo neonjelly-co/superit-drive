@@ -4,7 +4,7 @@
 // index alone holds access.
 //
 // index.go opens the file and holds the places; shared.go holds shared folders, grants.go the access given on them and
-// on items, items.go the folder tree, and trash.go the trash.
+// on items, items.go the folder tree, trash.go the trash, and copies.go copies of the whole index.
 //
 // The schema is changed only by adding a numbered file to migrations/. Each runs once, in order, and the database's
 // user_version records how far it got.
