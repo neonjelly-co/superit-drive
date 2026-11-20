@@ -38,7 +38,10 @@ const (
 //   - Try, with a key: the request is refused at once when it is not its turn, and its key keeps its place in line.
 //     Uploads wait this way, because an upload kept waiting would have its bytes fill the connection's buffers
 //     meanwhile, and because the interface can then show it as waiting. When the key's turn comes, a slot is kept for
-//     it for Hold; trying again with the key takes it. A key not tried again within Forget loses its place.
+//     it for Hold; trying again with the key takes it. A key not tried again within Forget loses its place. At most
+//     MaxOutsidersWaiting outsiders' keys are kept at once (those whose turn came included): beyond that, an outsider's
+//     new key is refused without a place, as if it had none, so that strangers sending new keys cost a bounded amount of
+//     memory however fast they send them.
 type Gate struct {
 	mu   sync.Mutex
 	free int
@@ -49,8 +52,9 @@ type Gate struct {
 	lines [2][]*waiter
 	// waitingOutsiders counts the outsiders waiting in line themselves (Wait).
 	waitingOutsiders int
-	// keys is every key in line, or holding a slot kept for it.
-	keys map[string]*waiter
+	// keys is every key in line, or holding a slot kept for it; keyedOutsiders how many of them are outsiders'.
+	keys           map[string]*waiter
+	keyedOutsiders int
 
 	hold, forget time.Duration
 	now          func() time.Time
@@ -62,7 +66,8 @@ const (
 	Forget = time.Minute
 )
 
-// MaxOutsidersWaiting is the most outsiders that wait in line themselves at once.
+// MaxOutsidersWaiting is the most outsiders that wait in line themselves at once, and the most outsiders' keys kept at
+// once.
 const MaxOutsidersWaiting = 64
 
 type waiter struct {
@@ -133,7 +138,7 @@ func (g *Gate) Try(c Class, key string) (release func(), ok bool) {
 	if w := g.keys[key]; key != "" && w != nil {
 		if w.given {
 			w.keep.Stop()
-			delete(g.keys, key)
+			g.dropKey(w)
 			return g.releaser(w.class), true
 		}
 		w.tried = g.now()
@@ -144,11 +149,46 @@ func (g *Gate) Try(c Class, key string) (release func(), ok bool) {
 		return g.releaser(c), true
 	}
 	if key != "" {
+		if c == Outsiders && g.keyedOutsiders >= MaxOutsidersWaiting {
+			g.forgetOutsiders()
+			if g.keyedOutsiders >= MaxOutsidersWaiting {
+				return nil, false // too many outsiders keep a place already: this one keeps none
+			}
+		}
 		w := &waiter{class: c, key: key, tried: g.now()}
 		g.keys[key] = w
+		if c == Outsiders {
+			g.keyedOutsiders++
+		}
 		g.lines[c] = append(g.lines[c], w)
 	}
 	return nil, false
+}
+
+// dropKey forgets the key of w, if it is still w's. g.mu must be held.
+func (g *Gate) dropKey(w *waiter) {
+	if g.keys[w.key] != w {
+		return
+	}
+	delete(g.keys, w.key)
+	if w.class == Outsiders {
+		g.keyedOutsiders--
+	}
+}
+
+// forgetOutsiders takes out of the outsiders' line the keys not tried again within forget, which would otherwise lose
+// their place only when their turn comes. g.mu must be held.
+func (g *Gate) forgetOutsiders() {
+	line := g.lines[Outsiders][:0]
+	for _, w := range g.lines[Outsiders] {
+		if w.key != "" && g.now().Sub(w.tried) > g.forget {
+			g.dropKey(w)
+			continue
+		}
+		line = append(line, w)
+	}
+	clear(g.lines[Outsiders][len(line):]) // let go of those taken out
+	g.lines[Outsiders] = line
 }
 
 // Waiting says whether key is in line, its turn not yet come.
@@ -218,7 +258,7 @@ func (g *Gate) handOn() {
 			}
 			close(w.ready)
 		case g.now().Sub(w.tried) > g.forget:
-			delete(g.keys, w.key)
+			g.dropKey(w)
 		default:
 			g.take(c)
 			w.given = true
@@ -234,7 +274,7 @@ func (g *Gate) notCome(w *waiter) {
 	if g.keys[w.key] != w {
 		return // it came for it meanwhile
 	}
-	delete(g.keys, w.key)
+	g.dropKey(w)
 	g.giveBack(w.class)
 	g.handOn()
 }
