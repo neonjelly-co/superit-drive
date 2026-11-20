@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/members"
 )
@@ -27,7 +28,29 @@ var people = map[string]Person{
 	"a visitor, link on no item":                            {Link: link(onTop, ViewLink, bence)},
 	"Réka, signed in, with her own link on Clients":         {UserID: "u-reka", Role: members.RoleMember, Link: link(onClients, ViewLink, reka)},
 	"the admin, signed in, with a link on Clients by Bence": {UserID: "u-admin", Role: members.RoleAdmin, Link: link(onClients, ViewLink, bence)},
+
+	// Guests: Anna (guest 7), whom the places below invite, and another guest nobody invited there. A guest is a guest
+	// whatever else the request says: with Réka's user id and role too, she is still only Anna; with a link, she is a
+	// visitor like any other.
+	"a guest":                     {Guest: anna},
+	"another guest":               {Guest: &Guest{ID: 8}},
+	"a guest with Réka's user id": {UserID: "u-reka", Role: members.RoleMember, Guest: anna},
+	"a guest with a link on Clients by Bence": {Guest: anna, Link: link(onClients, ViewLink, bence)},
 }
+
+// anna is the guest the places invite.
+var anna = &Guest{ID: 7}
+
+// now is the time of the decisions about grants with an end date.
+var now = time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+// toGuest is an invitation to Anna, given by by; until gives it an end date.
+func toGuest(on int64, role Role, by Person) Grant {
+	return Grant{On: on, Guest: anna.ID, Role: role, By: by}
+}
+func until(g Grant, ends time.Time) Grant { g.Ends = ends; return g }
+
+var gone = Person{UserID: "u-gone"} // a member who has left the project
 
 // The makers of the links the visitors came with, as the member list has them.
 var (
@@ -225,12 +248,86 @@ var places = map[string]*Place{
 	"a shared folder › Offer.pdf, given editor on it as a whole, no sharing outside": {Kind: SharedFolder, Path: offer,
 		NoSharingOutside: true, Grants: grants(to("u-reka", onTop, Editor))},
 	"a shared folder › Clients, no role, no sharing outside": {Kind: SharedFolder, Path: clients, NoSharingOutside: true},
+
+	// Guests. An invitation reaches everything inside what it is on, and nothing above it or beside it; an editor
+	// renames, moves and deletes only what is inside it.
+	"Bence's My files › Offer.pdf, the guest given viewer on Clients by Bence": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		Grants: grants(toGuest(onClients, Viewer, bence))},
+	"Bence's My files › Offer.pdf, the guest given editor on Clients by Bence": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		Grants: grants(toGuest(onClients, Editor, bence))},
+	"Bence's My files › 2026, the guest given editor on Clients by Bence": {Kind: MyFiles, Owner: "u-bence", Path: y2026,
+		Grants: grants(toGuest(onClients, Editor, bence))},
+	"Bence's My files › Clients, the guest given editor on Clients by Bence": {Kind: MyFiles, Owner: "u-bence", Path: clients,
+		Grants: grants(toGuest(onClients, Editor, bence))},
+	"Bence's My files › Offer.pdf, the guest given viewer on Offer.pdf by Bence": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		Grants: grants(toGuest(onOffer, Viewer, bence))},
+	"Bence's My files › Offer.pdf, the guest given viewer on Clients and editor on Offer.pdf by Bence": {Kind: MyFiles, Owner: "u-bence",
+		Path: offer, Grants: grants(toGuest(onClients, Viewer, bence), toGuest(onOffer, Editor, bence))},
+	"Bence's My files › Ledger.xlsx, the guest given editor on Offer.pdf by Bence": {Kind: MyFiles, Owner: "u-bence", Path: ledger,
+		Grants: grants(toGuest(onOffer, Editor, bence))},
+	"Bence's My files › 2026, the guest given editor on Offer.pdf by Bence": {Kind: MyFiles, Owner: "u-bence", Path: y2026,
+		Grants: grants(toGuest(onOffer, Editor, bence))},
+	"Bence's My files, the guest given editor on Clients by Bence": {Kind: MyFiles, Owner: "u-bence",
+		Grants: grants(toGuest(onClients, Editor, bence))},
+	// In a My files an invitation is its giver's share: it counts while they may share its item, as a link.
+	"Bence's My files › Offer.pdf, the guest given editor on Bakery by Réka, Réka given editor on Clients": {Kind: MyFiles, Owner: "u-bence",
+		Path: offer, Grants: grants(to("u-reka", onClients, Editor), toGuest(onBakery, Editor, reka))},
+	"Bence's My files › Offer.pdf, the guest given editor on Bakery by Réka, Réka given viewer on Clients": {Kind: MyFiles, Owner: "u-bence",
+		Path: offer, Grants: grants(to("u-reka", onClients, Viewer), toGuest(onBakery, Editor, reka))},
+	"Bence's My files › Offer.pdf, the guest given editor on Clients by someone who left": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		Grants: grants(toGuest(onClients, Editor, gone))},
+	"Bence's My files › Offer.pdf, the guest given viewer on Clients by Bence, Bence gone": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		OwnerLeft: true, Grants: grants(toGuest(onClients, Viewer, bence))},
+	// An end date: before it, it counts; from it on, or when the time is not known, it does not.
+	"Bence's My files › Offer.pdf, the guest given editor on Clients by Bence until tomorrow": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		Now: now, Grants: grants(until(toGuest(onClients, Editor, bence), now.Add(24*time.Hour)))},
+	"Bence's My files › Offer.pdf, the guest given editor on Clients by Bence until now": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		Now: now, Grants: grants(until(toGuest(onClients, Editor, bence), now))},
+	"Bence's My files › Offer.pdf, the guest given editor on Clients by Bence until tomorrow, no time": {Kind: MyFiles, Owner: "u-bence",
+		Path: offer, Grants: grants(until(toGuest(onClients, Editor, bence), now.Add(24*time.Hour)))},
+	"Bence's My files › Offer.pdf, the guest given editor on Clients by Bence, no sharing outside": {Kind: MyFiles, Owner: "u-bence",
+		Path: offer, NoSharingOutside: true, Grants: grants(toGuest(onClients, Editor, bence))},
+	"Réka's My files › Offer.pdf, the guest given editor on Clients by Réka": {Kind: MyFiles, Owner: "u-reka", Path: offer,
+		Grants: grants(toGuest(onClients, Editor, reka))},
+	// In a shared folder an invitation is the project's: it counts whoever gave it.
+	"a shared folder › Offer.pdf, the guest given editor on Bakery by someone who left": {Kind: SharedFolder, Path: offer,
+		Grants: grants(toGuest(onBakery, Editor, gone))},
+	"a shared folder › Offer.pdf, the guest given viewer on Clients by Bence": {Kind: SharedFolder, Path: offer,
+		Grants: grants(toGuest(onClients, Viewer, bence))},
+	"a shared folder › Bakery, the guest given editor on Bakery by Bence": {Kind: SharedFolder, Path: bakery,
+		Grants: grants(toGuest(onBakery, Editor, bence))},
+	"a deleted shared folder › Offer.pdf, the guest given editor on Clients by Bence": {Kind: SharedFolder, Deleted: true, Path: offer,
+		Grants: grants(toGuest(onClients, Editor, bence))},
+	// Invitations that count for nothing: on a place as a whole, as manager, to a guest and a member at once; and a guest
+	// is never "everyone in the project".
+	"a shared folder, the guest given editor on it as a whole": {Kind: SharedFolder,
+		Grants: grants(Grant{On: onTop, Guest: anna.ID, Role: Editor, By: bence})},
+	"a shared folder › Offer.pdf, the guest given editor on it as a whole": {Kind: SharedFolder, Path: offer,
+		Grants: grants(Grant{On: onTop, Guest: anna.ID, Role: Editor, By: bence})},
+	"a shared folder › Offer.pdf, the guest given manager on Clients": {Kind: SharedFolder, Path: offer,
+		Grants: grants(toGuest(onClients, Manager, bence))},
+	"a shared folder › Offer.pdf, editor on Clients to the guest and Réka at once": {Kind: SharedFolder, Path: offer,
+		Grants: grants(Grant{On: onClients, Guest: anna.ID, Member: "u-reka", Role: Editor, By: bence})},
+	"a shared folder › Offer.pdf, editor on Clients to the guest and everyone at once": {Kind: SharedFolder, Path: offer,
+		Grants: grants(Grant{On: onClients, Guest: anna.ID, Everyone: true, Role: Editor, By: bence})},
+	"a place of a kind access does not know › Offer.pdf, the guest given editor on Clients": {Kind: "team-folder", Owner: "u-reka",
+		Path: offer, Grants: grants(toGuest(onClients, Editor, reka))},
+
+	// A guest who joined the project keeps their invitation as a member, with its end date.
+	"Bence's My files › Offer.pdf, Réka given editor on Clients until tomorrow": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		Now: now, Grants: grants(until(to("u-reka", onClients, Editor), now.Add(24*time.Hour)))},
+	"Bence's My files › Offer.pdf, Réka given editor on Clients until an hour ago": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		Now: now, Grants: grants(until(to("u-reka", onClients, Editor), now.Add(-time.Hour)))},
+	// Nothing to everyone ends: such a grant counts for nothing.
+	"Bence's My files › Offer.pdf, everyone given viewer on Clients until tomorrow": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		Now: now, Grants: grants(until(toEveryone(onClients, Viewer), now.Add(24*time.Hour)))},
 }
 
 // Every action there is. A test below fails when one is added to the package without being added here.
 var everyAction = []Action{Enter, SeeUsage, MakeSharedFolder, List, Download, Upload, MakeFolder, Rename, Move, MoveOut,
-	MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, MakeLink, ManageLink, ManageAccess, DeleteSharedFolder,
-	RestoreSharedFolder, SeeThroughLink, DownloadThroughLink}
+	MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, MakeLink, ManageLink, InviteGuest, ManageAccess, DeleteSharedFolder,
+	RestoreSharedFolder, SeeThroughLink, DownloadThroughLink, SignInAsGuest, EnterAsGuest, ListAsGuest, DownloadAsGuest,
+	UploadAsGuest, MakeFolderAsGuest, RenameAsGuest, MoveAsGuest, DeleteAsGuest}
 
 // What the spec gives each role, written out here rather than taken from the package.
 var (
@@ -243,10 +340,10 @@ var (
 	managerAtTop = append(slices.Clone(editorAtTop), ManageAccess, DeleteSharedFolder)
 	// At an item, in any place. Owners of a My files and managers of a shared folder are editors of every item in it.
 	viewerAtItem = []Action{List, Download, SeeAccess}
-	// An editor of the item who cannot add to the folder it is in: inside it, and sharing it (with members, and with
-	// anyone through a public link, which they also see and remove), but not changing that folder by renaming it,
-	// taking it out, or putting it back.
-	editorAtItem = append(slices.Clone(viewerAtItem), Upload, MakeFolder, Share, MakeLink, ManageLink)
+	// An editor of the item who cannot add to the folder it is in: inside it, and sharing it (with members, with guests
+	// and with anyone through a public link, which they also see and remove), but not changing that folder by renaming
+	// it, taking it out, or putting it back.
+	editorAtItem = append(slices.Clone(viewerAtItem), Upload, MakeFolder, Share, MakeLink, ManageLink, InviteGuest)
 	// An editor of the folder it is in, too, who cannot see the place's whole trash and did not delete it.
 	editorInFolder = append(slices.Clone(editorAtItem), Rename, Move, Delete)
 	// And who may restore it: they see the place's whole trash, or deleted it themselves.
@@ -259,6 +356,13 @@ var (
 	sharedAllAtItem      = append(slices.Clone(allAtItem), MoveIn)
 	// What a visitor may do through a link that counts where they are: see and download, nothing else.
 	throughALink = []Action{SeeThroughLink, DownloadThroughLink}
+	// What a guest may do where an invitation to them counts: a viewer sees and downloads; an editor also uploads and
+	// makes folders; and inside what they were given, also renames, moves and deletes.
+	guestViewer         = []Action{ListAsGuest, DownloadAsGuest}
+	guestEditorAtItem   = append(slices.Clone(guestViewer), UploadAsGuest, MakeFolderAsGuest)
+	guestEditorInFolder = append(slices.Clone(guestEditorAtItem), RenameAsGuest, MoveAsGuest, DeleteAsGuest)
+	// Sharing outside the project: what is not done where it is switched off.
+	outside = []Action{MakeLink, InviteGuest}
 )
 
 // without is actions without the ones given.
@@ -280,6 +384,13 @@ func TestDecide(t *testing.T) {
 	}
 	for _, p := range []string{"member", "admin"} {
 		allow(p, "no place", Enter, SeeUsage, MakeSharedFolder)
+	}
+	// Anyone who is not a member asks for a code to sign in as a guest; a guest uses their own pages.
+	for _, p := range []string{"someone not in the member list", "no user id", "a guest", "another guest", "a guest with Réka's user id"} {
+		allow(p, "no place", SignInAsGuest)
+	}
+	for _, p := range []string{"a guest", "another guest", "a guest with Réka's user id"} {
+		allow(p, "no place", EnterAsGuest)
 	}
 
 	// In her own My files Réka may do everything, whatever was given to whom. Nobody else may do anything there,
@@ -338,17 +449,45 @@ func TestDecide(t *testing.T) {
 			if len(place.Path) == 0 {
 				allow("admin", name, managerAtTop...)
 			} else if place.NoSharingOutside {
-				allow("admin", name, without(sharedAllAtItem, MakeLink)...)
+				allow("admin", name, without(sharedAllAtItem, outside...)...)
 			} else {
 				allow("admin", name, sharedAllAtItem...)
 			}
 		}
 	}
-	// Where sharing outside the project is off, nothing changes for members but that no link can be made: whoever may
-	// share an item still sees its link and removes it.
-	allow("member", "Réka's My files › Offer.pdf, no sharing outside", without(ownerAtItem, MakeLink)...)
-	allow("member", "Bence's My files › Offer.pdf, Réka given editor on Clients, no sharing outside", without(editorInFolder, MakeLink)...)
-	allow("member", "a shared folder › Offer.pdf, given editor on it as a whole, no sharing outside", without(sharedAllAtItem, MakeLink)...)
+	// Where sharing outside the project is off, nothing changes for members but that no link can be made and no guest
+	// invited: whoever may share an item still sees its link and removes it.
+	allow("member", "Réka's My files › Offer.pdf, no sharing outside", without(ownerAtItem, outside...)...)
+	allow("member", "Bence's My files › Offer.pdf, Réka given editor on Clients, no sharing outside", without(editorInFolder, outside...)...)
+	allow("member", "a shared folder › Offer.pdf, given editor on it as a whole, no sharing outside", without(sharedAllAtItem, outside...)...)
+
+	// Invitations change nothing for members, but that the member may share what Anna was invited to: Réka in her own
+	// My files, and where she was given editor on Clients (and until her own end date).
+	allow("member", "Réka's My files › Offer.pdf, the guest given editor on Clients by Réka", ownerAtItem...)
+	allow("member", "Bence's My files › Offer.pdf, the guest given editor on Bakery by Réka, Réka given editor on Clients", editorInFolder...)
+	allow("member", "Bence's My files › Offer.pdf, the guest given editor on Bakery by Réka, Réka given viewer on Clients", viewerAtItem...)
+	allow("member", "Bence's My files › Offer.pdf, Réka given editor on Clients until tomorrow", editorInFolder...)
+
+	// Anna, the guest, sees and downloads where an invitation to her counts, and as editor works inside it; nowhere
+	// else, whatever her request says she is. "another guest" was invited nowhere.
+	for _, g := range []string{"a guest", "a guest with Réka's user id"} {
+		for place, actions := range map[string][]Action{
+			"Bence's My files › Offer.pdf, the guest given viewer on Clients by Bence":                             guestViewer,
+			"Bence's My files › Offer.pdf, the guest given editor on Clients by Bence":                             guestEditorInFolder,
+			"Bence's My files › 2026, the guest given editor on Clients by Bence":                                  guestEditorInFolder,
+			"Bence's My files › Clients, the guest given editor on Clients by Bence":                               guestEditorAtItem,
+			"Bence's My files › Offer.pdf, the guest given viewer on Offer.pdf by Bence":                           guestViewer,
+			"Bence's My files › Offer.pdf, the guest given viewer on Clients and editor on Offer.pdf by Bence":     guestEditorAtItem,
+			"Bence's My files › Offer.pdf, the guest given editor on Bakery by Réka, Réka given editor on Clients": guestEditorInFolder,
+			"Bence's My files › Offer.pdf, the guest given editor on Clients by Bence until tomorrow":              guestEditorInFolder,
+			"Réka's My files › Offer.pdf, the guest given editor on Clients by Réka":                               guestEditorInFolder,
+			"a shared folder › Offer.pdf, the guest given editor on Bakery by someone who left":                    guestEditorInFolder,
+			"a shared folder › Offer.pdf, the guest given viewer on Clients by Bence":                              guestViewer,
+			"a shared folder › Bakery, the guest given editor on Bakery by Bence":                                  guestEditorAtItem,
+		} {
+			allow(g, place, actions...)
+		}
+	}
 
 	// Visitors see and download, through a link that counts there, its item and everything inside it, and nothing else:
 	// nothing beside it or above it, and none of what members do, whoever they are. A link on Clients covers Clients,
@@ -356,7 +495,8 @@ func TestDecide(t *testing.T) {
 	// where sharing outside the project is on: in a shared folder, whoever made it (it is the project's); in a My files
 	// whose owner is in the member list, while its maker may share its item there (Bence in his own My files, Réka in
 	// hers). A link of a kind nobody knows, or on no item, counts nowhere.
-	byBence := []string{"a visitor, link on Clients by Bence", "the admin, signed in, with a link on Clients by Bence"}
+	byBence := []string{"a visitor, link on Clients by Bence", "the admin, signed in, with a link on Clients by Bence",
+		"a guest with a link on Clients by Bence"}
 	byReka := []string{"a visitor, link on Clients by Réka", "Réka, signed in, with her own link on Clients"}
 	for name, place := range places {
 		if place == nil || place.Deleted || place.NoSharingOutside {
@@ -392,6 +532,8 @@ func TestDecide(t *testing.T) {
 		// (Items in the trash are never asked about for visitors: no route through a link finds them.)
 		"Bence's My files › Offer.pdf in the trash, deleted by Réka, Réka given editor on Clients",
 		"Bence's My files › Offer.pdf in the trash, deleted by Bence, Réka given editor on Clients",
+		"Bence's My files › Offer.pdf, the guest given editor on Bakery by Réka, Réka given editor on Clients",
+		"Bence's My files › Offer.pdf, Réka given editor on Clients until tomorrow",
 	} {
 		for _, v := range byReka {
 			allow(v, place, throughALink...)
@@ -469,6 +611,20 @@ func TestRoleAt(t *testing.T) {
 		{"no place", member, nil, NoRole},
 		{"a visitor has no role, even with a link on the item", people["a visitor, link on Clients by Bence"], bences(offer), NoRole},
 		{"nor a member who came with a link", people["Réka, signed in, with her own link on Clients"], &Place{Kind: MyFiles, Owner: "u-reka", Path: offer}, NoRole},
+		{"an invitation reaches a file three levels down", people["a guest"], bences(offer, toGuest(onClients, Editor, bence)), Editor},
+		{"the higher of two invitations on the way", people["a guest"], bences(offer, toGuest(onClients, Viewer, bence), toGuest(onOffer, Editor, bence)), Editor},
+		{"an invitation does not reach its sibling", people["a guest"], bences(ledger, toGuest(onOffer, Editor, bence)), NoRole},
+		{"nor the top folder", people["a guest"], bences(nil, toGuest(onClients, Editor, bence)), NoRole},
+		{"another guest's invitation is theirs", people["another guest"], bences(offer, toGuest(onClients, Editor, bence)), NoRole},
+		{"a guest is not everyone", people["a guest"], bences(offer, toEveryone(onClients, Editor)), NoRole},
+		{"a guest with a member's id is still only the guest", people["a guest with Réka's user id"], bences(offer, to("u-reka", onClients, Editor)), NoRole},
+		{"an invitation is no member's", member, bences(offer, Grant{On: onClients, Guest: anna.ID, Role: Editor, By: reka}), NoRole},
+		{"an invitation from someone who may no longer share it", people["a guest"], bences(offer, toGuest(onClients, Editor, reka)), NoRole},
+		{"an invitation that ended", people["a guest"], &Place{Kind: MyFiles, Owner: "u-bence", Path: offer, Now: now,
+			Grants: grants(until(toGuest(onClients, Editor, bence), now.Add(-time.Second)))}, NoRole},
+		{"an invitation in a shared folder is the project's", people["a guest"], shared(offer, toGuest(onBakery, Viewer, gone)), Viewer},
+		{"a member's grant that ends, before it does", member, &Place{Kind: MyFiles, Owner: "u-bence", Path: offer, Now: now,
+			Grants: grants(until(to("u-reka", onClients, Viewer), now.Add(time.Second)))}, Viewer},
 	}
 	for _, c := range cases {
 		if got := RoleAt(c.person, c.place); got != c.want {
@@ -503,7 +659,8 @@ func extraGrants() []Grant {
 	var out []Grant
 	for _, on := range []int64{onTop, 10, 11, 12, 13, 14, 15} {
 		for _, role := range []Role{Viewer, Editor, Manager} {
-			out = append(out, to("u-reka", on, role), to("u-admin", on, role), toEveryone(on, role))
+			out = append(out, to("u-reka", on, role), to("u-admin", on, role), toEveryone(on, role), toGuest(on, role, bence),
+				toGuest(on, role, reka), until(toGuest(on, role, bence), now.Add(time.Hour)))
 		}
 	}
 	return out
@@ -518,9 +675,34 @@ func TestTheRulesHangTogether(t *testing.T) {
 			may := func(a Action) bool { return Decide(p, a, l) }
 			where := fmt.Sprintf("%s in %s", pn, ln)
 			// Nobody acts on what they cannot see.
-			for _, a := range []Action{Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, ManageAccess, DeleteSharedFolder} {
+			for _, a := range []Action{Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, InviteGuest, ManageAccess, DeleteSharedFolder} {
 				if may(a) && !may(List) {
 					t.Errorf("%s may %s but not list", where, a)
+				}
+			}
+			for _, a := range AsAGuestAtAnItem {
+				if may(a) && !may(ListAsGuest) {
+					t.Errorf("%s may %s but not see it", where, a)
+				}
+			}
+			// A guest does only what a guest may, and only at or inside an item given to them, and nobody else does it
+			// (but ask for a code to sign in, which anyone outside the project may).
+			guest := p.Link == nil && p.Guest != nil
+			for _, a := range everyAction {
+				if !may(a) {
+					continue
+				}
+				if forGuests := slices.Contains(AsAGuest, a); guest != forGuests && !(a == SignInAsGuest && !p.isMember() && p.Link == nil) {
+					t.Errorf("%s may %s: a guest %v", where, a, guest)
+				}
+				if guest && l != nil {
+					invited := false
+					for _, g := range l.Grants {
+						invited = invited || (g.Guest == p.Guest.ID && g.On > 0 && slices.Contains(l.Path, g.On))
+					}
+					if !invited {
+						t.Errorf("%s may %s, which is not at or inside an item given to them", where, a)
+					}
 				}
 			}
 			if l == nil || l.Deleted {
@@ -622,14 +804,59 @@ func TestTheRulesHangTogether(t *testing.T) {
 				}
 			}
 			// Access on a folder applies to everything inside it: what the person may do at the top folder or at a folder
-			// they may also do at anything in it. (Restoring depends on who deleted each item.) So does a link.
-			for _, a := range []Action{List, Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeAccess, Share,
-				MakeLink, ManageLink, SeeThroughLink, DownloadThroughLink} {
-				if len(l.Path) == 0 && (a == Rename || a == Move || a == MoveOut || a == Delete || a == Share || a == MakeLink || a == ManageLink) {
+			// they may also do at anything in it. (Restoring depends on who deleted each item.) So does a link, and so does
+			// an invitation.
+			for _, a := range append([]Action{List, Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeAccess, Share,
+				MakeLink, ManageLink, InviteGuest, SeeThroughLink, DownloadThroughLink}, AsAGuestAtAnItem...) {
+				if len(l.Path) == 0 && (a == Rename || a == Move || a == MoveOut || a == Delete || a == Share || a == MakeLink || a == ManageLink || a == InviteGuest) {
 					continue
 				}
 				if may(a) && !Decide(p, a, child) {
 					t.Errorf("%s may %s, but not at something inside it", where, a)
+				}
+			}
+			// A guest renames, moves and deletes only where they may put things into the folder it is in, so what they
+			// were given stays where its giver put it.
+			if len(l.Path) > 0 {
+				for _, a := range []Action{RenameAsGuest, MoveAsGuest, DeleteAsGuest} {
+					if may(a) != Decide(p, UploadAsGuest, l.Up(len(l.Path)-1)) && (may(a) || may(UploadAsGuest)) {
+						t.Errorf("%s: may %s %v, may upload into its folder %v", where, a, may(a), Decide(p, UploadAsGuest, l.Up(len(l.Path)-1)))
+					}
+				}
+			}
+			// An invitation changes nothing for anyone but its guest; and nothing given to members, or to everyone,
+			// gives a guest anything.
+			for _, g := range []Grant{toGuest(onClients, Editor, bence), toGuest(onOffer, Editor, reka), toGuest(onTop, Viewer, bence),
+				{On: onClients, Guest: 8, Role: Editor, By: bence}} {
+				invited := *l
+				invited.Grants = append(slices.Clone(l.Grants), g)
+				for _, a := range everyAction {
+					if (p.Guest == nil || p.Link != nil || p.Guest.ID != g.Guest) && may(a) != Decide(p, a, &invited) {
+						t.Errorf("%s: inviting guest %d on item %d changes whether they may %s", where, g.Guest, g.On, a)
+					}
+				}
+			}
+			if guest {
+				// (What is given to whoever invited them can: in a My files, the invitation stands on their right to share
+				// the item.)
+				givers := map[string]bool{}
+				for _, g := range l.Grants {
+					if g.Guest == p.Guest.ID {
+						givers[g.By.UserID] = true
+					}
+				}
+				for _, g := range []Grant{toEveryone(onTop, Editor), toEveryone(onClients, Editor), to("u-reka", onClients, Editor),
+					to("u-admin", onClients, Editor), to("", onClients, Editor)} {
+					if (g.Everyone && len(givers) > 0) || givers[g.Member] {
+						continue
+					}
+					more := *l
+					more.Grants = append(slices.Clone(l.Grants), g)
+					for _, a := range everyAction {
+						if may(a) != Decide(p, a, &more) {
+							t.Errorf("%s: giving %+v changes whether the guest may %s", where, g, a)
+						}
+					}
 				}
 			}
 			// Giving more never takes anything away, wherever it is given; giving it on an item off the path changes
@@ -638,7 +865,9 @@ func TestTheRulesHangTogether(t *testing.T) {
 				more := *l
 				more.Grants = append(slices.Clone(l.Grants), g)
 				off := *l
-				off.Grants = append(slices.Clone(l.Grants), Grant{On: 98, Member: g.Member, Everyone: g.Everyone, Role: g.Role})
+				offPath := g
+				offPath.On = 98
+				off.Grants = append(slices.Clone(l.Grants), offPath)
 				for _, a := range everyAction {
 					if may(a) && !Decide(p, a, &more) {
 						t.Errorf("%s: giving %+v takes %s away", where, g, a)
@@ -650,10 +879,11 @@ func TestTheRulesHangTogether(t *testing.T) {
 			}
 			// Nobody but the owner may do anything in a My files, unless something on the way to the item was shared
 			// with them or with everyone, or they came with a link on the way to it.
-			if l.Kind == MyFiles && (l.Owner != p.UserID || p.Link != nil) {
+			if l.Kind == MyFiles && (l.Owner != p.UserID || p.Link != nil || p.Guest != nil) {
 				shared := p.Link != nil && slices.Contains(l.Path, p.Link.Item)
 				for _, g := range l.Grants {
-					shared = shared || (p.Link == nil && g.On != 0 && (g.Everyone || g.Member == p.UserID) && slices.Contains(l.Path, g.On))
+					toThem := (!guest && (g.Everyone || (g.Member != "" && g.Member == p.UserID))) || (guest && g.Guest == p.Guest.ID)
+					shared = shared || (p.Link == nil && g.On != 0 && toThem && slices.Contains(l.Path, g.On))
 				}
 				for _, a := range everyAction {
 					if may(a) && !shared {
@@ -684,6 +914,16 @@ func TestSharedWithMe(t *testing.T) {
 		// SharedWithMe is about live items: the server never asks it about one in the trash, which no route finds.
 		"member Bence's My files › Offer.pdf in the trash, deleted by Réka, Réka given editor on Offer.pdf": true,
 	}
+	// A guest's "Shared with me": where an invitation to them starts, whoever asks as that guest.
+	for _, g := range []string{"a guest", "a guest with Réka's user id"} {
+		for _, place := range []string{
+			"Bence's My files › Clients, the guest given editor on Clients by Bence",
+			"Bence's My files › Offer.pdf, the guest given viewer on Offer.pdf by Bence",
+			"a shared folder › Bakery, the guest given editor on Bakery by Bence",
+		} {
+			listed[g+" "+place] = true
+		}
+	}
 	tried := 0
 	for pn, p := range people {
 		for ln, l := range places {
@@ -692,8 +932,12 @@ func TestSharedWithMe(t *testing.T) {
 				t.Errorf("%s: listed %v, want %v", key, got, listed[key])
 			}
 			// Whatever is listed, they may open, and they cannot open its place's top folder: it is not among theirs.
-			if SharedWithMe(p, l) && (!Decide(p, List, l) || Decide(p, List, l.Up(0))) {
-				t.Errorf("%s: listed, but may open it %v and its place %v", key, Decide(p, List, l), Decide(p, List, l.Up(0)))
+			list := List
+			if p.Guest != nil && p.Link == nil {
+				list = ListAsGuest
+			}
+			if SharedWithMe(p, l) && (!Decide(p, list, l) || Decide(p, list, l.Up(0))) {
+				t.Errorf("%s: listed, but may open it %v and its place %v", key, Decide(p, list, l), Decide(p, list, l.Up(0)))
 			}
 			delete(listed, key)
 			tried++
@@ -750,6 +994,11 @@ func TestFinds(t *testing.T) {
 		"Réka's My files › Offer.pdf, no sharing outside",
 		"Bence's My files › Offer.pdf, Réka given editor on Clients, no sharing outside",
 		"a shared folder › Offer.pdf, given editor on it as a whole, no sharing outside",
+		// Nor do invitations; an end date counts for a member too.
+		"Réka's My files › Offer.pdf, the guest given editor on Clients by Réka",
+		"Bence's My files › Offer.pdf, the guest given editor on Bakery by Réka, Réka given editor on Clients",
+		"Bence's My files › Offer.pdf, the guest given editor on Bakery by Réka, Réka given viewer on Clients",
+		"Bence's My files › Offer.pdf, Réka given editor on Clients until tomorrow",
 	} {
 		found["member "+place] = true
 	}
@@ -817,6 +1066,21 @@ func TestCounts(t *testing.T) {
 		{SharedFolder, Grant{On: onBakery, Member: "u", Everyone: true, Role: Viewer}, false},
 		{SharedFolder, to("u", -1, Viewer), false},
 		{"team-folder", to("u", onBakery, Viewer), false},
+		// Invitations: viewer or editor on an item, in either kind of place; nothing on a place as a whole.
+		{MyFiles, toGuest(onOffer, Viewer, bence), true},
+		{SharedFolder, toGuest(onOffer, Editor, bence), true},
+		{SharedFolder, until(toGuest(onOffer, Editor, bence), now), true},
+		{SharedFolder, toGuest(onTop, Viewer, bence), false},
+		{MyFiles, toGuest(onTop, Viewer, bence), false},
+		{SharedFolder, toGuest(onOffer, Manager, bence), false},
+		{SharedFolder, toGuest(onOffer, Owner, bence), false},
+		{SharedFolder, Grant{On: onOffer, Guest: 7, Member: "u", Role: Viewer}, false},
+		{SharedFolder, Grant{On: onOffer, Guest: 7, Everyone: true, Role: Viewer}, false},
+		{SharedFolder, Grant{On: onOffer, Guest: -7, Role: Viewer}, false},
+		{"team-folder", toGuest(onOffer, Viewer, bence), false},
+		// An end date: on a member's grant (a guest who joined the project keeps theirs), never on everyone's.
+		{MyFiles, until(to("u", onOffer, Editor), now), true},
+		{SharedFolder, until(toEveryone(onOffer, Viewer), now), false},
 	}
 	for _, c := range cases {
 		if got := Counts(c.kind, c.g); got != c.want {
@@ -847,17 +1111,55 @@ func TestBelowAndUp(t *testing.T) {
 }
 
 func TestEveryActionIsInTheTable(t *testing.T) {
-	for _, a := range append(slices.Clone(InAPlace), ThroughALink...) {
+	for _, a := range append(append(slices.Clone(InAPlace), ThroughALink...), AsAGuest...) {
 		if !slices.Contains(everyAction, a) {
 			t.Errorf("%q is an action that the table does not try", a)
 		}
-		if slices.Contains(InAPlace, a) && slices.Contains(ThroughALink, a) {
-			t.Errorf("%q is both a member's action and a visitor's", a)
+		kinds := 0
+		for _, list := range [][]Action{InAPlace, ThroughALink, AsAGuest} {
+			if slices.Contains(list, a) {
+				kinds++
+			}
+		}
+		if kinds != 1 {
+			t.Errorf("%q is an action of %d kinds of person (a member's, a visitor's, a guest's)", a, kinds)
 		}
 	}
-	if len(everyAction) != len(InAPlace)+3+len(ThroughALink) {
-		t.Errorf("the table tries %d actions; the package has %d in a place, 3 in none and %d through a link", len(everyAction),
-			len(InAPlace), len(ThroughALink))
+	for _, a := range AsAGuestAtAnItem {
+		if !slices.Contains(AsAGuest, a) {
+			t.Errorf("%q is a guest's action at an item, but not among a guest's actions", a)
+		}
+	}
+	if len(everyAction) != len(InAPlace)+3+len(ThroughALink)+len(AsAGuest) {
+		t.Errorf("the table tries %d actions; the package has %d in a place, 3 in none, %d through a link and %d as a guest",
+			len(everyAction), len(InAPlace), len(ThroughALink), len(AsAGuest))
+	}
+}
+
+// Which guests can see something, for "who can see this" and the list's sentence: those an invitation that counts there
+// reaches, each once.
+func TestGuests(t *testing.T) {
+	other := Grant{On: onBakery, Guest: 8, Role: Viewer, By: bence}
+	cases := []struct {
+		name  string
+		place *Place
+		want  []int64
+	}{
+		{"invited on a folder above, and on the item", &Place{Kind: MyFiles, Owner: "u-bence", Path: offer,
+			Grants: grants(toGuest(onClients, Viewer, bence), toGuest(onOffer, Editor, bence), other)}, []int64{7, 8}},
+		{"invited on its sibling", &Place{Kind: MyFiles, Owner: "u-bence", Path: ledger, Grants: grants(toGuest(onOffer, Viewer, bence))}, nil},
+		{"an invitation whose giver may no longer share it", &Place{Kind: MyFiles, Owner: "u-bence", Path: offer,
+			Grants: grants(toGuest(onClients, Viewer, reka), other)}, []int64{8}},
+		{"an invitation that ended", &Place{Kind: SharedFolder, Path: offer, Now: now,
+			Grants: grants(until(toGuest(onClients, Viewer, bence), now))}, nil},
+		{"sharing outside switched off", &Place{Kind: SharedFolder, Path: offer, NoSharingOutside: true, Grants: grants(other)}, nil},
+		{"members and everyone", &Place{Kind: SharedFolder, Path: offer, Grants: grants(toEveryone(onTop, Viewer), to("u-reka", onClients, Editor))}, nil},
+		{"no place", nil, nil},
+	}
+	for _, c := range cases {
+		if got := Guests(c.place); !slices.Equal(got, c.want) {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 
@@ -898,6 +1200,12 @@ func TestUnknownActionIsRefused(t *testing.T) {
 	for _, place := range []*Place{nil, {Kind: MyFiles, Owner: "u1"}, {Kind: MyFiles, Owner: "u1", Path: offer}, {Kind: SharedFolder, Grants: grants(to("u1", onTop, Manager))}} {
 		if Decide(admin, Action("own"), place) {
 			t.Fatalf("an action without a rule must be refused (in %+v)", place)
+		}
+	}
+	guest := Person{Guest: anna}
+	for _, place := range []*Place{nil, {Kind: SharedFolder, Path: offer, Grants: grants(toGuest(onClients, Editor, bence))}} {
+		if Decide(guest, Action("own"), place) {
+			t.Fatalf("an action without a rule must be refused for a guest (in %+v)", place)
 		}
 	}
 }
