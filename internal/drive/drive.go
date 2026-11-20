@@ -29,7 +29,7 @@
 // Every change is two steps, the storage and then the index. files.go has uploads in one request, downloads and the
 // name rules, uploads.go resumable uploads and moving any upload into place, zip.go folders downloaded as one zip,
 // folders.go new folders, renames and moves, trash.go the trash, shared.go shared folders, sharing.go the access given
-// on places and items, and this file the places, paths and listings.
+// on places and items, links.go public links, and this file the places, paths and listings.
 package drive
 
 import (
@@ -98,6 +98,9 @@ type Drive struct {
 	// resume is whether the storage can resume an upload (CanResume), once it is known.
 	resumeMu sync.Mutex
 	resume   resumeState
+
+	// uses counts the uses of public links between writes to the index (links.go).
+	uses uses
 }
 
 // New makes a Drive.
