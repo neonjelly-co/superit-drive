@@ -89,7 +89,7 @@ func (s *Server) sendIn(w http.ResponseWriter, r *http.Request, c call) {
 	body, done := receiving(w, r)
 	defer done()
 	_, err := s.drive.SendIn(r.Context(), *c.place, c.link.ID, name, body, r.ContentLength,
-		func(ctx context.Context) (index.Item, error) { return s.stillSendingIn(ctx, c) })
+		func(ctx context.Context) (index.Place, index.Item, error) { return s.stillSendingIn(ctx, c) })
 	var bad *drive.BadName
 	switch {
 	case err == nil:
@@ -129,37 +129,46 @@ func (s *Server) sendIn(w http.ResponseWriter, r *http.Request, c call) {
 
 // stillSendingIn decides on the link a file is sent through again, once the file is whole and its place is held: the
 // link must still be the one the visitor came with (a link made in its place has another id), upload-only, and still
-// let files in at its folder, in the same place. It returns the folder as it is now.
-func (s *Server) stillSendingIn(ctx context.Context, c call) (index.Item, error) {
+// let files in at its folder, in the same place. Everything is read again, the place too: whether sharing outside the
+// project is switched off there, and whether it is held, are read with it. It returns the place and the folder as they
+// are now.
+func (s *Server) stillSendingIn(ctx context.Context, c call) (index.Place, index.Item, error) {
 	l, err := s.drive.LinkByID(ctx, c.link.ID)
 	if errors.Is(err, index.ErrNoLink) {
-		return index.Item{}, errNoLongerThroughLink
+		return index.Place{}, index.Item{}, errNoLongerThroughLink
 	}
 	if err != nil {
-		return index.Item{}, err
+		return index.Place{}, index.Item{}, err
 	}
 	if l.Place != c.place.ID {
-		return index.Item{}, drive.ErrGone // its folder moved into another place meanwhile: send it again
+		return index.Place{}, index.Item{}, drive.ErrGone // its folder moved into another place meanwhile: send it again
 	}
-	it, err := s.drive.Item(ctx, *c.place, l.Item)
+	p, err := s.drive.Place(ctx, l.Place)
+	if errors.Is(err, index.ErrNoPlace) {
+		return index.Place{}, index.Item{}, errNoLongerThroughLink // a shared folder in the trash
+	}
+	if err != nil {
+		return index.Place{}, index.Item{}, err
+	}
+	it, err := s.drive.Item(ctx, p, l.Item)
 	if errors.Is(err, index.ErrNoItem) {
-		return index.Item{}, errNoLongerThroughLink
+		return index.Place{}, index.Item{}, errNoLongerThroughLink
 	}
 	if err != nil {
-		return index.Item{}, err
+		return index.Place{}, index.Item{}, err
 	}
-	where, err := s.accessAt(ctx, *c.place, idsOf(pathTo(it)))
+	where, err := s.accessAt(ctx, p, idsOf(pathTo(it)))
 	if err != nil {
-		return index.Item{}, err
+		return index.Place{}, index.Item{}, err
 	}
 	who := visitorOf(l, s.members.Current())
 	if !access.Decide(who, access.UploadThroughLink, where) {
 		if access.SwitchedOff(who, access.UploadThroughLink, where) {
-			return index.Item{}, errSwitchedOffNow
+			return index.Place{}, index.Item{}, errSwitchedOffNow
 		}
-		return index.Item{}, errNoLongerThroughLink
+		return index.Place{}, index.Item{}, errNoLongerThroughLink
 	}
-	return it, nil
+	return p, it, nil
 }
 
 // linkIsFull says whether the link with id has taken in all it may until it is reset.

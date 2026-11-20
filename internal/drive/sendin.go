@@ -80,7 +80,8 @@ func (d *Drive) keepFor(ctx context.Context, link, n int64) (settle func(stored 
 
 // SendIn stores a file a visitor sends through the upload-only link with id link, called name, size bytes long, read
 // from body, into the folder the link is on in the place p, and returns it. decide is the link decided on again, once
-// the file is whole and the place is held: it returns the folder as it is now (in p), or the error to answer with. The
+// the file is whole and the place is held: it returns the place and the folder as they are now (the place read again,
+// with its switches and whether it is held), or the error to answer with. The
 // file never replaces anything: when its name is taken (on the storage, or by a change on its way), it is stored under
 // the first free name with " (2)", " (3)" and so on, labelled as having come through a link. Nothing about what was
 // there comes back.
@@ -88,7 +89,7 @@ func (d *Drive) keepFor(ctx context.Context, link, n int64) (settle func(stored 
 // ErrLinkFull before anything is read when the file would take the link past its limit; ErrCutOff when the visitor's
 // connection ended before the whole file arrived (nothing is stored, nothing counted).
 func (d *Drive) SendIn(ctx context.Context, p index.Place, link int64, name string, body io.Reader, size int64,
-	decide func(context.Context) (index.Item, error)) (index.Item, error) {
+	decide func(context.Context) (index.Place, index.Item, error)) (index.Item, error) {
 	if err := CheckName(name); err != nil {
 		return index.Item{}, err
 	}
@@ -132,13 +133,13 @@ func (d *Drive) SendIn(ctx context.Context, p index.Place, link int64, name stri
 // sentInPlace decides on a whole file sent through a link again, holding the place, and moves it into the folder the
 // link is on now, under the first free name from name.
 func (d *Drive) sentInPlace(ctx context.Context, p index.Place, link int64, name, partial string,
-	decide func(context.Context) (index.Item, error)) (index.Item, error) {
+	decide func(context.Context) (index.Place, index.Item, error)) (index.Item, error) {
 	leave, err := d.inPlace(ctx, p)
 	if err != nil {
 		return index.Item{}, err
 	}
 	defer leave()
-	folder, err := decide(ctx)
+	p, folder, err := decide(ctx)
 	if err != nil {
 		return index.Item{}, err
 	}
