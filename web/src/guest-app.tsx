@@ -77,8 +77,12 @@ export function GuestApp() {
 			}),
 		[queryClient],
 	);
+	// The sign-in stays on the page while the Drive is asked again who this is (coming back to the tab asks again, and
+	// a guest leaves the tab to read their code): asking again must not throw away the address and the code typed.
+	const out = useRef(false);
+	if (!me.isPending) out.current = signedOut(me.error);
+	if (out.current) return <SignIn onSignedIn={() => void queryClient.resetQueries()} />;
 	if (me.isPending) return <Page>{t.common.loading}</Page>;
-	if (me.error && signedOut(me.error)) return <SignIn onSignedIn={() => void queryClient.resetQueries()} />;
 	if (me.error) return <Page><Problem error={me.error} /></Page>;
 	return <SignedIn address={me.data.address} project={me.data.project} />;
 }
