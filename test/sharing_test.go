@@ -221,7 +221,7 @@ func TestAnEditorWorksInsideWhatTheyWereGivenAndSharesItFurther(t *testing.T) {
 	if l.Role != "editor" || !slices.Contains(l.Can, "upload") || !slices.Contains(l.Can, "make-folder") || slices.Contains(l.Can, "see-trash") {
 		t.Fatalf("Dóra's Clients: role %q, can %q", l.Role, l.Can)
 	}
-	if got := named(t, l.Items, "Price list.pdf").Can; !slices.Equal(got, []string{"list", "download", "upload", "make-folder", "rename", "move", "delete", "see-access", "share", "make-link", "manage-link"}) {
+	if got := named(t, l.Items, "Price list.pdf").Can; !slices.Equal(got, []string{"list", "download", "upload", "make-folder", "rename", "move", "delete", "see-access", "share", "make-link", "manage-link", "invite-guest"}) {
 		t.Fatalf("what Dóra may do with Price list.pdf: %q", got)
 	}
 	uploadedInto(t, o, x.place, x.bakery.ID, "Invoice.pdf", []byte("from Dóra"))
