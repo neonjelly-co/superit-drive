@@ -305,6 +305,8 @@ func TestAProjectAdminHandsTheFilesOfSomeoneWhoLeftToAnotherMember(t *testing.T)
 	sameAs(t, "Dóra listing what is held", o.Get(t, "/api/held"), nothing)
 	sameAs(t, "Réka handing over a place that does not exist", handOver(t, r, x.place+doras+rekas+1000, dora), nothing)
 	sameAs(t, "Réka handing over Dóra's My files", handOver(t, r, doras, reka), nothing)
+	sameAs(t, "Réka handing over a shared folder", handOver(t, r, madeSharedFolder(t, o, "Team").ID, reka), nothing)
+	sameAs(t, "Réka handing over her own My files", handOver(t, r, rekas, dora), nothing)
 	for _, to := range []harness.Member{bence, {UserID: "u-nobody"}} {
 		if res := handOver(t, r, x.place, to); res.Status != http.StatusBadRequest {
 			t.Fatalf("handing it to %q, who is not a member: got %d %s", to.UserID, res.Status, res.Body)
@@ -631,4 +633,61 @@ func TestADeletionCutShortIsFinishedWhenTheDriveStartsAgain(t *testing.T) {
 		held, acts := heldList(t, r)
 		return len(held) == 0 && len(acts) == 1 && acts[0].Done != nil && acts[0].Kind == "delete"
 	})
+}
+
+// Two acts asked for at once on the same held My files (two project admins, or a double click): one is done, the other
+// is refused, and the record holds one.
+func TestTwoActsAtOnceOnTheSameHeldMyFilesDoOne(t *testing.T) {
+	t.Parallel()
+	emil := harness.Member{UserID: "e81f02aa-emil", Email: "emil@example.com", DisplayName: "Emil Szabó", Role: "admin"}
+	d := harness.Start(t, reka, bence, dora, emil)
+	x := bencesFiles(t, d)
+	doras, _ := myFiles(t, d, dora)
+	d.SetMembers(t, reka, dora, emil)
+	removed(t, d, bence)
+
+	answers := make(chan harness.Response, 3)
+	for _, ask := range []func() (harness.Response, error){
+		func() (harness.Response, error) {
+			return d.As(reka).Try(t, http.MethodPost, handOverPath(x.place), strings.NewReader(`{"to":"`+dora.UserID+`"}`))
+		},
+		func() (harness.Response, error) {
+			return d.As(emil).Try(t, http.MethodPost, handOverPath(x.place), strings.NewReader(`{"to":"`+emil.UserID+`"}`))
+		},
+		func() (harness.Response, error) {
+			return d.As(emil).Try(t, http.MethodDelete, fmt.Sprintf("/api/held/%d", x.place), nil)
+		},
+	} {
+		go func() {
+			res, err := ask()
+			if err != nil {
+				res = harness.Response{Status: -1, Body: []byte(err.Error())}
+			}
+			answers <- res
+		}()
+	}
+	done := 0
+	for range 3 {
+		res := <-answers
+		switch res.Status {
+		case http.StatusOK:
+			done++
+		case http.StatusNotFound, http.StatusConflict:
+		default:
+			t.Errorf("an act asked for at the same time as others: got %d %s", res.Status, res.Body)
+		}
+	}
+	held, acts := heldList(t, d.As(reka))
+	if done != 1 || len(held) != 0 || len(acts) != 1 || acts[0].Done == nil {
+		t.Fatalf("%d acts done; held %+v, acts %+v", done, held, acts)
+	}
+	_, mine := myFiles(t, d, dora)
+	emils, his := myFiles(t, d, emil)
+	switch a := acts[0]; {
+	case a.Kind == "delete" && len(mine) == 0 && len(his) == 0:
+	case a.Kind == "hand-over" && a.To.UserID == dora.UserID && slices.Equal(names(mine), []string{"bence@example.com"}) && len(his) == 0:
+	case a.Kind == "hand-over" && a.To.UserID == emil.UserID && len(mine) == 0 && slices.Equal(names(his), []string{"bence@example.com"}):
+	default:
+		t.Fatalf("the act %+v, and Dóra has %q (%d), Emil %q (%d)", a, names(mine), doras, names(his), emils)
+	}
 }

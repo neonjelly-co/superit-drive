@@ -1316,7 +1316,9 @@ func TestSwitchedOff(t *testing.T) {
 
 // A project admin manages every shared folder and oversees the project, but may do nothing at all in anyone else's My
 // files, through any action, with sharing outside the project on or off, but what was shared with them (by name or with
-// everyone) on the way down to the item. Overseeing concerns no place.
+// everyone) on the way down to the item. Overseeing concerns no place. The one thing they do to a My files that is not
+// theirs is to a held one (its owner left the member list), as a whole, at its top folder: hand it over or delete it,
+// which opens nothing in it.
 func TestAProjectAdminDoesNothingInAnotherPersonsMyFiles(t *testing.T) {
 	admin := people["admin"]
 	checked := 0
@@ -1345,6 +1347,9 @@ func TestAProjectAdminDoesNothingInAnotherPersonsMyFiles(t *testing.T) {
 				if !shared && (a == List || a == Download) && Decide(admin, a, &q) {
 					t.Errorf("the admin may %s in %s", a, ln)
 				}
+			}
+			if held := q.OwnerLeft && q.Owner != "" && !q.Deleted && len(q.Path) == 0; held != Decide(admin, HandOverHeld, &q) {
+				t.Errorf("the admin may hand over %s (sharing outside off %v): %v", ln, sharing, !held)
 			}
 			checked++
 		}
