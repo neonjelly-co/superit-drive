@@ -178,6 +178,20 @@ var places = map[string]*Place{
 		Grants: grants(to("u-reka", onClients, Editor), toEveryone(onClients, Viewer))},
 	"My files without an owner › Offer.pdf, everyone given editor on Clients": {Kind: MyFiles, Path: offer,
 		Grants: grants(toEveryone(onClients, Editor))},
+	// A held My files as a whole: a project admin hands it over or deletes it, at its top folder, and opens nothing in it.
+	"Bence's My files, Bence gone":                     {Kind: MyFiles, Owner: "u-bence", OwnerLeft: true},
+	"Bence's My files, Bence gone, no sharing outside": {Kind: MyFiles, Owner: "u-bence", OwnerLeft: true, NoSharingOutside: true},
+	"Réka's My files, her account gone":                {Kind: MyFiles, Owner: "u-reka", OwnerLeft: true},
+	"Bence's My files, Bence gone, in the trash":       {Kind: MyFiles, Owner: "u-bence", OwnerLeft: true, Deleted: true},
+	"My files without an owner, gone":                  {Kind: MyFiles, OwnerLeft: true},
+	"Bence's My files, Bence gone, the admin given editor on its top folder and everyone viewer": {Kind: MyFiles, Owner: "u-bence",
+		OwnerLeft: true, Grants: grants(to("u-admin", onTop, Editor), toEveryone(onTop, Viewer))},
+	"Bence's My files › Clients, Bence gone, the admin given editor on Clients": {Kind: MyFiles, Owner: "u-bence", Path: clients,
+		OwnerLeft: true, Grants: grants(to("u-admin", onClients, Editor))},
+	"Bence's My files › Offer.pdf in the trash, deleted by the admin, Bence gone": {Kind: MyFiles, Owner: "u-bence", Path: offer,
+		OwnerLeft: true, DeletedBy: "u-admin"},
+	// Who made a shared folder, or any Owner and OwnerLeft, counts for nothing there: nothing of it is held.
+	"a shared folder owned by Bence, Bence gone": {Kind: SharedFolder, Owner: "u-bence", OwnerLeft: true},
 
 	// A shared folder as a whole: a role on it, or none.
 	"a shared folder, no role":                {Kind: SharedFolder},
@@ -334,8 +348,9 @@ var places = map[string]*Place{
 // Every action there is. A test below fails when one is added to the package without being added here.
 var everyAction = []Action{Enter, SeeUsage, MakeSharedFolder, Oversee, List, Download, Upload, MakeFolder, Rename, Move,
 	MoveOut, MoveIn, Delete, SeeTrash, Restore, SeeAccess, Share, MakeLink, ManageLink, InviteGuest, ManageAccess,
-	SwitchSharingOutside, DeleteSharedFolder, RestoreSharedFolder, SeeThroughLink, DownloadThroughLink, SignInAsGuest,
-	EnterAsGuest, ListAsGuest, DownloadAsGuest, UploadAsGuest, MakeFolderAsGuest, RenameAsGuest, MoveAsGuest, DeleteAsGuest}
+	SwitchSharingOutside, DeleteSharedFolder, RestoreSharedFolder, HandOverHeld, DeleteHeld, SeeThroughLink,
+	DownloadThroughLink, SignInAsGuest, EnterAsGuest, ListAsGuest, DownloadAsGuest, UploadAsGuest, MakeFolderAsGuest,
+	RenameAsGuest, MoveAsGuest, DeleteAsGuest}
 
 // What the spec gives each role, written out here rather than taken from the package.
 var (
@@ -555,6 +570,13 @@ func TestDecide(t *testing.T) {
 			allow(v, place, throughALink...)
 		}
 	}
+	// A held My files, whose owner has left the member list: a project admin hands it over or deletes it, as a whole, at
+	// its top folder, whatever was given on it and with sharing outside the project on or off. Nobody does anything in it,
+	// and nobody does anything at all to one in the trash, or to one without an owner.
+	for _, place := range []string{"Bence's My files, Bence gone", "Bence's My files, Bence gone, no sharing outside",
+		"Réka's My files, her account gone", "Bence's My files, Bence gone, the admin given editor on its top folder and everyone viewer"} {
+		allow("admin", place, AsAWhole...)
+	}
 	// A shared folder in the trash can only be restored, as a whole, by its managers and the project admins.
 	// Not even switching sharing outside the project back on.
 	allow("member", "a deleted shared folder, given manager", RestoreSharedFolder)
@@ -766,6 +788,21 @@ func TestTheRulesHangTogether(t *testing.T) {
 					}
 				}
 			}
+			// A held My files is handed over or deleted as a whole: by a project admin, at the top folder of a My files whose
+			// owner has left (and is not them), both or neither; and whoever may do that may do nothing else there.
+			held := l != nil && l.Kind == MyFiles && l.Owner != "" && l.OwnerLeft && !l.Deleted && len(l.Path) == 0
+			for _, a := range AsAWhole {
+				if want := held && p.isMember() && p.Role == members.RoleAdmin && p.UserID != l.Owner; may(a) != want {
+					t.Errorf("%s: may %s %v, want %v", where, a, may(a), want)
+				}
+			}
+			if may(HandOverHeld) {
+				for _, a := range everyAction {
+					if may(a) && !slices.Contains(AsAWhole, a) {
+						t.Errorf("%s may hand it over as a whole, and also %s", where, a)
+					}
+				}
+			}
 			if l == nil || l.Deleted {
 				continue
 			}
@@ -952,7 +989,9 @@ func TestTheRulesHangTogether(t *testing.T) {
 					shared = shared || (p.Link == nil && g.On != 0 && toThem && slices.Contains(l.Path, g.On))
 				}
 				for _, a := range everyAction {
-					if may(a) && !shared {
+					// (A project admin hands a held My files over or deletes it as a whole, at its top folder: nothing in it.)
+					whole := slices.Contains(AsAWhole, a) && len(l.Path) == 0 && l.OwnerLeft
+					if may(a) && !shared && !whole {
 						t.Errorf("%s may %s in someone else's My files, where nothing was shared with them", where, a)
 					}
 				}
@@ -1196,6 +1235,11 @@ func TestEveryActionIsInTheTable(t *testing.T) {
 			t.Errorf("%q is a guest's action at an item, but not among a guest's actions", a)
 		}
 	}
+	for _, a := range AsAWhole {
+		if !slices.Contains(InAPlace, a) {
+			t.Errorf("%q is an action on a held My files as a whole, but not a member's in a place", a)
+		}
+	}
 	if len(everyAction) != len(InAPlace)+len(Nowhere)+len(ThroughALink)+len(AsAGuest) {
 		t.Errorf("the table tries %d actions; the package has %d in a place, %d in none, %d through a link and %d as a guest",
 			len(everyAction), len(InAPlace), len(Nowhere), len(ThroughALink), len(AsAGuest))
@@ -1272,7 +1316,9 @@ func TestSwitchedOff(t *testing.T) {
 
 // A project admin manages every shared folder and oversees the project, but may do nothing at all in anyone else's My
 // files, through any action, with sharing outside the project on or off, but what was shared with them (by name or with
-// everyone) on the way down to the item. Overseeing concerns no place.
+// everyone) on the way down to the item. Overseeing concerns no place. The one thing they do to a My files that is not
+// theirs is to a held one (its owner left the member list), as a whole, at its top folder: hand it over or delete it,
+// which opens nothing in it.
 func TestAProjectAdminDoesNothingInAnotherPersonsMyFiles(t *testing.T) {
 	admin := people["admin"]
 	checked := 0
@@ -1288,12 +1334,22 @@ func TestAProjectAdminDoesNothingInAnotherPersonsMyFiles(t *testing.T) {
 			q := *l
 			q.NoSharingOutside = sharing
 			for _, a := range everyAction {
-				if Decide(admin, a, &q) && !(shared && slices.Contains(InAPlace, a)) {
+				// The one thing a project admin does to another person's My files without anything shared with them: hand a
+				// held one over, or delete it, as a whole, at its top folder. Nothing in it is opened or named.
+				whole := slices.Contains(AsAWhole, a) && len(q.Path) == 0 && q.OwnerLeft
+				inside := shared && slices.Contains(InAPlace, a) && !slices.Contains(AsAWhole, a)
+				if Decide(admin, a, &q) && !inside && !whole {
 					t.Errorf("the admin may %s in %s (sharing outside off %v), where nothing was shared with them", a, ln, sharing)
+				}
+				if q.OwnerLeft && Decide(admin, a, &q) && !slices.Contains(AsAWhole, a) {
+					t.Errorf("the admin may %s in %s, a held My files", a, ln)
 				}
 				if !shared && (a == List || a == Download) && Decide(admin, a, &q) {
 					t.Errorf("the admin may %s in %s", a, ln)
 				}
+			}
+			if held := q.OwnerLeft && q.Owner != "" && !q.Deleted && len(q.Path) == 0; held != Decide(admin, HandOverHeld, &q) {
+				t.Errorf("the admin may hand over %s (sharing outside off %v): %v", ln, sharing, !held)
 			}
 			checked++
 		}

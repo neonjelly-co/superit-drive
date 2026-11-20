@@ -438,6 +438,17 @@ func (c *Client) Get(t *testing.T, path string) Response {
 // Do makes a request.
 func (c *Client) Do(t *testing.T, method, path string, body io.Reader) Response {
 	t.Helper()
+	res, err := c.Try(t, method, path, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// Try makes a request as Do does, but returns the error when no whole answer came (the Drive stopped meanwhile) rather
+// than failing the test.
+func (c *Client) Try(t *testing.T, method, path string, body io.Reader) (Response, error) {
+	t.Helper()
 	req, err := http.NewRequest(method, c.base+path, body)
 	if err != nil {
 		t.Fatal(err)
@@ -450,15 +461,30 @@ func (c *Client) Do(t *testing.T, method, path string, body io.Reader) Response 
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		return Response{}, err
 	}
 	defer res.Body.Close()
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
-		t.Fatal(err)
+		return Response{}, err
 	}
-	return Response{Status: res.StatusCode, Header: res.Header, Body: data}
+	return Response{Status: res.StatusCode, Header: res.Header, Body: data}, nil
 }
+
+// Exited waits up to ten seconds for the Drive's process to end by itself, and says whether it did.
+func (d *Drive) Exited() bool {
+	select {
+	case <-d.exited:
+		return true
+	case <-time.After(10 * time.Second):
+		return false
+	}
+}
+
+// TestStopAt is the environment variable that stops the Drive the harness builds at once, as if it were killed, the
+// first time its work gets to the point it names (internal/clock.StopAt), such as "hand-over moved". Restart without it
+// (an empty value) to see what the Drive does with what it left.
+const TestStopAt = "SUPERIT_DRIVE_TEST_STOP_AT"
 
 // Eventually waits up to five seconds for ok to hold.
 func Eventually(t *testing.T, what string, ok func() bool) {

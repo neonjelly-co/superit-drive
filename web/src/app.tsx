@@ -548,6 +548,24 @@ export function App() {
 			</div>
 		) : undefined;
 
+	// Someone no longer in the member list, with the page still open: the Drive refuses all they ask (403, on a request
+	// that only reads), so the page says why instead of showing what it still held. Reloading shows the same.
+	const refused = [me, places, listing].map((q) => q.error).find((e) => e instanceof ApiError && e.status === 403);
+	if (refused) {
+		return (
+			<main className="grid h-screen place-items-center bg-background p-6 text-foreground">
+				<div className="max-w-md rounded-xl border border-border bg-card p-6">
+					<h1 className="text-lg font-semibold">The Drive is closed to you</h1>
+					<p className="mt-2 text-sm text-muted-foreground">{refused.message}</p>
+					<p className="mt-2 text-sm text-muted-foreground">
+						If you think this is a mistake, ask a project admin. If you are added back, your files are here as you left
+						them, unless they were handed to someone else or deleted.
+					</p>
+				</div>
+			</main>
+		);
+	}
+
 	return (
 		<div className="flex h-screen bg-background text-foreground">
 			<Sidebar

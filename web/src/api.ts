@@ -70,7 +70,9 @@ export type Action =
 	| "manage-access"
 	| "switch-sharing-outside"
 	| "delete-shared-folder"
-	| "restore-shared-folder";
+	| "restore-shared-folder"
+	| "hand-over-held"
+	| "delete-held";
 
 /**
  * A role that can be given: viewer or editor on a file or folder, and also manager on a shared folder as a whole.
@@ -312,6 +314,45 @@ export type SpaceUsed = {
 /** The space each person and each shared folder uses, the largest first, and the whole. */
 export type Space = { used: number; capacity?: number; people: SpaceUsed[]; sharedFolders: SpaceUsed[] };
 
+/**
+ * The My files of someone no longer in the member list, held: closed to everyone, with nothing shared from it working,
+ * until a project admin hands it to another member or deletes it. Whose it was and how much it holds; never what is in it.
+ */
+export type Held = {
+	/** The place's id, which handing it over or deleting it names. */
+	place: number;
+	userId: string;
+	/** Their My files' folder on the storage: their email address when they first opened the Drive. */
+	folder: string;
+	/** Files and bytes outside its trash; `used` is all it takes, its trash included. */
+	files: number;
+	size: number;
+	used: number;
+	/** A hand-over or deletion under way; `back` when its owner is a member again meanwhile (it goes on). */
+	act?: HeldAct;
+	back?: boolean;
+};
+
+/** A hand-over or deletion of someone's held My files: who did it, when, and what. */
+export type HeldAct = {
+	id: number;
+	kind: "hand-over" | "delete";
+	userId: string;
+	folder: string;
+	files: number;
+	size: number;
+	/** The project admin who did it, while a member (`byFormer` once they have left). */
+	by?: Person;
+	byFormer?: boolean;
+	at: string;
+	/** For a hand-over: who got the files, and the folder they became in their My files. */
+	to?: Person;
+	toFormer?: boolean;
+	into?: string;
+	/** When the Drive finished it; none while it is under way. */
+	done?: string;
+};
+
 /** What an upload does when its name is taken: replace the file there, or keep both. */
 export type Existing = "replace" | "keep-both";
 
@@ -526,6 +567,13 @@ export const api = {
 		call<{ sharingOutside: OutsideSwitch; items: OutsideShare[] }>("GET", `${base}/oversight/shared-outside`),
 	/** The space each person and each shared folder uses, for a project admin. */
 	space: () => call<Space>("GET", `${base}/oversight/space`),
+	/** Every held My files of someone who left, and the record of hand-overs and deletions, for a project admin. */
+	held: () => call<{ held: Held[]; acts: HeldAct[] }>("GET", `${base}/held`),
+	/** Hands a held My files, as a whole, to a member: done, or under way (the Drive goes on with it). */
+	handOver: (placeId: number, to: string) =>
+		call<{ act: HeldAct }>("POST", `${base}/held/${placeId}/hand-over`, { to }).then((r) => r.act),
+	/** Deletes a held My files for good, its trash included. */
+	deleteHeld: (placeId: number) => call<{ act: HeldAct }>("DELETE", `${base}/held/${placeId}`).then((r) => r.act),
 	/**
 	 * What is in a folder of a place (null: its top folder), from the Drive's index; opening it also has it looked at on
 	 * the storage. With wait, the list once that look is done (the Drive waits up to ten seconds for it).

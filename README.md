@@ -391,7 +391,8 @@ of a resumable upload (starting it, each part, finishing and cancelling it) is d
 and an upload in progress is its uploader's alone: for anyone else, project admins and the folder's owner included, it
 does not exist. Someone whose right to upload there is taken away mid-upload can do nothing more with it, not even
 cancel it: its file stays, unseen and unused, until it is removed a day later. A "My files" whose owner has left the member
-list is held: nothing shared from it opens, until they are back (what happens to it otherwise is a later ticket).
+list is held: nobody may do anything in it, and nothing shared from it opens, until they are back, or a project admin
+hands it to another member or deletes it (see [When a member is removed](#when-a-member-is-removed)).
 
 Renaming, moving, deleting and restoring change the folder an item is in (or goes back to), so they are decided there
 too, as an upload into it is: whoever may put things into a folder may rename, take out and delete what is in it.
@@ -765,6 +766,93 @@ GET    /api/oversight/space
   files held (by the name of their top folder on the storage, their address when they first opened the Drive), every
   shared folder (one in the trash too), the largest first. Sums only.
 - Only project admins (`access.Oversee`); anyone else gets the one answer for what is not there.
+- The held My files of people who left the member list, to hand over or delete: see [When a member is
+  removed](#when-a-member-is-removed).
+
+### When a member is removed
+
+A person missing from a new version of the member list has been removed (the Drive reads the list within a second of
+it changing). Nothing is deleted for that, and nothing changes on the storage or in the index: the Drive decides on the
+list it has now, at every request, so someone added back with the same user id finds everything as it was.
+
+- **They are refused**: every request of theirs, from a browser left open too, answers 403 ("You are not a member of this
+  project, so its Drive is closed to you."), and the interface shows a page that says so in place of the files. An
+  upload of theirs in progress can go no further.
+- **Their My files is held**: kept as it is, its trash included, and closed to everyone, project admins included
+  (`access.Place.OwnerLeft`). Nothing shared from it opens: its public links answer as links that do not exist,
+  invitations let no guest in (a guest with nothing else that lets them in is signed out at their next request, and
+  is sent no code), what was shared with members or with everyone opens nothing and leaves their "Shared with me", and a
+  search finds nothing in it. The public links they made and the guests they invited in someone else's My files stop too
+  (they were their shares; what they gave members there stays, for that My files' owner to take away); what they did in
+  a shared folder is the project's and goes on: its files, its links, its guests and what they gave on it.
+- **Back with the same user id** (a list briefly wrong, a mistake undone, a new address), they have it back as it was,
+  with their trash, and everything shared from it works again; a guest who was signed out meanwhile signs in again with
+  a new code. People are told apart by user id, never by address: two members swapping addresses keep their own files.
+  (Its top folder on the storage keeps the name of their address when they first opened the Drive.)
+- **Until a project admin decides.** Held lasts as long as it takes: nothing ends it but a project admin's act, a
+  hand-over or a deletion, each of the held My files as a whole, at its top folder (`access.HandOverHeld`,
+  `access.DeleteHeld`): it is never opened, listed or named to them. Only a project admin may, only for a My files whose
+  owner is not in the member list, and only one act on it at a time.
+
+```
+GET    /api/held                                   a project admin: every held My files, and the record
+       200 {"held": [{"place", "userId", "folder", "files", "size", "used", "act", "back"}],
+            "acts": [{"id", "kind": "hand-over" | "delete", "userId", "folder", "files", "size",
+                      "by", "byFormer", "at", "to", "toFormer", "into", "done"}]}
+POST   /api/held/{place}/hand-over   {"to": "<user id of a member>"}
+DELETE /api/held/{place}
+       200 {"act"} done; 202 {"act"} under way    400 not a member    409 another act under way on it, its owner back
+       in the member list meanwhile, or a change inside it still under way
+```
+
+`folder` is the name of their My files' top folder on the storage, their address when they first opened the Drive (the
+Drive no longer knows their name); `files` and `size` are what it holds outside its trash, `used` all it takes.
+
+**A hand-over** moves the whole held My files, in one `MOVE` on the storage, into the top folder of the receiver's My
+files (made for them if they have never opened the Drive), as a folder named after it: `bence@example.com`, or
+`bence@example.com (2)` and so on when the receiver has something of that name (on the storage, or in the index, even an
+item missing from the storage): it is never merged into a folder that is there. The items keep their ids. What comes
+along is the files, and nothing given on them: every share (to members, to everyone, to guests: a guest whose last
+invitation it was is removed, and signed out), every public link (removed for good) and every upload in progress into it
+are removed, so the folder arrives as private as anything the receiver made, and nothing the removed person decided
+works again, whoever is let in later. What was in the held My files' trash is not handed over: it is removed. The
+receiver is not mailed: the project admin tells them.
+
+**A deletion** removes the held My files from the storage for good, its trash included, and from the index with
+everything in it. It does not go to a trash: the hold before it is the time to change one's mind, and the confirmation
+says it cannot be undone. On Superit's storage, the daily snapshots are the way back (a rollback, for the whole storage).
+
+**The record.** Every act is kept in the index for good, read by project admins (`GET /api/held`, and the interface's
+"People who left", in "Sharing and space"): whose files (user id, folder), how many files and bytes, who did it, when,
+and, for a hand-over, to whom and the folder they became. It is logged too (`the files of a member who left were handed
+over`, or `deleted`, with the ids). A top folder named in the record is never given to a new My files: someone with
+that address (the person back, or another) gets `bence@example.com (2)`, so nothing left of the old one on the storage is
+ever taken over.
+
+**Steps, and a stop midway.** An act is recorded first (with what it covers and, for a hand-over, the folder's name), then
+done on the storage (the move, then removing the trash; or removing the trash and the top folder), then in the index, by
+SQL statements that move or remove 20,000 items per transaction (nothing of the tree is loaded into memory, and no
+transaction holds the index for more than a moment: 100,000 items take about a second in all); what is moved below the
+top folder stays out of reach in the receiver's My files until the last transaction moves the top folder's items, makes
+their folder, and records the act done. Each step can be done again, and the Drive tells which are done by what the
+storage and the index hold. While an act is under way:
+
+- its held My files stays held, whatever the member list says (someone back meanwhile does not get it: the act was
+  decided, and is finished; they get a new My files once it is);
+- the storage paths it changes are claimed, so no look at a folder and no walk takes the moved folder for one put there
+  directly, or the held one for one emptied; when the Drive starts, it claims them again from the record before anything
+  looks at the storage;
+- an act whose storage step fails (the storage not answering, a removal taking longer than ten minutes) stays under way:
+  it is answered 202, shown as under way, and finished by the Drive by itself when it starts and every hour after (or
+  when the project admin asks for the same act again);
+- a Drive that stops midway (killed, restarted) finishes it when it starts again; a name taken on the storage meanwhile
+  gets the next free one; a held top folder gone from the storage before the move becomes an empty folder, and the looks
+  find its files gone.
+
+Nothing is changed by an act unless the storage holds the Drive's mark (a storage that is empty or mounted wrongly would
+show the held files gone). After a rollback to a snapshot taken before an act, the removed person's folder is back on the
+storage and belongs to no place: nobody sees it, the walk logs it, and only someone with the storage login can hand it
+over.
 
 ### Opening files in the browser
 
@@ -983,7 +1071,8 @@ everything a member can see, and several items can be selected to move, download
 who may share a file or folder make a public link to it, which anyone opens without signing in, or invite someone
 outside the project by email address as a guest (with the mail settings), who signs in with a mailed code; project
 admins see everything shared outside the project and the space each person and shared folder uses, and switch sharing
-outside the project off for the whole project (managers for one shared folder). Large files
+outside the project off for the whole project (managers for one shared folder); when someone leaves the member list,
+their My files is held, unopened, until a project admin hands it to another member or deletes it. Large files
 upload in parts that resume after a broken connection, downloads resume and seek, and folders upload
 whole and download as zips. Files changed on the WebDAV server by other programs show in the Drive as folders are
 opened, and through a slow walk now and then (see [Keeping in step with the storage](#keeping-in-step-with-the-storage)).
@@ -1167,7 +1256,9 @@ and leave only the images `superit-drive:memory-test` and `superit-drive-test-we
 The harness builds the Drive with the build tag `testclock`, which is the only difference from a released Drive: in
 it, `SUPERIT_DRIVE_TEST_CLOCK_SHIFT` (a Go duration such as `744h`) moves the Drive's clock forward, so a test can
 restart a Drive (`Drive.Restart`) 31 days later and see the trash emptied, or ten minutes later and see an item gone
-from the storage dropped; and `SUPERIT_DRIVE_TEST_WALK_EVERY` and `SUPERIT_DRIVE_TEST_WALK_PAUSE` (Go durations) make the
+from the storage dropped; `SUPERIT_DRIVE_TEST_STOP_AT` stops the Drive at once, as if it were killed, at a named point of
+its work (`hand-over moved`, `hand-over trash removed`, `delete removed`), so a test sees it finish what it left when it
+starts again; and `SUPERIT_DRIVE_TEST_WALK_EVERY` and `SUPERIT_DRIVE_TEST_WALK_PAUSE` (Go durations) make the
 walk through the storage start that soon, run that often and rest that long after each folder. A Drive built without
 the tag reads no such variable. Tests change the storage directly with the harness's own WebDAV client
 (`Drive.Storage`), including a `MOVE` that keeps a file's time (a storage that answered wrong for a while), `Fill`,
@@ -1221,10 +1312,12 @@ internal/server/       HTTP: routes.go lists every route; server.go's guard runs
                        opening.go what opens in the browser and how, search.go the search by name, links.go making
                        and removing public links, visitors.go the public prefix and the visitor's pages,
                        invitations.go inviting guests, guests.go the guests' sign-in, pages and codes,
-                       oversight.go sharing outside the project switched off and what a project admin oversees
+                       oversight.go sharing outside the project switched off and what a project admin oversees,
+                       held.go the held My files of people who left, handed over or deleted
 internal/drive/        the Drive's operations, joining the index and the storage: files, folders, the trash,
                        shared folders, the access given on them; reread.go and walk.go keep the index in step with
-                       the storage, and rollback.go takes in the storage put back to a snapshot
+                       the storage, rollback.go takes in the storage put back to a snapshot, and held.go hands
+                       over or deletes the held My files of people who left
 internal/index/        the SQLite index (search.go: names as a search compares them, and the walk down a scope);
                        schema changes are numbered files in migrations/, run with foreign keys
                        off (SQLite's recipe for rebuilding a table) and checked with foreign_key_check before each

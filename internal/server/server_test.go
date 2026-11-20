@@ -61,6 +61,8 @@ var placeRoutesTriedByAnOutsider = []string{
 	"DELETE /api/places/{place}",
 	"POST /api/places/{place}/restore",
 	"PUT /api/places/{place}/sharing-outside",
+	"POST /api/held/{place}/hand-over",
+	"DELETE /api/held/{place}",
 	"GET /api/places/{place}/access",
 	"PUT /api/places/{place}/access/members/{member}",
 	"DELETE /api/places/{place}/access/members/{member}",

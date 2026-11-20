@@ -52,8 +52,14 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	if shift := clock.Shift(); shift != 0 {
 		log.Warn("this is a test build: its clock is moved forward", "by", shift.String())
 	}
-	d := drive.New(x, store, drive.Options{Now: clock.Now, Log: log})
+	d := drive.New(x, store, drive.Options{Now: clock.Now, Log: log, StopAt: clock.StopAt})
 	defer d.Stop() // the looks at folders under way in the background end, before the index closes
+
+	// A hand-over or deletion of a removed member's files that a stop cut short holds what it changes on the storage, before
+	// anything looks there (Tidy, below, finishes it).
+	if err := d.HoldActs(ctx); err != nil {
+		return err
+	}
 
 	// A rollback of the storage the settings declare is taken in once (rollback.go): the walk below then starts at once.
 	if rb := s.Rollback; rb != nil {

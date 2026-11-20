@@ -478,8 +478,10 @@ func (s *Server) accessPlace(p index.Place, path []int64, grants []index.Grant) 
 	case index.MyFiles:
 		where.Kind = access.MyFiles
 		where.Owner = p.Owner
+		// Held while its owner is out of the member list, and while it is being handed over or deleted, whatever the list
+		// says.
 		_, stays := s.members.Current().Lookup(p.Owner)
-		where.OwnerLeft = !stays
+		where.OwnerLeft = !stays || p.Acting != ""
 	case index.SharedFolder:
 		where.Kind = access.SharedFolder
 	} // any other kind stays without one, and access refuses it
