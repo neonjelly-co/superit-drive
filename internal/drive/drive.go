@@ -121,6 +121,15 @@ type Drive struct {
 	logged logged
 }
 
+// By is who does something that is recorded: a member, by user id, or a guest (Member is then "").
+type By struct {
+	Member string
+	Guest  index.Guest
+}
+
+// Now is the Drive's clock: what it dates things by, and decides end dates on.
+func (d *Drive) Now() time.Time { return d.now() }
+
 // New makes a Drive.
 func New(x *index.Index, s *storage.Client, o Options) *Drive {
 	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}}

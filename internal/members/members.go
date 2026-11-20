@@ -13,6 +13,9 @@
 //
 // userId is the person's stable id from the platform: the Drive ties files and access to it, so a changed email
 // address orphans nothing. role is "admin" or "member". Other fields are ignored.
+//
+// The email address also decides whether someone given access is a member or a guest: an address in the list is a
+// member's. Addresses are compared as Address writes them, and no two members may have the same one.
 package members
 
 import (
@@ -48,12 +51,30 @@ type Member struct {
 // List is one version of the member list.
 type List struct {
 	byID map[string]Member
+	// byEmail holds each member's user id by their email address, as Address writes it.
+	byEmail map[string]string
 }
 
 // Lookup finds a member by their user id.
 func (l *List) Lookup(userID string) (Member, bool) {
 	m, ok := l.byID[userID]
 	return m, ok
+}
+
+// ByEmail finds the member whose email address is address, both compared as Address writes them.
+func (l *List) ByEmail(address string) (Member, bool) {
+	id, ok := l.byEmail[Address(address)]
+	if !ok {
+		return Member{}, false
+	}
+	return l.Lookup(id)
+}
+
+// Address is an email address as the Drive compares it, to tell a member from a guest and one guest from another:
+// without spaces at either end, and in lower case. Nothing else is changed: dots, "+" tags and the rest make different
+// addresses, as they can be different mailboxes, and are never merged.
+func Address(address string) string {
+	return strings.ToLower(strings.TrimSpace(address))
 }
 
 // Len is the number of members.
@@ -92,7 +113,7 @@ func Parse(data []byte) (*List, error) {
 	if file.Members == nil {
 		return nil, errors.New(`the member list has no "members" array`)
 	}
-	l := &List{byID: make(map[string]Member, len(*file.Members))}
+	l := &List{byID: make(map[string]Member, len(*file.Members)), byEmail: make(map[string]string, len(*file.Members))}
 	for i, m := range *file.Members {
 		switch {
 		case strings.TrimSpace(m.UserID) == "":
@@ -105,7 +126,12 @@ func Parse(data []byte) (*List, error) {
 		if _, dup := l.byID[m.UserID]; dup {
 			return nil, fmt.Errorf("member %q is in the list twice", m.UserID)
 		}
+		// Whether an address is a member's decides who is a member and who a guest: it must say one person.
+		if other, dup := l.byEmail[Address(m.Email)]; dup {
+			return nil, fmt.Errorf("members %q and %q have the same email address", other, m.UserID)
+		}
 		l.byID[m.UserID] = m
+		l.byEmail[Address(m.Email)] = m.UserID
 	}
 	return l, nil
 }

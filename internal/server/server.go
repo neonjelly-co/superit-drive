@@ -1,20 +1,24 @@
-// Package server is the Drive's HTTP side: the JSON API the interface calls, the interface's own files, and the pages
-// visitors with a public link see under the public prefix.
+// Package server is the Drive's HTTP side: the JSON API the interface calls, the interface's own files, the pages
+// visitors with a public link see under the public prefix, and the guests' pages and API under its guests' part.
 //
 // Every route is listed in routes.go and registered in Handler, and nowhere else. Each request passes the same steps
-// in guard before its handler runs: who is asking (under the public prefix always a visitor, through the link its
-// address names; anywhere else a member, identify), whether it may change anything (only from the Drive's own pages,
-// fromOwnPage; never under the public prefix), which place it concerns (if any), which item in that place or in its
-// trash, or which of the person's own uploads in progress into it (if any), the access given on the place and on the
-// way down to the item (accessAt), and whether they may (access.Decide). A handler only ever sees a request that
-// passed them all. A test fails if anything outside this file registers a handler.
+// in guard before its handler runs: who is asking (under the guests' prefix, the guest whose session the cookie names,
+// or nobody; elsewhere under the public prefix always a visitor, through the link its address names; anywhere else a
+// member, identify), whether it may change anything (only from the Drive's own pages, fromOwnPage; never through a
+// link), which place it concerns (if any), which item in that place or in its trash, or which of the person's own
+// uploads in progress into it (if any), the access given on the place and on the way down to the item (accessAt), and
+// whether they may (access.Decide). A handler only ever sees a request that passed them all. A test fails if anything
+// outside this file registers a handler.
 //
 // transfers.go has the routes that move a file's bytes (downloads, zips, uploads), which take turns for the transfer
-// slots (package transfers); visitors.go the public prefix, links.go making and removing public links.
+// slots (package transfers); visitors.go the public prefix, links.go making and removing public links; guests.go the
+// guests' sign-in and pages, invitations.go inviting them.
 package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -25,6 +29,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
@@ -64,18 +69,32 @@ type Server struct {
 	address  *url.URL // DRIVE_ADDRESS, for the links in mail
 	ui       fs.FS
 	log      *slog.Logger
-	// slots lets at most transfers.Slots transfers be in flight, of which visitors hold at most transfers.OutsiderSlots.
+	// slots lets at most transfers.Slots transfers be in flight, of which visitors and guests together hold at most
+	// transfers.OutsiderSlots.
 	slots *transfers.Gate
-	// visitors bounds how many visitors' requests are worked on at once (visitors.go).
-	visitors *admission
+	// visitors bounds how many visitors' requests are worked on at once (visitors.go); guests how many guests' (and
+	// requests to sign in as one).
+	visitors, guests *admission
+	// codeKey keys the HMAC of the codes mailed to guests (guests.go): derived from the header secret, which the index
+	// never holds.
+	codeKey []byte
+	// codes are the addresses that asked for a code, waiting for SendCodes (guests.go); codesDropped is when asks were
+	// last dropped for want of room (Unix seconds), so that it is logged once a minute at most.
+	codes        chan string
+	codesDropped atomic.Int64
 }
 
 // New makes a server.
 func New(c Config) *Server {
+	key := hmac.New(sha256.New, []byte(c.HeaderSecret))
+	key.Write([]byte("superit-drive: guests' codes"))
 	s := &Server{project: c.ProjectName, secret: c.HeaderSecret, members: c.Members, drive: c.Drive, capacity: c.Capacity,
 		mail: c.Mail, address: c.Address, ui: c.Interface, log: c.Log,
 		slots:    transfers.NewGate(transfers.Slots, transfers.OutsiderSlots),
-		visitors: newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait)}
+		visitors: newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
+		guests:   newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
+		codeKey:  key.Sum(nil),
+		codes:    make(chan string, codesWaiting)}
 	if c.Address != nil {
 		s.origin = originOf(c.Address)
 	}
@@ -103,8 +122,12 @@ type route struct {
 	upload string
 	// link is, for a route under the public prefix (and only there), the name of the path value holding the token of
 	// the public link the visitor came with. The place is the one the link's item is in; item, when given, names an item
-	// in it, and the request is about the link's item itself otherwise. Every route under the public prefix has one.
-	link  string
+	// in it, and the request is about the link's item itself otherwise. Every route under the public prefix but the
+	// guests' has one.
+	link string
+	// guest is true for a route under the guests' prefix (and only there): the person is the guest whose session the
+	// cookie names, or nobody. A guest's route with a place always names an item in it, or an upload in progress.
+	guest bool
 	serve func(http.ResponseWriter, *http.Request, call)
 }
 
@@ -121,22 +144,45 @@ func underPublicPrefix(path string) bool {
 // patternUnderPublicPrefix says whether a route's pattern ("GET /s/{token}", or a path alone) is under the public
 // prefix.
 func patternUnderPublicPrefix(pattern string) bool {
+	return underPublicPrefix(pathOfPattern(pattern))
+}
+
+// GuestPrefix is where everything a guest reaches lives, inside the public prefix: their pages, the interface's files
+// for them, and their API. A request under it is a guest's, or nobody's; never a member's, never a visitor's. No link's
+// token is ever "guest".
+const GuestPrefix = "/s/guest"
+
+// underGuestPrefix says whether a request's path is under the guests' prefix.
+func underGuestPrefix(path string) bool {
+	return path == GuestPrefix || strings.HasPrefix(path, GuestPrefix+"/")
+}
+
+// patternUnderGuestPrefix says whether a route's pattern is under the guests' prefix.
+func patternUnderGuestPrefix(pattern string) bool {
+	return underGuestPrefix(pathOfPattern(pattern))
+}
+
+func pathOfPattern(pattern string) string {
 	if _, path, ok := strings.Cut(pattern, " "); ok {
-		pattern = path
+		return path
 	}
-	return underPublicPrefix(pattern)
+	return pattern
 }
 
 // call is what a handler gets: who is asking, the place the request concerns (nil for no place), the item in it or in
 // its trash (nil for none), and where the request is as the access package saw it. All have already passed guard.
 type call struct {
-	// member is the member asking; for a visitor it is empty, and link is the public link they came with.
+	// member is the member asking; for a visitor it is empty, and link is the public link they came with; for a guest
+	// it is empty, and guest is who they are.
 	member members.Member
 	link   *index.Link
+	guest  *index.Guest
 	// person is who is asking, as the access package decided on them.
-	person  access.Person
-	place   *index.Place
-	access  *access.Place
+	person access.Person
+	place  *index.Place
+	access *access.Place
+	// grants is what was given on the place's top folder and on the way down to the item, as access saw it.
+	grants  []index.Grant
 	item    *index.Item
 	trashed *index.TrashItem
 	// backTo is, for an item in the trash, the folder it goes back to when restored (nil: the place's top folder).
@@ -146,16 +192,33 @@ type call struct {
 	upload *index.Upload
 }
 
+// by is who is asking, as what they do is recorded: a member by user id, a guest by id and address.
+func (c call) by() drive.By {
+	if c.guest != nil {
+		return drive.By{Guest: *c.guest}
+	}
+	return drive.By{Member: c.member.UserID}
+}
+
 // Handler is the Drive's whole HTTP handler. This is the only place routes are registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	for _, rt := range s.routes() {
-		if patternUnderPublicPrefix(rt.pattern) != (rt.link != "") {
-			panic("server: route " + rt.pattern + ": every route under the public prefix, and no other, is a visitor's, with a link")
+		if patternUnderPublicPrefix(rt.pattern) != (rt.link != "" || rt.guest) || patternUnderGuestPrefix(rt.pattern) != rt.guest ||
+			(rt.link != "" && rt.guest) {
+			panic("server: route " + rt.pattern + ": every route under the public prefix, and no other, is a visitor's, with a link, " +
+				"or under the guests' prefix a guest's")
 		}
 		if rt.link != "" && (rt.place != "" || rt.trashed != "" || rt.upload != "" || rt.inTrash || !strings.HasPrefix(rt.pattern, "GET ") ||
 			!slices.Contains(access.ThroughALink, rt.action)) {
 			panic("server: route " + rt.pattern + " is a visitor's: it only reads (GET), through its link, with an action through a link")
+		}
+		if rt.guest && (!slices.Contains(access.AsAGuest, rt.action) || rt.trashed != "" || rt.inTrash ||
+			(rt.place != "" && rt.item == "" && rt.upload == "")) {
+			panic("server: route " + rt.pattern + " is a guest's: it has a guest's action, and in a place always an item or an upload")
+		}
+		if !rt.guest && slices.Contains(access.AsAGuest, rt.action) {
+			panic("server: route " + rt.pattern + " is not a guest's, with a guest's action")
 		}
 		if rt.link == "" && slices.Contains(access.ThroughALink, rt.action) {
 			panic("server: route " + rt.pattern + " is a member's, with an action through a link")
@@ -173,9 +236,18 @@ func (s *Server) Handler() http.Handler {
 	}
 	// Anything else is still identified first, so an outsider learns nothing from a wrong address. Under the public
 	// prefix, anything else is a visitor's too: its pattern holds no token, so it is looked up as a token that is not
-	// there, the same way as any other, and answered as a link that does not exist (or 405, for a change).
+	// there, the same way as any other, and answered as a link that does not exist (or 405, for a change); except under
+	// the guests' prefix, where it is a guest's (or nobody's), answered as an address that is not there.
 	mux.Handle("/", s.guard(route{pattern: "/", action: access.Enter, serve: s.notFound}))
-	mux.Handle(PublicPrefix, s.guard(route{pattern: PublicPrefix, link: "token", action: access.SeeThroughLink}))
+	visitors := s.guard(route{pattern: PublicPrefix, link: "token", action: access.SeeThroughLink})
+	guests := s.guard(route{pattern: GuestPrefix + "/", guest: true, action: access.SignInAsGuest, serve: s.notFound})
+	mux.Handle(PublicPrefix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if underGuestPrefix(r.URL.Path) {
+			guests.ServeHTTP(w, r)
+			return
+		}
+		visitors.ServeHTTP(w, r)
+	}))
 	return securityHeaders(mux)
 }
 
@@ -184,6 +256,10 @@ func (s *Server) Handler() http.Handler {
 // find the place and the item in it, gather the access given there, ask access.Decide, then serve.
 func (s *Server) guard(rt route) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rt.guest {
+			s.guardGuest(w, r, rt)
+			return
+		}
 		if rt.link != "" {
 			s.guardVisitor(w, r, rt)
 			return
@@ -270,7 +346,7 @@ func (s *Server) findWhere(w http.ResponseWriter, r *http.Request, rt route, c *
 	}
 	if rt.upload != "" {
 		// Found only among the person's own uploads in this place: another person's is not there for them.
-		u, err := s.drive.UploadOf(r.Context(), p, r.PathValue(rt.upload), c.member.UserID)
+		u, err := s.drive.UploadOf(r.Context(), p, r.PathValue(rt.upload), c.by())
 		if errors.Is(err, index.ErrNoUpload) {
 			s.refuse(w, r, http.StatusNotFound, notHere)
 			return false
@@ -295,10 +371,11 @@ func (s *Server) findWhere(w http.ResponseWriter, r *http.Request, rt route, c *
 			path = pathTo(folder)
 		}
 	}
-	if c.access, err = s.accessAt(r.Context(), p, idsOf(path)); err != nil {
+	if c.grants, err = s.drive.GrantsOn(r.Context(), p, idsOf(path)); err != nil {
 		s.fail(w, r, err)
 		return false
 	}
+	c.access = s.accessPlace(p, idsOf(path), c.grants)
 	if c.trashed != nil {
 		c.access.DeletedBy = c.trashed.DeletedBy
 	}
@@ -383,11 +460,13 @@ func (s *Server) accessAt(ctx context.Context, p index.Place, path []int64) (*ac
 	return s.accessPlace(p, path, grants), nil
 }
 
-// accessPlace describes the place p, at the item whose path is given, with the grants already read for it.
+// accessPlace describes the place p, at the item whose path is given, with the grants already read for it, at the
+// Drive's time now (for grants that end).
 func (s *Server) accessPlace(p index.Place, path []int64, grants []index.Grant) *access.Place {
-	where := &access.Place{Deleted: !p.Deleted.IsZero(), Path: path, Grants: make([]access.Grant, 0, len(grants))}
+	where := &access.Place{Deleted: !p.Deleted.IsZero(), Path: path, Grants: make([]access.Grant, 0, len(grants)), Now: s.drive.Now()}
+	list := s.members.Current()
 	for _, g := range grants {
-		where.Grants = append(where.Grants, accessGrant(g))
+		where.Grants = append(where.Grants, accessGrant(g, list))
 	}
 	switch p.Kind {
 	case index.MyFiles:
@@ -401,8 +480,23 @@ func (s *Server) accessPlace(p index.Place, path []int64, grants []index.Grant) 
 	return where
 }
 
-func accessGrant(g index.Grant) access.Grant {
-	return access.Grant{On: g.Item, Member: g.Member, Everyone: g.Everyone, Role: access.Role(g.Role)}
+// accessGrant is a grant as the access package needs it: for an invitation, with whoever gave it as the member list has
+// them now.
+func accessGrant(g index.Grant, list *members.List) access.Grant {
+	a := access.Grant{On: g.Item, Member: g.Member, Everyone: g.Everyone, Guest: g.Guest, Role: access.Role(g.Role), Ends: g.Ends}
+	if g.Guest != 0 {
+		a.By = memberAsPerson(g.By, list)
+	}
+	return a
+}
+
+// memberAsPerson is the member with the user id given as the access package needs them, as the member list has them now:
+// without a role once they have left it.
+func memberAsPerson(userID string, list *members.List) access.Person {
+	if m, ok := list.Lookup(userID); ok {
+		return personOf(m)
+	}
+	return access.Person{UserID: userID}
 }
 
 // pathTo is an item after the folders above it, from the top of its place down.
@@ -423,10 +517,14 @@ func personOf(m members.Member) access.Person {
 	return access.Person{UserID: m.UserID, Role: m.Role}
 }
 
-// refuse answers with an error the person can read: JSON for the API, a page under the public prefix (where every
-// "not here" is the one answer for a link that does not work), plain text otherwise.
+// refuse answers with an error the person can read: JSON for the API (the guests' too), a page under the public prefix
+// (where every "not here" is the one answer for a link that does not work), plain text otherwise.
 func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, message string) {
-	if underPublicPrefix(r.URL.Path) {
+	if strings.HasPrefix(r.URL.Path, GuestPrefix+"/api/") {
+		writeJSON(w, status, map[string]string{"error": message})
+		return
+	}
+	if underPublicPrefix(r.URL.Path) && !underGuestPrefix(r.URL.Path) {
 		s.visitorRefusal(w, status, message)
 		return
 	}
@@ -464,22 +562,30 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // securityHeaders adds the headers every answer carries: no framing, no guessing of content types, no third-party
 // anything, and no other site loading a file's bytes into its own page (an image or script tag sends the member's
-// cookie along). Under the public prefix, where the address is the secret, also: no Referer sent from it, no copy kept
-// by the browser or anything on the way, not listed by search engines, and a policy under which nothing at all runs or
-// loads but the page's own style (visitors.go).
+// cookie along). Under the public prefix, also: no copy kept by the browser or anything on the way, and not listed by
+// search engines; and, where the address is the secret (a link's), no Referer sent from it and a policy under which
+// nothing at all runs or loads but the page's own style (visitors.go). The guests' pages run the interface's own
+// script, under the members' policy, and send a Referer only to the Drive itself (so that their changes carry the
+// Drive's Origin, which no-referrer would make null).
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'")
+		h.Set("Content-Security-Policy", memberPolicy)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cross-Origin-Resource-Policy", "same-origin")
 		if underPublicPrefix(r.URL.Path) {
-			h.Set("Content-Security-Policy", visitorPolicy)
-			h.Set("Referrer-Policy", "no-referrer")
 			h.Set("X-Robots-Tag", "noindex, nofollow")
 			h.Set("Cache-Control", "no-store")
+			if !underGuestPrefix(r.URL.Path) {
+				h.Set("Content-Security-Policy", visitorPolicy)
+				h.Set("Referrer-Policy", "no-referrer")
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
 }
+
+// memberPolicy is the Content-Security-Policy of the interface's pages, the members' and the guests': nothing but the
+// Drive's own files loads or runs.
+const memberPolicy = "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"

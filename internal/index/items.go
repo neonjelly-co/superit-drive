@@ -23,6 +23,8 @@ type Item struct {
 	Folder   bool
 	Size     int64
 	Changed  time.Time
+	// AddedByGuest is, for a file or folder a guest added (uploaded or made), their address as they had it then.
+	AddedByGuest string
 	// Above is every folder the item is in, from the top of the place down to its own folder, each with its own
 	// Above filled the same way. Only Item fills it.
 	Above []Item
@@ -44,12 +46,13 @@ var ErrNoItem = errors.New("no such item")
 var ErrNoFolder = fmt.Errorf("%w: the folder is not in the place", ErrNoItem)
 
 // itemColumns are read by scanItem, in this order.
-const itemColumns = "items.id, items.place_id, IFNULL(items.parent_id, 0), items.name, items.is_folder, items.size, items.changed_at"
+const itemColumns = "items.id, items.place_id, IFNULL(items.parent_id, 0), items.name, items.is_folder, items.size, items.changed_at, " +
+	"IFNULL(items.added_by_guest, '')"
 
 func scanItem(row interface{ Scan(...any) error }, more ...any) (Item, error) {
 	var it Item
 	var changed int64
-	err := row.Scan(append([]any{&it.ID, &it.PlaceID, &it.ParentID, &it.Name, &it.Folder, &it.Size, &changed}, more...)...)
+	err := row.Scan(append([]any{&it.ID, &it.PlaceID, &it.ParentID, &it.Name, &it.Folder, &it.Size, &changed, &it.AddedByGuest}, more...)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Item{}, ErrNoItem
 	}
@@ -173,13 +176,14 @@ func item(ctx context.Context, q querier, placeID, id int64) (Item, error) {
 // file just uploaded or a folder just made, at the time given, and returns it. A live item of that name keeps its id, as
 // long as it is the same kind of item: a file where a folder was (or the other way round) is a new item, and the other
 // is marked missing. An item missing from the storage is never taken over: the new one has an id of its own.
-func (x *Index) PutItem(ctx context.Context, placeID, folderID int64, s Seen, at time.Time) (Item, error) {
+// addedByGuest is the address of the guest who added it, or "" for a member: an upload over a file takes its label.
+func (x *Index) PutItem(ctx context.Context, placeID, folderID int64, s Seen, at time.Time, addedByGuest string) (Item, error) {
 	var it Item
 	err := x.write(ctx, func(tx *sql.Tx) error {
 		if err := liveFolder(ctx, tx, placeID, folderID); err != nil {
 			return err
 		}
-		if err := upsert(ctx, tx, placeID, folderID, s, at); err != nil {
+		if err := upsert(ctx, tx, placeID, folderID, s, at, addedByGuest); err != nil {
 			return err
 		}
 		var err error
@@ -210,9 +214,9 @@ func liveFolder(ctx context.Context, tx *sql.Tx, placeID, folderID int64) error 
 }
 
 // upsert adds or updates the live item called s.Name in the folder, keeping the id of a live item of that name and
-// kind. A live item of the other kind there is marked missing at the time given, as the storage no longer has it: it is
-// dropped later, as anything missing is (Reconcile).
-func upsert(ctx context.Context, tx *sql.Tx, placeID, folderID int64, s Seen, at time.Time) error {
+// kind, labelled as added by the guest addedByGuest (or by no guest). A live item of the other kind there is marked
+// missing at the time given, as the storage no longer has it: it is dropped later, as anything missing is (Reconcile).
+func upsert(ctx context.Context, tx *sql.Tx, placeID, folderID int64, s Seen, at time.Time, addedByGuest string) error {
 	_, err := tx.ExecContext(ctx, `
 		UPDATE items SET missing_at = ?
 		WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND name = ? AND trashed_at IS NULL AND missing_at IS NULL AND is_folder != ?`,
@@ -221,10 +225,10 @@ func upsert(ctx context.Context, tx *sql.Tx, placeID, folderID int64, s Seen, at
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO items (place_id, parent_id, name, is_folder, size, changed_at) VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO items (place_id, parent_id, name, is_folder, size, changed_at, added_by_guest) VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (place_id, IFNULL(parent_id, 0), name) WHERE trashed_at IS NULL AND missing_at IS NULL DO UPDATE
-		SET size = excluded.size, changed_at = excluded.changed_at`,
-		placeID, parent(folderID), s.Name, s.Folder, s.Size, s.Changed.Unix())
+		SET size = excluded.size, changed_at = excluded.changed_at, added_by_guest = excluded.added_by_guest`,
+		placeID, parent(folderID), s.Name, s.Folder, s.Size, s.Changed.Unix(), nullable(addedByGuest))
 	return err
 }
 

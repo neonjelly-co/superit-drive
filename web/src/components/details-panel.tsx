@@ -80,6 +80,14 @@ export function DetailsPanel(props: Props) {
 						<dd className="min-w-0 break-words">{where}</dd>
 					</>
 				)}
+				{item.addedBy && (
+					<>
+						<dt className="text-muted-foreground">Added by</dt>
+						<dd className="min-w-0 break-words">
+							A guest, <span className="font-mono">{item.addedBy.guest}</span>: from outside the project
+						</dd>
+					</>
+				)}
 			</dl>
 			{!here && (
 				<div className="mt-6 flex flex-wrap gap-2">
@@ -121,6 +129,7 @@ export function DetailsPanel(props: Props) {
 					itemId={item.id}
 					what={item.kind}
 					canChange={can.includes("share")}
+					canInvite={can.includes("invite-guest")}
 					roles={["viewer", "editor"]}
 					me={me}
 					onChanged={onAccessChanged}

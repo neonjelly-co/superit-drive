@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
@@ -25,14 +26,23 @@ import (
 // from.
 type accessJSON struct {
 	// Everyone is true for everyone in the project; Link for anyone with the public link on it, or on a folder above it
-	// (as viewer: they see and download), while it works. Otherwise the line is about one member, by user id, with
-	// their email address and name from the member list.
+	// (as viewer: they see and download), while it works; Guest for a guest invited by address. Otherwise the line is
+	// about one member, by user id, with their email address and name from the member list.
 	Everyone    bool        `json:"everyone,omitempty"`
 	Link        bool        `json:"link,omitempty"`
+	Guest       *guestJSON  `json:"guest,omitempty"`
 	UserID      string      `json:"userId,omitempty"`
 	Email       string      `json:"email,omitempty"`
 	DisplayName string      `json:"displayName,omitempty"`
 	Role        access.Role `json:"role"`
+	// Until is when it ends, for access given with an end date (an invitation, or a guest's that is now a member's).
+	Until *time.Time `json:"until,omitempty"`
+	// For an invitation, to whoever may share the item: whether it lets its guest in now (not after its end date, not
+	// once whoever gave it in a My files can no longer share it, not where sharing outside the project is off), and how
+	// often its guest used it, and when last.
+	Works *bool      `json:"works,omitempty"`
+	Uses  *int64     `json:"uses,omitempty"`
+	Used  *time.Time `json:"used,omitempty"`
 	// Owner is true for the member whose "My files" it is; Admin for a project admin, a manager of every shared folder.
 	// Neither was given, and neither can be taken away.
 	Owner bool `json:"owner,omitempty"`
@@ -91,13 +101,30 @@ func (s *Server) accessLines(who access.Person, p index.Place, path []index.Item
 		depth[id] = i + 1
 	}
 	slices.SortStableFunc(grants, func(a, b index.Grant) int { return depth[a.Item] - depth[b.Item] })
+	grants = s.drive.WithUses(grants)
+	mayShare := len(ids) > 0 && access.Decide(who, access.Share, where)
 	for _, g := range grants {
 		at, onPath := depth[g.Item]
-		if !onPath || !access.Counts(where.Kind, accessGrant(g)) {
+		if !onPath || !access.Counts(where.Kind, accessGrant(g, list)) {
 			continue
 		}
 		e := accessJSON{Everyone: g.Everyone, Role: access.Role(g.Role), Given: at == len(ids)}
-		if !g.Everyone {
+		if !g.Ends.IsZero() {
+			ends := g.Ends
+			e.Until = &ends
+		}
+		switch {
+		case g.Guest != 0:
+			e.Guest = &guestJSON{ID: g.Guest, Address: g.GuestAddress}
+			if mayShare {
+				works, uses := invitationWorks(where, accessGrant(g, list)), g.Uses
+				e.Works, e.Uses = &works, &uses
+				if !g.Used.IsZero() {
+					used := g.Used
+					e.Used = &used
+				}
+			}
+		case !g.Everyone:
 			e.UserID = g.Member
 			if m, ok := list.Lookup(g.Member); ok {
 				e.Email, e.DisplayName = m.Email, m.DisplayName

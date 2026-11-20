@@ -14,9 +14,12 @@ auth.example.localhost {
 
 # The Drive.
 drive.example.localhost {
-	# The public prefix: public links (and, later, guests' pages). No sign-in here, and nothing a browser sends about who
-	# it is reaches the Drive: the secret and the identity headers are removed (the Drive treats every request under /s/
-	# as a visitor's anyway, whatever it carries), and so is the sign-in cookie, which the Drive never needs here.
+	# The public prefix: public links, and guests (under /s/guest). No sign-in here, and nothing a browser sends about
+	# who it is reaches the Drive: the secret and the identity headers are removed (the Drive treats every request under
+	# /s/ as a visitor's or a guest's anyway, whatever it carries), and so is Authelia's sign-in cookie, which the Drive
+	# never needs here. Every method passes (guests upload, rename, move and delete), and so does every other cookie: the
+	# guests' session cookie, which the Drive itself sets for /s/guest. Each match takes the separator in front of the
+	# cookie; the second rule drops one left at the start.
 	handle /s/* {
 		reverse_proxy drive:8080 {
 			header_up -Drive-Secret
@@ -26,7 +29,8 @@ drive.example.localhost {
 			header_up -Remote-Name
 			header_up -Remote-Groups
 			header_up -Remote-Role
-			header_up -Cookie
+			header_up Cookie "(?i)(?:^|;\s*)authelia_session=[^;]*" ""
+			header_up Cookie "^;\s*" ""
 		}
 	}
 

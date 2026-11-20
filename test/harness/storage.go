@@ -115,7 +115,7 @@ func (s *Storage) do(t *testing.T, method, address string, body io.Reader, heade
 		req.Header[k] = v
 	}
 	req.SetBasicAuth(s.user, s.password)
-	res, err := http.DefaultClient.Do(req)
+	res, err := direct.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,6 +123,11 @@ func (s *Storage) do(t *testing.T, method, address string, body io.Reader, heade
 	data, _ := io.ReadAll(res.Body)
 	return res.StatusCode, data
 }
+
+// direct is the client for the stand-in storage: a new connection for every request. Apache closes a connection kept
+// open between requests after a few seconds, and can do so just as a request is sent on it; Go sends a GET again then,
+// but not a MKCOL or a PUT, which would fail a test with EOF.
+var direct = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 
 // MakeFolder makes the folder at p and every folder above it, up to and including the Drive's folder.
 func (s *Storage) MakeFolder(t *testing.T, p string) {

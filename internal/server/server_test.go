@@ -40,12 +40,17 @@ func bareServer(t *testing.T) *Server {
 func examplePath(pattern string) string {
 	_, p, _ := strings.Cut(pattern, " ")
 	return strings.NewReplacer("{$}", "", "{place}", "1", "{item}", "1", "{member}", "u-reka", "{file...}", "x.js",
-		"{upload}", "0123456789abcdef0123456789abcdef", "{token}", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").Replace(p)
+		"{upload}", "0123456789abcdef0123456789abcdef", "{token}", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "{guest}", "1").Replace(p)
 }
 
 // memberRoutes are the routes outside the public prefix: every one of them needs a member signed in.
 func memberRoutes(s *Server) []route {
-	return slices.DeleteFunc(s.routes(), func(rt route) bool { return rt.link != "" })
+	return slices.DeleteFunc(s.routes(), func(rt route) bool { return rt.link != "" || rt.guest })
+}
+
+// guestRoutes are the routes under the guests' prefix.
+func guestRoutes(s *Server) []route {
+	return slices.DeleteFunc(s.routes(), func(rt route) bool { return !rt.guest })
 }
 
 // Every route that takes a place is tried as an outsider in test/shared_folders_test.go
@@ -65,6 +70,9 @@ var placeRoutesTriedByAnOutsider = []string{
 	"DELETE /api/places/{place}/items/{item}/access/members/{member}",
 	"PUT /api/places/{place}/items/{item}/access/everyone",
 	"DELETE /api/places/{place}/items/{item}/access/everyone",
+	"POST /api/places/{place}/items/{item}/access/guests",
+	"PUT /api/places/{place}/items/{item}/access/guests/{guest}",
+	"DELETE /api/places/{place}/items/{item}/access/guests/{guest}",
 	"GET /api/places/{place}/items/{item}/link",
 	"POST /api/places/{place}/items/{item}/link",
 	"DELETE /api/places/{place}/items/{item}/link",
@@ -94,7 +102,7 @@ var placeRoutesTriedByAnOutsider = []string{
 
 func TestEveryRouteWithAPlaceIsTriedByAnOutsider(t *testing.T) {
 	var got []string
-	for _, rt := range bareServer(t).routes() {
+	for _, rt := range memberRoutes(bareServer(t)) {
 		if rt.place != "" {
 			got = append(got, rt.pattern)
 		}
@@ -119,6 +127,9 @@ var itemRoutesTriedWithPartOfAPlace = []string{
 	"DELETE /api/places/{place}/items/{item}/access/members/{member}",
 	"PUT /api/places/{place}/items/{item}/access/everyone",
 	"DELETE /api/places/{place}/items/{item}/access/everyone",
+	"POST /api/places/{place}/items/{item}/access/guests",
+	"PUT /api/places/{place}/items/{item}/access/guests/{guest}",
+	"DELETE /api/places/{place}/items/{item}/access/guests/{guest}",
 	"GET /api/places/{place}/items/{item}/link",
 	"POST /api/places/{place}/items/{item}/link",
 	"DELETE /api/places/{place}/items/{item}/link",
@@ -324,28 +335,39 @@ func TestEveryRouteWithALinkIsTriedByAVisitor(t *testing.T) {
 	}
 }
 
-// The tripwire between members and visitors. A route under the public prefix is a visitor's, and decided only as one,
-// through its link, with an action only a visitor may do; every other route is a member's, decided only for a member,
-// with an action no visitor may do. So even a guard handing a visitor to a member's route, or a member to a visitor's,
-// would be refused by the access package: this tries every route's action with every kind of visitor and of member, in
-// every kind of place.
-func TestNoRouteOutsideThePublicPrefixCanBeDecidedForAVisitor(t *testing.T) {
+// The tripwire between members, visitors and guests. A route under the public prefix is a visitor's, and decided only
+// as one, through its link, with an action only a visitor may do; or, under the guests' prefix, a guest's, with an action
+// only a guest may do; every other route is a member's, decided only for a member, with an action no visitor or guest may
+// do. So even a guard handing a visitor or a guest to a member's route, or a member to theirs, would be refused by the
+// access package: this tries every route's action with every kind of visitor, guest and member, in every kind of place.
+func TestNoRouteIsDecidedForAnotherKindOfPerson(t *testing.T) {
 	member := access.Person{UserID: "u-reka", Role: members.RoleAdmin}
 	visitors := []access.Person{
 		{Link: &access.Link{Item: 10, Kind: access.ViewLink, By: member}},
 		// A signed-in member who came with a link, as a request under the prefix with forged headers would be.
 		{UserID: "u-reka", Role: members.RoleAdmin, Link: &access.Link{Item: 10, Kind: access.ViewLink, By: member}},
 	}
+	guests := []access.Person{
+		{Guest: &access.Guest{ID: 7}},
+		// A guest whose request also carried a member's identity.
+		{UserID: "u-reka", Role: members.RoleAdmin, Guest: &access.Guest{ID: 7}},
+	}
+	invited := []access.Grant{{On: 10, Guest: 7, Role: access.Editor, By: member}, {On: 0, Guest: 7, Role: access.Editor, By: member}}
 	places := []*access.Place{nil,
 		{Kind: access.MyFiles, Owner: "u-reka"},
 		{Kind: access.MyFiles, Owner: "u-reka", Path: []int64{10}},
-		{Kind: access.MyFiles, Owner: "u-reka", Path: []int64{10, 11}},
-		{Kind: access.SharedFolder},
-		{Kind: access.SharedFolder, Path: []int64{10, 11}},
+		{Kind: access.MyFiles, Owner: "u-reka", Path: []int64{10, 11}, Grants: invited},
+		{Kind: access.SharedFolder, Grants: invited},
+		{Kind: access.SharedFolder, Path: []int64{10, 11}, Grants: invited},
 		{Kind: access.SharedFolder, Deleted: true},
 	}
 	for _, rt := range bareServer(t).routes() {
-		visitors_ := patternUnderPublicPrefix(rt.pattern)
+		public, forGuests := patternUnderPublicPrefix(rt.pattern), patternUnderGuestPrefix(rt.pattern)
+		if forGuests != rt.guest || forGuests != slices.Contains(access.AsAGuest, rt.action) {
+			t.Errorf("%s: under the guests' prefix %v, a guest's %v, a guest's action %v: want all or none",
+				rt.pattern, forGuests, rt.guest, slices.Contains(access.AsAGuest, rt.action))
+		}
+		visitors_ := public && !forGuests
 		if visitors_ != (rt.link != "") || visitors_ != slices.Contains(access.ThroughALink, rt.action) {
 			t.Errorf("%s: under the public prefix %v, with a link %v, a visitor's action %v: want all or none",
 				rt.pattern, visitors_, rt.link != "", slices.Contains(access.ThroughALink, rt.action))
@@ -353,16 +375,101 @@ func TestNoRouteOutsideThePublicPrefixCanBeDecidedForAVisitor(t *testing.T) {
 		if visitors_ && (!strings.HasPrefix(rt.pattern, "GET ") || rt.place != "" || rt.trashed != "" || rt.upload != "") {
 			t.Errorf("%s is a visitor's: it must only read, and find its place through its link", rt.pattern)
 		}
+		if forGuests && (rt.trashed != "" || rt.inTrash || (rt.place != "" && rt.item == "" && rt.upload == "")) {
+			t.Errorf("%s is a guest's: in a place it names an item or an upload, never a place as a whole or the trash", rt.pattern)
+		}
 		for _, place := range places {
 			if !visitors_ {
 				for _, v := range visitors {
 					if access.Decide(v, rt.action, place) {
-						t.Errorf("%s, a member's route, was allowed for a visitor in %+v", rt.pattern, place)
+						t.Errorf("%s, not a visitor's route, was allowed for a visitor in %+v", rt.pattern, place)
 					}
 				}
-			} else if access.Decide(member, rt.action, place) {
-				t.Errorf("%s, a visitor's route, was allowed for a member in %+v", rt.pattern, place)
 			}
+			if !forGuests {
+				for _, g := range guests {
+					if access.Decide(g, rt.action, place) {
+						t.Errorf("%s, not a guest's route, was allowed for a guest in %+v", rt.pattern, place)
+					}
+				}
+			}
+			if public && access.Decide(member, rt.action, place) {
+				t.Errorf("%s, a route under the public prefix, was allowed for a member in %+v", rt.pattern, place)
+			}
+		}
+	}
+}
+
+// Under the guests' prefix nobody is a member, whatever headers they send: without a guest's session, every route but
+// signing in answers 401, before anything else is looked at (the bare server would panic otherwise), and with a
+// member's headers and the secret too.
+func TestAMemberIsNobodyUnderTheGuestsPrefix(t *testing.T) {
+	s := bareServer(t)
+	h := s.Handler()
+	for _, rt := range guestRoutes(s) {
+		if rt.action == access.SignInAsGuest {
+			continue
+		}
+		method, _, _ := strings.Cut(rt.pattern, " ")
+		for name, headers := range map[string]http.Header{
+			"nothing":           {"Origin": {"https://files.example.com"}},
+			"a member's":        {SecretHeader: {secret}, UserIDHeader: {"u-reka"}, "Origin": {"https://files.example.com"}},
+			"a wrong cookie":    {"Cookie": {"drive-guest-x=1; __Secure-drive-guest=1"}, "Origin": {"https://files.example.com"}},
+			"a member's cookie": {SecretHeader: {secret}, UserIDHeader: {"u-reka"}, "Cookie": {"authelia_session=abc"}, "Origin": {"https://files.example.com"}},
+		} {
+			req := httptest.NewRequest(method, examplePath(rt.pattern), strings.NewReader("{}"))
+			req.Header = headers.Clone()
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), `"signIn":true`) {
+				t.Errorf("%s with %s headers: got %d %s, want 401", rt.pattern, name, rec.Code, rec.Body)
+			}
+			checkGuestHeaders(t, rt.pattern, rec.Header())
+		}
+	}
+}
+
+// A guest's change, like a member's, comes only from the Drive's own pages: refused with 403 before anything else, on
+// every route under the guests' prefix that changes something, signing in included.
+func TestAGuestsChangesMustComeFromTheDrivesOwnPages(t *testing.T) {
+	s := bareServer(t)
+	h := s.Handler()
+	paths := []string{GuestPrefix + "/api/nothing", GuestPrefix + "/x"}
+	for _, rt := range guestRoutes(s) {
+		paths = append(paths, examplePath(rt.pattern))
+	}
+	for _, path := range paths {
+		for name, origin := range map[string][]string{"no Origin": nil, "Origin null": {"null"}, "another site": {"https://evil.example"},
+			"the Drive over http": {"http://files.example.com"}} {
+			for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+				req := httptest.NewRequest(method, path, strings.NewReader(`{"address":"anna@client.example"}`))
+				if origin != nil {
+					req.Header["Origin"] = origin
+				}
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "did not come from the Drive's own page") {
+					t.Errorf("%s %s with %s: got %d %s, want 403", method, path, name, rec.Code, rec.Body)
+				}
+			}
+		}
+	}
+}
+
+// checkGuestHeaders checks the headers every answer under the guests' prefix carries: not listed by search engines,
+// never kept, and the members' policy for the interface's own script.
+func checkGuestHeaders(t *testing.T, what string, h http.Header) {
+	t.Helper()
+	for name, want := range map[string]string{
+		"X-Robots-Tag":                 "noindex, nofollow",
+		"Referrer-Policy":              "same-origin",
+		"Cache-Control":                "no-store",
+		"X-Content-Type-Options":       "nosniff",
+		"Cross-Origin-Resource-Policy": "same-origin",
+		"Content-Security-Policy":      memberPolicy,
+	} {
+		if got := h.Values(name); len(got) != 1 || got[0] != want {
+			t.Errorf("%s: %s is %q, want %q", what, name, got, want)
 		}
 	}
 }
@@ -473,5 +580,69 @@ func TestAdmission(t *testing.T) {
 	l3()
 	if _, ok := a.enter(context.Background()); !ok {
 		t.Fatal("not let in with turns free")
+	}
+}
+
+// Every route under the guests' prefix that takes an item or an upload in progress is tried in test/guests_test.go
+// (TestAGuestCannotGetOutOfWhatWasGivenToThem) by a guest given one folder deep inside someone's place: for every item
+// they were not given and every upload that is not theirs, they must get the same answer as for one that does not
+// exist. This list is that test's; a new guest's route fails here until it is added there, and here.
+var guestRoutesTriedByAGuest = []string{
+	"GET /s/guest/api/places/{place}/items/{item}",
+	"GET /s/guest/api/places/{place}/items/{item}/items",
+	"GET /s/guest/api/places/{place}/items/{item}/download",
+	"GET /s/guest/api/places/{place}/items/{item}/open",
+	"GET /s/guest/api/places/{place}/items/{item}/zip",
+	"POST /s/guest/api/places/{place}/items/{item}/files",
+	"POST /s/guest/api/places/{place}/items/{item}/uploads",
+	"GET /s/guest/api/places/{place}/uploads/{upload}",
+	"PUT /s/guest/api/places/{place}/uploads/{upload}",
+	"POST /s/guest/api/places/{place}/uploads/{upload}/finish",
+	"DELETE /s/guest/api/places/{place}/uploads/{upload}",
+	"POST /s/guest/api/places/{place}/items/{item}/folders",
+	"POST /s/guest/api/places/{place}/items/{item}/rename",
+	"POST /s/guest/api/places/{place}/items/{item}/move",
+	"DELETE /s/guest/api/places/{place}/items/{item}",
+}
+
+func TestEveryGuestsRouteIsTriedByAGuest(t *testing.T) {
+	var got []string
+	for _, rt := range guestRoutes(bareServer(t)) {
+		if rt.place != "" {
+			got = append(got, rt.pattern)
+		}
+	}
+	want := slices.Clone(guestRoutesTriedByAGuest)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("the guests' routes that take an item or an upload are\n%q\nbut the guest test tries\n%q", got, want)
+	}
+}
+
+// What a guest types as their address is kept as members.Address writes it, and only when mail can be sent to it: one
+// plain address in ASCII, nothing that could add a header or a recipient.
+func TestAGuestsAddress(t *testing.T) {
+	for typed, want := range map[string]string{
+		"anna@client.example":                             "anna@client.example",
+		" Anna.Kiss+drive@Client.EXAMPLE ":                "anna.kiss+drive@client.example",
+		"a.n.n.a@client.example":                          "a.n.n.a@client.example",
+		"anna":                                            "",
+		"anna@client":                                     "",
+		"anna@.example":                                   "",
+		"Anna <anna@client.example>":                      "",
+		"anna@client.example, b@c.de":                     "",
+		"anna@client.example\r\nBcc: evil@example.com":    "",
+		"anna@client.example\nRCPT TO:<evil@example.com>": "",
+		"anna @client.example":                            "",
+		"ánna@client.example":                             "",
+		"anna@client.example.":                            "",
+		"\"anna\"@client.example":                         "",
+		strings.Repeat("a", 250) + "@b.cd":                "",
+	} {
+		got, ok := guestAddress(typed)
+		if ok != (want != "") || got != want {
+			t.Errorf("%q: got %q %v, want %q", typed, got, ok, want)
+		}
 	}
 }

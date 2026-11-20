@@ -14,8 +14,10 @@ type Upload struct {
 	PlaceID int64
 	// FolderID is the folder it goes into, or 0 for the place's top folder.
 	FolderID int64
-	// Member is the user id of the member uploading. Nobody else may continue, finish or cancel it.
+	// Member is the user id of the member uploading, or Guest the id of the guest (Member is then ""). Nobody else may
+	// continue, finish or cancel it.
 	Member string
+	Guest  int64
 	// Name is the name it was started under; Size the length of the whole file, in bytes.
 	Name string
 	Size int64
@@ -26,12 +28,12 @@ type Upload struct {
 // ErrNoUpload is returned when an upload in progress does not exist where it was looked for.
 var ErrNoUpload = errors.New("no such upload")
 
-const uploadColumns = "id, place_id, IFNULL(folder_id, 0), member, name, size, started_at, touched_at"
+const uploadColumns = "id, place_id, IFNULL(folder_id, 0), member, IFNULL(guest_id, 0), name, size, started_at, touched_at"
 
 func scanUpload(row interface{ Scan(...any) error }) (Upload, error) {
 	var u Upload
 	var started, touched int64
-	err := row.Scan(&u.ID, &u.PlaceID, &u.FolderID, &u.Member, &u.Name, &u.Size, &started, &touched)
+	err := row.Scan(&u.ID, &u.PlaceID, &u.FolderID, &u.Member, &u.Guest, &u.Name, &u.Size, &started, &touched)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Upload{}, ErrNoUpload
 	}
@@ -42,17 +44,20 @@ func scanUpload(row interface{ Scan(...any) error }) (Upload, error) {
 // AddUpload records an upload that has just started.
 func (x *Index) AddUpload(ctx context.Context, u Upload) error {
 	_, err := x.db.ExecContext(ctx, `
-		INSERT INTO uploads (id, place_id, folder_id, member, name, size, started_at, touched_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		u.ID, u.PlaceID, parent(u.FolderID), u.Member, u.Name, u.Size, u.Started.UnixMilli(), u.Touched.UnixMilli())
+		INSERT INTO uploads (id, place_id, folder_id, member, guest_id, name, size, started_at, touched_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		u.ID, u.PlaceID, parent(u.FolderID), u.Member, parent(u.Guest), u.Name, u.Size, u.Started.UnixMilli(), u.Touched.UnixMilli())
 	return err
 }
 
-// UploadOf finds the upload with id in the place, if member started it. Another member's upload, or one of another
-// place, is not found.
-func (x *Index) UploadOf(ctx context.Context, placeID int64, id, member string) (Upload, error) {
-	return scanUpload(x.db.QueryRowContext(ctx, "SELECT "+uploadColumns+" FROM uploads WHERE id = ? AND place_id = ? AND member = ?",
-		id, placeID, member))
+// UploadOf finds the upload with id in the place, if member (a member's user id) or guest (a guest's id, with member
+// "") started it. Another person's upload, or one of another place, is not found.
+func (x *Index) UploadOf(ctx context.Context, placeID int64, id, member string, guest int64) (Upload, error) {
+	if (member == "") == (guest == 0) {
+		return Upload{}, ErrNoUpload // nobody, or two people at once
+	}
+	return scanUpload(x.db.QueryRowContext(ctx, `SELECT `+uploadColumns+` FROM uploads
+		WHERE id = ? AND place_id = ? AND member = ? AND IFNULL(guest_id, 0) = ?`, id, placeID, member, guest))
 }
 
 // TouchUpload records that a part of the upload arrived at the time given.

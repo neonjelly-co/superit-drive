@@ -18,8 +18,9 @@ var (
 	ErrTooDeep = errors.New("too many folders deep")
 )
 
-// NewFolder makes an empty folder called name in a folder of the place (nil: its top folder).
-func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, name string) (index.Item, error) {
+// NewFolder makes an empty folder called name in a folder of the place (nil: its top folder), by by: one a guest makes
+// is labelled with their address.
+func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, name string, by By) (index.Item, error) {
 	if err := CheckName(name); err != nil {
 		return index.Item{}, err
 	}
@@ -65,7 +66,7 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 		return index.Item{}, storageError(err)
 	}
 	d.changed(folderKey{p.ID, folderID(in)})
-	it, err := d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()}, d.now())
+	it, err := d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()}, d.now(), by.Guest.Address)
 	if errors.Is(err, index.ErrNoFolder) {
 		return index.Item{}, ErrGone // its folder moved away, or went, meanwhile; a listing finds the new one there
 	}

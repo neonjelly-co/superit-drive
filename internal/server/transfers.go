@@ -41,14 +41,19 @@ const (
 	restartMessage = "The Drive storage cannot continue an upload where it stopped, so this upload starts again from the beginning."
 )
 
-// waitTurn waits in line for a transfer slot: a visitor in the visitors' own line, for one of the few slots they may
-// hold. ok is false when the person was answered, or has left.
-func (s *Server) waitTurn(w http.ResponseWriter, r *http.Request, c call) (release func(), ok bool) {
-	class := transfers.Members
-	if c.link != nil {
-		class = transfers.Outsiders
+// classOf is whose line a transfer waits in: an outsider's (a visitor's or a guest's), for one of the few slots they
+// may hold together, or a member's.
+func classOf(c call) transfers.Class {
+	if c.link != nil || c.guest != nil {
+		return transfers.Outsiders
 	}
-	release, err := s.slots.Wait(r.Context(), class, turnWait)
+	return transfers.Members
+}
+
+// waitTurn waits in line for a transfer slot: a visitor or a guest in the outsiders' own line, for one of the few slots
+// they may hold. ok is false when the person was answered, or has left.
+func (s *Server) waitTurn(w http.ResponseWriter, r *http.Request, c call) (release func(), ok bool) {
+	release, err := s.slots.Wait(r.Context(), classOf(c), turnWait)
 	if err == nil {
 		return release, true
 	}
@@ -59,9 +64,10 @@ func (s *Server) waitTurn(w http.ResponseWriter, r *http.Request, c call) (relea
 	return nil, false
 }
 
-// tryTurn takes a transfer slot if it is the upload's turn (key keeps its place in line), or answers 503.
-func (s *Server) tryTurn(w http.ResponseWriter, key string) (release func(), ok bool) {
-	release, ok = s.slots.Try(transfers.Members, key)
+// tryTurn takes a transfer slot if it is the upload's turn (key keeps its place in line), or answers 503. A guest's
+// upload is in the outsiders' line.
+func (s *Server) tryTurn(w http.ResponseWriter, c call, key string) (release func(), ok bool) {
+	release, ok = s.slots.Try(classOf(c), key)
 	if !ok {
 		w.Header().Set("Retry-After", busyRetry)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": busyMessage, "busy": true})
@@ -77,7 +83,10 @@ func turnKey(r *http.Request, c call) string {
 		return "upload:" + c.upload.ID
 	}
 	if t := r.URL.Query().Get("turn"); turnName.MatchString(t) {
-		return "files:" + c.member.UserID + ":" + t
+		if c.guest != nil {
+			return "files:guest:" + strconv.FormatInt(c.guest.ID, 10) + ":" + t
+		}
+		return "files:member:" + c.member.UserID + ":" + t
 	}
 	return ""
 }
@@ -207,7 +216,7 @@ func (s *Server) sendFile(w http.ResponseWriter, r *http.Request, c call, inline
 		return
 	}
 	if !f.Partial || f.First == 0 {
-		s.usedLink(r, c) // not a part after its start: a video seeking, a download resuming
+		s.used(r, c) // not a part after its start: a video seeking, a download resuming
 	}
 	out, done := sending(w)
 	defer done()
@@ -325,7 +334,7 @@ func (s *Server) zip(w http.ResponseWriter, r *http.Request, c call) {
 		headers()
 		w.WriteHeader(http.StatusOK)
 		started = true
-		s.usedLink(r, c)
+		s.used(r, c)
 		return out
 	})
 	switch {
@@ -386,16 +395,17 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, c call) {
 	if !ok {
 		return
 	}
-	release, ok := s.tryTurn(w, turnKey(r, c))
+	release, ok := s.tryTurn(w, c, turnKey(r, c))
 	if !ok {
 		return
 	}
 	defer release()
 	body, done := receiving(w, r)
 	defer done()
-	up, err := s.drive.Upload(r.Context(), *c.place, folder, name, body, r.ContentLength, existing, c.member.UserID)
+	up, err := s.drive.Upload(r.Context(), *c.place, folder, name, body, r.ContentLength, existing, c.by())
 	switch {
 	case err == nil:
+		s.used(r, c)
 		writeJSON(w, http.StatusCreated, uploadJSON{itemJSON: itemOf(up.Item), Replaced: up.Replaced != nil})
 	case errors.Is(err, drive.ErrCutOff) || r.Context().Err() != nil:
 		// The person's connection ended (or they cancelled); nothing was stored. Not the Drive's failure.
@@ -491,7 +501,7 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, c call) {
 	if !ok {
 		return
 	}
-	u, err := s.drive.StartUpload(r.Context(), *c.place, folder, name, size, existing, c.member.UserID)
+	u, err := s.drive.StartUpload(r.Context(), *c.place, folder, name, size, existing, c.by())
 	if err != nil {
 		s.uploadFailed(w, r, err, name, existing)
 		return
@@ -547,7 +557,7 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, c call) {
 		s.refuse(w, r, http.StatusBadRequest, "The Drive could not read this request.")
 		return
 	}
-	release, ok := s.tryTurn(w, turnKey(r, c))
+	release, ok := s.tryTurn(w, c, turnKey(r, c))
 	if !ok {
 		return
 	}
@@ -587,10 +597,11 @@ func (s *Server) finishUpload(w http.ResponseWriter, r *http.Request, c call) {
 	if !ok {
 		return
 	}
-	up, err := s.drive.FinishUpload(r.Context(), *c.place, c.item, *c.upload, existing, c.member.UserID)
+	up, err := s.drive.FinishUpload(r.Context(), *c.place, c.item, *c.upload, existing, c.by())
 	var incomplete *drive.Incomplete
 	switch {
 	case err == nil:
+		s.used(r, c)
 		writeJSON(w, http.StatusCreated, uploadJSON{itemJSON: itemOf(up.Item), Replaced: up.Replaced != nil})
 	case errors.As(err, &incomplete):
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "Not all of the file has arrived yet.", "offset": incomplete.Offset})

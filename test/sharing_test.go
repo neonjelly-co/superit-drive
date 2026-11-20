@@ -221,7 +221,7 @@ func TestAnEditorWorksInsideWhatTheyWereGivenAndSharesItFurther(t *testing.T) {
 	if l.Role != "editor" || !slices.Contains(l.Can, "upload") || !slices.Contains(l.Can, "make-folder") || slices.Contains(l.Can, "see-trash") {
 		t.Fatalf("Dóra's Clients: role %q, can %q", l.Role, l.Can)
 	}
-	if got := named(t, l.Items, "Price list.pdf").Can; !slices.Equal(got, []string{"list", "download", "upload", "make-folder", "rename", "move", "delete", "see-access", "share", "make-link", "manage-link"}) {
+	if got := named(t, l.Items, "Price list.pdf").Can; !slices.Equal(got, []string{"list", "download", "upload", "make-folder", "rename", "move", "delete", "see-access", "share", "make-link", "manage-link", "invite-guest"}) {
 		t.Fatalf("what Dóra may do with Price list.pdf: %q", got)
 	}
 	uploadedInto(t, o, x.place, x.bakery.ID, "Invoice.pdf", []byte("from Dóra"))
@@ -703,21 +703,25 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 				at("/api/places/%d/items/%d/access/members/%s", x.place, item, url.PathEscape(reka.UserID)), ""},
 			"PUT /api/places/{place}/items/{item}/access/everyone":    {"PUT", at("/api/places/%d/items/%d/access/everyone", x.place, item), `{"role":"viewer"}`},
 			"DELETE /api/places/{place}/items/{item}/access/everyone": {"DELETE", at("/api/places/%d/items/%d/access/everyone", x.place, item), ""},
-			"GET /api/places/{place}/items/{item}/link":               {"GET", linkPath(x.place, item), ""},
-			"POST /api/places/{place}/items/{item}/link":              {"POST", linkPath(x.place, item), `{"replace":true}`},
-			"DELETE /api/places/{place}/items/{item}/link":            {"DELETE", linkPath(x.place, item), ""},
-			"GET /api/places/{place}/items/{item}/items":              {"GET", listPath(x.place, item), ""},
-			"POST /api/places/{place}/items/{item}/files":             {"POST", at("/api/places/%d/items/%d/files?name=Planted.txt&existing=replace", x.place, item), "x"},
-			"POST /api/places/{place}/items/{item}/folders":           {"POST", at("/api/places/%d/items/%d/folders", x.place, item), `{"name":"Planted"}`},
-			"GET /api/places/{place}/items/{item}/download":           {"GET", downloadPath(x.place, item), ""},
-			"GET /api/places/{place}/items/{item}/open":               {"GET", openPath(x.place, item), ""},
-			"POST /api/places/{place}/items/{item}/rename":            {"POST", at("/api/places/%d/items/%d/rename", x.place, item), `{"name":"Renamed"}`},
-			"POST /api/places/{place}/items/{item}/move":              {"POST", at("/api/places/%d/items/%d/move", x.place, item), fmt.Sprintf(`{"to":%d}`, x.bakery.ID)},
-			"GET /api/places/{place}/items/{item}/move":               {"GET", at("/api/places/%d/items/%d/move?to=%d", x.place, item, x.bakery.ID), ""},
-			"DELETE /api/places/{place}/items/{item}":                 {"DELETE", at("/api/places/%d/items/%d", x.place, item), ""},
-			"POST /api/places/{place}/trash/{item}/restore":           {"POST", at("/api/places/%d/trash/%d/restore", x.place, item), ""},
-			"GET /api/places/{place}/items/{item}/zip":                {"GET", zipPath(x.place, item), ""},
-			"POST /api/places/{place}/items/{item}/uploads":           {"POST", uploadsPath(x.place, item) + "?name=Planted.txt&size=1&existing=replace", ""},
+			"POST /api/places/{place}/items/{item}/access/guests": {"POST", invitePath(x.place, item),
+				`{"address":"anna@client.example","role":"viewer"}`},
+			"PUT /api/places/{place}/items/{item}/access/guests/{guest}":    {"PUT", invitationPath(x.place, item, 1), `{"role":"editor"}`},
+			"DELETE /api/places/{place}/items/{item}/access/guests/{guest}": {"DELETE", invitationPath(x.place, item, 1), ""},
+			"GET /api/places/{place}/items/{item}/link":                     {"GET", linkPath(x.place, item), ""},
+			"POST /api/places/{place}/items/{item}/link":                    {"POST", linkPath(x.place, item), `{"replace":true}`},
+			"DELETE /api/places/{place}/items/{item}/link":                  {"DELETE", linkPath(x.place, item), ""},
+			"GET /api/places/{place}/items/{item}/items":                    {"GET", listPath(x.place, item), ""},
+			"POST /api/places/{place}/items/{item}/files":                   {"POST", at("/api/places/%d/items/%d/files?name=Planted.txt&existing=replace", x.place, item), "x"},
+			"POST /api/places/{place}/items/{item}/folders":                 {"POST", at("/api/places/%d/items/%d/folders", x.place, item), `{"name":"Planted"}`},
+			"GET /api/places/{place}/items/{item}/download":                 {"GET", downloadPath(x.place, item), ""},
+			"GET /api/places/{place}/items/{item}/open":                     {"GET", openPath(x.place, item), ""},
+			"POST /api/places/{place}/items/{item}/rename":                  {"POST", at("/api/places/%d/items/%d/rename", x.place, item), `{"name":"Renamed"}`},
+			"POST /api/places/{place}/items/{item}/move":                    {"POST", at("/api/places/%d/items/%d/move", x.place, item), fmt.Sprintf(`{"to":%d}`, x.bakery.ID)},
+			"GET /api/places/{place}/items/{item}/move":                     {"GET", at("/api/places/%d/items/%d/move?to=%d", x.place, item, x.bakery.ID), ""},
+			"DELETE /api/places/{place}/items/{item}":                       {"DELETE", at("/api/places/%d/items/%d", x.place, item), ""},
+			"POST /api/places/{place}/trash/{item}/restore":                 {"POST", at("/api/places/%d/trash/%d/restore", x.place, item), ""},
+			"GET /api/places/{place}/items/{item}/zip":                      {"GET", zipPath(x.place, item), ""},
+			"POST /api/places/{place}/items/{item}/uploads":                 {"POST", uploadsPath(x.place, item) + "?name=Planted.txt&size=1&existing=replace", ""},
 		}
 	}
 	uploadTries := func(id string) map[string]try {
@@ -735,8 +739,8 @@ func TestSomeoneGivenPartOfAPlaceCannotTellWhatTheyWereNotGivenFromNothing(t *te
 		}
 		return c.Do(t, t2.method, t2.path, body)
 	}
-	if n := len(tries(0)) + len(uploadTries("")); n != 24 {
-		t.Fatalf("the test tries %d routes that take an item or an upload; internal/server/server_test.go lists 24", n)
+	if n := len(tries(0)) + len(uploadTries("")); n != 27 {
+		t.Fatalf("the test tries %d routes that take an item or an upload; internal/server/server_test.go lists 27", n)
 	}
 	none := tries(nowhere)
 	notGiven := map[string]int64{

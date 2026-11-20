@@ -167,11 +167,11 @@ func (d *Drive) tryResume(ctx context.Context) (why string, err error) {
 }
 
 // StartUpload starts a resumable upload of a file called name, size bytes long, into a folder of the place (nil: its
-// top folder), by the member by, and returns it. Nothing is put into the folder until it is finished.
+// top folder), by by (a member or a guest), and returns it. Nothing is put into the folder until it is finished.
 //
 // The name is looked at now, so that a person is asked "replace or keep both" before the file travels: when it is
 // taken and existing does not say what to do, it is a *Taken error. It is looked at again when the upload is finished.
-func (d *Drive) StartUpload(ctx context.Context, p index.Place, folder *index.Item, name string, size int64, existing Existing, by string) (index.Upload, error) {
+func (d *Drive) StartUpload(ctx context.Context, p index.Place, folder *index.Item, name string, size int64, existing Existing, by By) (index.Upload, error) {
 	if err := CheckName(name); err != nil {
 		return index.Upload{}, err
 	}
@@ -197,8 +197,8 @@ func (d *Drive) StartUpload(ctx context.Context, p index.Place, folder *index.It
 		return index.Upload{}, err
 	}
 	now := d.now()
-	u := index.Upload{ID: newUploadID(), PlaceID: p.ID, FolderID: folderID(folder), Member: by, Name: name, Size: size,
-		Started: now, Touched: now}
+	u := index.Upload{ID: newUploadID(), PlaceID: p.ID, FolderID: folderID(folder), Member: by.Member, Guest: by.Guest.ID,
+		Name: name, Size: size, Started: now, Touched: now}
 	if resumable {
 		// An empty file to write the parts into, each from where it ends. (A part written into a file that is there
 		// keeps what arrived when it is cut off; a new file cut off is not kept.)
@@ -239,12 +239,13 @@ func (d *Drive) askFirst(ctx context.Context, file, name string, existing Existi
 	return &Taken{Name: name, Folder: there.Folder}
 }
 
-// UploadOf finds the upload in progress with id in the place, if the member started it: ErrNoUpload otherwise.
-func (d *Drive) UploadOf(ctx context.Context, p index.Place, id, member string) (index.Upload, error) {
+// UploadOf finds the upload in progress with id in the place, if by (a member or a guest) started it: ErrNoUpload
+// otherwise.
+func (d *Drive) UploadOf(ctx context.Context, p index.Place, id string, by By) (index.Upload, error) {
 	if !uploadID.MatchString(id) {
 		return index.Upload{}, index.ErrNoUpload
 	}
-	return d.index.UploadOf(ctx, p.ID, id, member)
+	return d.index.UploadOf(ctx, p.ID, id, by.Member, by.Guest.ID)
 }
 
 // UploadOffset is how much of the upload has arrived: the length of its file on the storage. Where the storage cannot
@@ -369,11 +370,11 @@ func (d *Drive) WritePart(ctx context.Context, u index.Upload, offset int64, bod
 	return end, nil
 }
 
-// FinishUpload moves a whole upload into its folder (nil: the place's top folder) under its name, as an upload by the
-// member by, and forgets it. When the name is taken, existing says what to do, as for any upload (a *Taken error when
+// FinishUpload moves a whole upload into its folder (nil: the place's top folder) under its name, as an upload by by,
+// and forgets it. When the name is taken, existing says what to do, as for any upload (a *Taken error when
 // it does not say); the upload stays, to be finished again. Before the whole file has arrived it is an *Incomplete
 // error.
-func (d *Drive) FinishUpload(ctx context.Context, p index.Place, folder *index.Item, u index.Upload, existing Existing, by string) (Upload, error) {
+func (d *Drive) FinishUpload(ctx context.Context, p index.Place, folder *index.Item, u index.Upload, existing Existing, by By) (Upload, error) {
 	dir, ok := folderPath(p, folder)
 	if !ok {
 		return Upload{}, ErrGone
@@ -442,13 +443,14 @@ func (d *Drive) dropUpload(ctx context.Context, u index.Upload, wait bool) error
 }
 
 // settle moves the whole file at partial, in the uploads folder, into a folder of the place (nil: its top folder; dir
-// its path on the storage) under name, as an upload by the member by, and records it in the index. The caller holds
+// its path on the storage) under name, as an upload by by (labelled with a guest's address), and records it in the
+// index. The caller holds
 // the place (inPlace) and the claim on the name in dir.
 //
 // When the name is taken, existing says what to do: replace a file there (it goes to the trash, and comes back if the
 // upload cannot be moved into its place), or keep both, under a new name. Otherwise it is a *Taken error, and nothing
 // moved.
-func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, dir, name string, existing Existing, partial, by string) (Upload, error) {
+func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, dir, name string, existing Existing, partial string, by By) (Upload, error) {
 	file, _ := pathIn(dir, name)
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
 	there, err := d.storage.Stat(sctx, file)
@@ -475,7 +477,7 @@ func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, d
 	var out Upload
 	if replacing {
 		// The file there goes to the trash, and the upload takes its place; if it cannot, the file comes back.
-		replaced, undo, err := d.putAside(ctx, p, folder, file, there, by)
+		replaced, undo, err := d.putAside(ctx, p, folder, file, there, by.Member)
 		if err != nil {
 			return Upload{}, err
 		}
@@ -519,7 +521,7 @@ func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, d
 	}
 	cancel()
 	d.changed(folderKey{p.ID, folderID(folder)})
-	it, err := d.index.PutItem(ctx, p.ID, folderID(folder), seen, d.now())
+	it, err := d.index.PutItem(ctx, p.ID, folderID(folder), seen, d.now(), by.Guest.Address)
 	if errors.Is(err, index.ErrNoFolder) {
 		// Its folder moved to another place, or went, after the upload was decided on it; the file is where the folder
 		// was, and a look at it finds it there.
