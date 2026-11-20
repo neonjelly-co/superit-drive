@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +35,13 @@ import (
 // as the looks always bring it, and an item deleted since, back in its entry of the trash, goes there as itself.
 //
 // A copy made by a newer Drive stops the Drive from starting: building an index without it would soon put a copy without
-// the shares in its place. A damaged copy, or one that belongs to another storage, is moved aside on the storage and
+// the shares in its place. Except one on the storage when the data folder's copy is usable, belongs to that storage and
+// is of this Drive's own schema, as after an upgrade that failed and was undone (the data folder put back from the
+// snapshot taken before it, the newer version having copied its index onto the storage as it started): the index is
+// made from the data folder's copy, the log says loudly that the newer copy was left alone, and the index keeps its name
+// (newerCopies) and numbers its next copy after it, so that the Drive's own copies are the ones adopted from then on.
+// The newer copy stays where it is until a copy of the Drive's own is on the storage; then it is moved aside there, and
+// kept (copies.go). A damaged copy, or one that belongs to another storage, is moved aside on the storage and
 // kept, and the Drive builds its index from the files, with no shares, and says so loudly. So does a Drive whose storage
 // holds neither copy nor mark (a new storage, or one whose Drive never wrote a copy). When the storage cannot be read,
 // the Drive does not start: it cannot tell whether there is a copy to adopt.
@@ -45,6 +52,34 @@ import (
 // adoptionWalk is kept in drive_state from when the index is made from a copy until a walk through the storage has
 // brought it in step, as rollbackWalk is for a rollback.
 const adoptionWalk = "adoption_walk"
+
+// newerCopies is kept in drive_state while copies made by a newer Drive, which the index was made without, are still to
+// be moved aside on the storage: their names in the copies' folder, separated by spaces. Copies of the index keep it
+// too, so that an index made from one, before they were moved aside, moves them aside in its turn.
+const newerCopies = "newer_copies"
+
+// maxNewerCopies is how many names newerCopies keeps at most.
+const maxNewerCopies = 10
+
+// newerCopyNames reads newerCopies: the names it holds that are a copy's, each once, at most maxNewerCopies.
+func newerCopyNames(value string) []string {
+	var names []string
+	for _, name := range strings.Fields(value) {
+		if _, ok := copySeqOf(name); ok && !slices.Contains(names, name) && len(names) < maxNewerCopies {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// A newerCopy is the latest copy on the storage, made by a newer Drive, left alone when the index is made from the data
+// folder's copy instead.
+type newerCopy struct {
+	name   string // its name in the copies' folder
+	where  string // where on the storage it is
+	seq    int64  // the number in its name
+	reason error  // what the check said of it
+}
 
 // A candidate is a copy of the index the Drive may make its index from.
 type candidate struct {
@@ -85,10 +120,11 @@ func Adopt(ctx context.Context, dataDir string, s *storage.Client, log *slog.Log
 			"the Drive does not start without knowing (an index made without the copy would replace it): %w", err)
 	}
 	var stored *candidate
+	var newer *newerCopy
 	if mark == "" {
 		foreignCopies(ctx, s, log)
 	} else {
-		stored, err = storageCopy(ctx, dataDir, s, log, mark, local)
+		stored, newer, err = storageCopy(ctx, dataDir, s, log, mark, local)
 		if err != nil {
 			return err
 		}
@@ -115,11 +151,28 @@ func Adopt(ctx context.Context, dataDir string, s *storage.Client, log *slog.Log
 		}
 	}
 	defer os.Remove(file)
-	if err := index.ClearCopy(ctx, file, index.Clearing{
+	clearing := index.Clearing{
 		Outsiders: chosen.storage != "",
 		State:     walkState,
 		Set:       map[string]string{adoptionWalk: strconv.FormatInt(now().UnixMilli(), 10)},
-	}); err != nil {
+	}
+	// Newer copies the copy's own index had not moved aside yet, and the one left alone now, are moved aside once a copy
+	// of the Drive's own is on the storage (copies.go); its copies are numbered after the one left alone now.
+	left, err := index.CopyState(ctx, file, newerCopies)
+	if err != nil {
+		return fmt.Errorf("reading the copy of the index: %w", err)
+	}
+	names := newerCopyNames(left)
+	if newer != nil {
+		names = newerCopyNames(strings.Join(append([]string{newer.name}, names...), " "))
+		clearing.SeqAtLeast = newer.seq
+	}
+	if len(names) > 0 {
+		clearing.Set[newerCopies] = strings.Join(names, " ")
+	} else {
+		clearing.State = append(slices.Clone(walkState), newerCopies)
+	}
+	if err := index.ClearCopy(ctx, file, clearing); err != nil {
 		return fmt.Errorf("readying the copy of the index: %w", err)
 	}
 	if err := syncFile(file); err != nil {
@@ -130,6 +183,14 @@ func Adopt(ctx context.Context, dataDir string, s *storage.Client, log *slog.Log
 	}
 	if err := syncFolder(dataDir); err != nil {
 		return err
+	}
+	if newer != nil {
+		log.Error("THE COPY OF THE INDEX ON THE STORAGE IS LEFT ALONE: "+newer.reason.Error()+". The index was made from "+
+			"the data folder's copy instead, of this version's own schema, as after an upgrade that failed and was undone: "+
+			"what changed in the index under the newer version (shares, links, guests and the rest of who may reach what) is "+
+			"not in it; the files on the storage are, as the walk finds them. The newer copy is kept: once this Drive has put "+
+			"a copy of its own on the storage, numbered after it, the newer one is moved aside there",
+			"copy", newer.where, "number", newer.seq)
 	}
 	from := "the data folder's copy (" + filepath.Join(index.BackupFolder, index.FileName) + "); guests stay signed in"
 	if chosen.storage != "" {
@@ -192,13 +253,13 @@ func localCopy(ctx context.Context, dataDir string, log *slog.Logger) (*candidat
 // storageCopy is the latest copy on the storage for the storage id mark, downloaded into the data folder, when it
 // passes the check and belongs to that id; nil when there is none, or when the data folder's copy (local) is as new.
 // One that does not pass is moved aside on the storage and kept, and the log says loudly why. A copy made by a newer
-// Drive is an error.
-func storageCopy(ctx context.Context, dataDir string, s *storage.Client, log *slog.Logger, mark string, local *candidate) (*candidate, error) {
+// Drive is an error, but when local is the Drive's own (ownCopy): then it is left alone, and newer says which it is.
+func storageCopy(ctx context.Context, dataDir string, s *storage.Client, log *slog.Logger, mark string, local *candidate) (stored *candidate, newer *newerCopy, err error) {
 	folder, ok := copiesFolderOf(mark)
 	if !ok {
 		log.Error("THE STORAGE'S MARK CANNOT NAME A FOLDER OF COPIES OF AN INDEX: none is adopted, and the Drive builds its index from the files, with no shares",
 			"mark", StorageIDFile)
-		return nil, nil
+		return nil, nil, nil
 	}
 	// The newest copy, read as the listing arrives: a folder of any size costs no more than one entry.
 	type found struct {
@@ -219,21 +280,21 @@ func storageCopy(ctx context.Context, dataDir string, s *storage.Client, log *sl
 		return f, err
 	})
 	if err != nil {
-		return nil, fmt.Errorf("the data folder holds no index, and the copies of the index on the storage could not be listed; "+
+		return nil, nil, fmt.Errorf("the data folder holds no index, and the copies of the index on the storage could not be listed; "+
 			"the Drive does not start without knowing whether one is there: %w", err)
 	}
 	newest, seq := f.newest, f.seq
 	if seq < 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if local != nil && local.info.StorageID == mark && local.info.Seq >= seq {
-		return nil, nil // the data folder's copy is as new: nothing to download
+		return nil, nil, nil // the data folder's copy is as new: nothing to download
 	}
 	if newest.Size > maxCopy {
 		log.Error("THE COPY OF THE INDEX ON THE STORAGE IS NOT USED: it is larger than any copy the Drive makes. The Drive "+
 			"builds its index from the files on the storage, and starts with no shares; the copy is left there", "copy", folder+"/"+newest.Name,
 			"bytes", newest.Size)
-		return nil, nil
+		return nil, nil, nil
 	}
 	where := folder + "/" + newest.Name
 	file := temporary(dataDir)
@@ -242,7 +303,7 @@ func storageCopy(ctx context.Context, dataDir string, s *storage.Client, log *sl
 		return struct{}{}, download(ctx, s, where, file)
 	}); err != nil {
 		os.Remove(file)
-		return nil, fmt.Errorf("the data folder holds no index, and the copy of it on the storage (%s) could not be read; "+
+		return nil, nil, fmt.Errorf("the data folder holds no index, and the copy of it on the storage (%s) could not be read; "+
 			"the Drive does not start without it: %w", where, err)
 	}
 	info, sum, err := index.CheckCopy(ctx, file, topFolderAllowed)
@@ -252,7 +313,12 @@ func storageCopy(ctx context.Context, dataDir string, s *storage.Client, log *sl
 	switch {
 	case errors.Is(err, index.ErrCopyNewer):
 		os.Remove(file)
-		return nil, fmt.Errorf("the data folder holds no index, and the copy of it on the storage (%s) %w: the Drive does not "+
+		// The Drive's own copies will be numbered after it: a number past half of what a copy may have is none a Drive
+		// reached, and would leave them too little room.
+		if ownCopy(local, mark) && seq < index.MaxCopySeq/2 {
+			return nil, &newerCopy{name: newest.Name, where: where, seq: seq, reason: err}, nil
+		}
+		return nil, nil, fmt.Errorf("the data folder holds no index, and the copy of it on the storage (%s) %w: the Drive does not "+
 			"start, so that it does not make an index without it and then replace it; start a version of the Drive as new as "+
 			"the one that made it", where, err)
 	case err != nil:
@@ -266,9 +332,16 @@ func storageCopy(ctx context.Context, dataDir string, s *storage.Client, log *sl
 		log.Error("THE COPY OF THE INDEX ON THE STORAGE IS NOT USED: "+err.Error()+
 			". The Drive builds its index from the files on the storage, and starts with no shares, no links, no guests "+
 			"and no shared folders but those it finds as folders; the copy is kept on the storage", "copy", aside)
-		return nil, nil
+		return nil, nil, nil
 	}
-	return &candidate{file: file, info: info, sum: sum, storage: where, changed: newest.Changed}, nil
+	return &candidate{file: file, info: info, sum: sum, storage: where, changed: newest.Changed}, nil, nil
+}
+
+// ownCopy says whether the data folder's copy (local) is one the Drive starts from rather than stop for a newer copy on
+// the storage: it passed the check, belongs to the storage whose mark is mark, and is of this Drive's own schema, as the
+// copy in a snapshot of the data folder taken before an upgrade is.
+func ownCopy(local *candidate, mark string) bool {
+	return local != nil && local.info.StorageID == mark && local.info.Version == index.Version()
 }
 
 // foreignCopies logs loudly when the storage holds copies of an index but not the Drive's mark: none is adopted.

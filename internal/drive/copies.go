@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -41,7 +42,9 @@ import (
 
 // CopiesFolder holds the copies of the index on the storage: a folder per storage id, holding copy-<number>.sqlite, the
 // latest copy (two for a moment, while the one before it is removed), and upload-<random>.part while one arrives. A
-// copy the Drive refused to adopt is moved aside there, as refused-<when>-<its name>, and kept.
+// copy the Drive refused to adopt is moved aside there, as refused-<when>-<its name>, and kept; so is a copy made by a
+// newer Drive that the index was made without (adopt.go), as newer-version-<when>-<its name>, once a copy of the
+// Drive's own is there.
 const CopiesFolder = HiddenFolder + "/index"
 
 // copiesFolderOf is the folder of the copies of the index whose storage id is id; ok is false for an id that cannot name
@@ -316,17 +319,63 @@ func (k *keeper) toStorage(ctx context.Context, info index.CopyInfo) (string, er
 		k.removeOnStorage(part)
 		return "", storageError(err)
 	}
-	k.removeOthers(ctx, folder, copyName(info.Seq))
+	d.stopAt("own copy stored")
+	if spare, ok := k.setAsideNewer(ctx, folder, info.Seq); ok {
+		k.removeOthers(ctx, folder, append(spare, copyName(info.Seq)))
+	}
 	return name, nil
 }
 
-// removeOthers removes from the copies' folder every copy but keep, and every upload left there. A copy moved aside
-// (refused) stays.
-func (k *keeper) removeOthers(ctx context.Context, folder, keep string) {
+// setAsideNewer moves aside in the copies' folder, to newer-version-<when>-<its name>, where they are kept, the copies
+// made by a newer Drive that the index was made without (newerCopies, adopt.go), now that a copy of the Drive's own,
+// numbered seq, is there. It answers the names of those it could not move: they stay where they are, and are tried again
+// after the next copy. ok is false when the index could not say which there are.
+func (k *keeper) setAsideNewer(ctx context.Context, folder string, seq int64) (spare []string, ok bool) {
+	d := k.d
+	value, _, err := d.index.State(ctx, newerCopies)
+	if err != nil {
+		return nil, false
+	}
+	if value == "" {
+		return nil, true
+	}
+	for _, name := range newerCopyNames(value) {
+		// Only one this Drive's copies are numbered after (adoption numbers them so): never the copy just put there.
+		if n, _ := copySeqOf(name); n >= seq {
+			continue
+		}
+		aside := folder + "/newer-version-" + time.Now().UTC().Format("20060102T150405Z") + "-" + name
+		sctx, cancel := context.WithTimeout(ctx, storageTimeout)
+		err := d.storage.Move(sctx, folder+"/"+name, aside)
+		cancel()
+		switch {
+		case err == nil:
+			d.log.Warn("the copy of the index made by a newer version of the Drive, which the index was made without, was "+
+				"moved aside on the storage, now that a copy of this Drive's own is there; it is kept", "copy", aside)
+		case errors.Is(err, storage.ErrNotFound):
+			// Gone already: moved aside before, or removed by someone with the storage login.
+		default:
+			spare = append(spare, name)
+			if d.logged.due("newer copy not moved", 10*time.Minute) {
+				d.log.Warn("the copy of the index made by a newer version of the Drive could not be moved aside on the storage; "+
+					"it stays where it is, and is tried again after the next copy", "copy", folder+"/"+name, "error", err)
+			}
+		}
+	}
+	if err := d.index.SetState(ctx, newerCopies, strings.Join(spare, " ")); err != nil && d.logged.due("newer copies not kept", 10*time.Minute) {
+		d.log.Warn("the index could not keep which copies made by a newer version of the Drive are still to be moved aside on "+
+			"the storage; it is written again after the next copy", "error", err)
+	}
+	return spare, true
+}
+
+// removeOthers removes from the copies' folder every copy but those in keep, and every upload left there. A copy moved
+// aside (refused, or made by a newer version) stays.
+func (k *keeper) removeOthers(ctx context.Context, folder string, keep []string) {
 	var old []string
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
 	err := k.d.storage.Each(sctx, folder, func(e storage.Entry) error {
-		if _, isCopy := copySeqOf(e.Name); (isCopy || strings.HasSuffix(e.Name, ".part")) && e.Name != keep && !e.Folder {
+		if _, isCopy := copySeqOf(e.Name); (isCopy || strings.HasSuffix(e.Name, ".part")) && !slices.Contains(keep, e.Name) && !e.Folder {
 			old = append(old, folder+"/"+e.Name)
 		}
 		return nil
