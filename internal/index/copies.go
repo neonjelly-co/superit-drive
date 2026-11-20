@@ -35,6 +35,10 @@ const (
 	copySeq = "copy_seq" // the number of the last copy made: each copy holds its own
 )
 
+// MaxCopySeq is the highest number a copy may have: far past what copies ever reach, and short of what would overflow as
+// the next one is counted.
+const MaxCopySeq = 1 << 53
+
 // A CopyInfo says what a copy of the index is.
 type CopyInfo struct {
 	// Version is its schema version (Version for one this Drive made).
@@ -153,8 +157,7 @@ func copyInfo(ctx context.Context, q queryRower) (CopyInfo, error) {
 	}
 	c.StorageID = id.String
 	if seq.Valid {
-		// A number far past what copies ever reach would overflow as the next one is counted.
-		if c.Seq, err = strconv.ParseInt(seq.String, 10, 64); err != nil || c.Seq < 0 || c.Seq > 1<<53 {
+		if c.Seq, err = strconv.ParseInt(seq.String, 10, 64); err != nil || c.Seq < 0 || c.Seq > MaxCopySeq {
 			return c, fmt.Errorf("the copy's number %q is not one a copy has", seq.String)
 		}
 	}
@@ -172,10 +175,17 @@ type Clearing struct {
 	// State lists the keys of drive_state to clear; Set the keys to keep a value under.
 	State []string
 	Set   map[string]string
+	// SeqAtLeast, when it is more than the number of the copy's last copy, becomes that number: the next copy of an index
+	// made from it is numbered after SeqAtLeast. At most MaxCopySeq.
+	SeqAtLeast int64
 }
 
-// ClearCopy clears from the copy in file what c says, in place. What is deleted is overwritten with zeros.
+// ClearCopy clears from the copy in file what c says, and sets what it says, in place. What is deleted is overwritten
+// with zeros.
 func ClearCopy(ctx context.Context, file string, c Clearing) error {
+	if c.SeqAtLeast > MaxCopySeq {
+		return fmt.Errorf("the number %d is past any a copy may have", c.SeqAtLeast)
+	}
 	db, err := openCopy(file, false)
 	if err != nil {
 		return err
@@ -212,10 +222,31 @@ func ClearCopy(ctx context.Context, file string, c Clearing) error {
 			return err
 		}
 	}
+	if c.SeqAtLeast > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO drive_state (key, value) VALUES (?, ?)
+			ON CONFLICT (key) DO UPDATE SET value = CAST(max(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)`,
+			copySeq, strconv.FormatInt(c.SeqAtLeast, 10)); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	return db.Close()
+}
+
+// CopyState reads the value a copy of the index that passed CheckCopy keeps under key in drive_state, without changing
+// it; "" when it keeps none.
+func CopyState(ctx context.Context, file, key string) (string, error) {
+	db, err := openCopy(file, true)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	var value sql.NullString
+	err = db.QueryRowContext(ctx, "SELECT (SELECT value FROM drive_state WHERE key = ?)", key).Scan(&value)
+	return value.String, err
 }
 
 // A CopySummary counts what a copy holds, for the log line that says a copy became the index.
