@@ -376,11 +376,14 @@ func (d *Drive) restoreInto(ctx context.Context, p index.Place, t index.TrashIte
 	return it, err
 }
 
-// Tidy removes for good everything that has been in a trash for 30 days, in every place, the uploads abandoned for a
-// day (AbandonedAfter), and guests' sessions that ended and codes that no longer count, then waits for the next run,
-// every interval, until ctx ends.
+// Tidy finishes the acts on held My files left under way (held.go), removes for good everything that has been in a
+// trash for 30 days, in every place, the uploads abandoned for a day (AbandonedAfter), and guests' sessions that ended
+// and codes that no longer count, then waits for the next run, every interval, until ctx ends.
 func (d *Drive) Tidy(ctx context.Context, every time.Duration) {
 	for {
+		if err := d.finishActs(ctx); err != nil && ctx.Err() == nil {
+			d.log.Error("handing over or deleting the files of a member who left could not be finished; it is tried again later", "error", err)
+		}
 		if err := d.removeExpired(ctx, nil); err != nil && ctx.Err() == nil {
 			d.log.Error("emptying the trash failed; it is tried again later", "error", err)
 		}

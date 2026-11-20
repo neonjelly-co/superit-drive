@@ -32,7 +32,8 @@
 // folders.go new folders, renames and moves, trash.go the trash, shared.go shared folders, sharing.go the access given
 // on places and items, links.go public links, reread.go keeping the index in step with changes made on the storage
 // directly (a folder re-read when it is opened), walk.go the slow walk through the whole storage, rollback.go the
-// storage put back to a snapshot, and this file the places, paths and listings.
+// storage put back to a snapshot, held.go handing over or deleting the My files of a member who left, and this file the
+// places, paths and listings.
 package drive
 
 import (
@@ -78,6 +79,9 @@ type Options struct {
 	Now func() time.Time
 	// Log receives what the Drive does on its own, such as emptying the trash. Nothing is logged when nil.
 	Log *slog.Logger
+	// StopAt is called at named points of the Drive's work where a test build may stop it, as if it were killed
+	// (clock.StopAt); nothing when nil.
+	StopAt func(point string)
 }
 
 // Drive is one Drive: its index and its storage.
@@ -119,6 +123,10 @@ type Drive struct {
 	working    sync.WaitGroup
 	// logged is when each kind of warning was last logged, so a recurring one is logged now and then.
 	logged logged
+	// acts holds the storage paths claimed for the acts on held My files under way (held.go).
+	acts acts
+	// stopAt is Options.StopAt.
+	stopAt func(point string)
 }
 
 // By is who does something that is recorded: a member, by user id, or a guest (Member is then "").
@@ -132,9 +140,12 @@ func (d *Drive) Now() time.Time { return d.now() }
 
 // New makes a Drive.
 func New(x *index.Index, s *storage.Client, o Options) *Drive {
-	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}}
+	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}, stopAt: o.StopAt}
 	if d.now == nil {
 		d.now = time.Now
+	}
+	if d.stopAt == nil {
+		d.stopAt = func(string) {}
 	}
 	if d.log == nil {
 		d.log = slog.New(slog.DiscardHandler)

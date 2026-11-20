@@ -33,3 +33,12 @@ func Walk() (every, pause time.Duration, ok bool) {
 	pause, _ = time.ParseDuration(os.Getenv("SUPERIT_DRIVE_TEST_WALK_PAUSE"))
 	return every, max(pause, 0), true
 }
+
+// StopAt stops the Drive at once, with exit code 3 and nothing written or closed, when SUPERIT_DRIVE_TEST_STOP_AT names
+// point: as if it were killed there.
+func StopAt(point string) {
+	if os.Getenv("SUPERIT_DRIVE_TEST_STOP_AT") == point {
+		os.Stdout.WriteString("stopped at " + point + " (SUPERIT_DRIVE_TEST_STOP_AT)\n")
+		os.Exit(3)
+	}
+}

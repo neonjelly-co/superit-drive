@@ -196,6 +196,9 @@ type Place struct {
 	// ProjectOutsideOff whether it is for the whole project by a project admin: read with the place, so that one reading
 	// decides about both. Each is the zero Switch while it is on.
 	OutsideOff, ProjectOutsideOff Switch
+	// Acting is, for a held My files being handed over or deleted (an act under way, held.go), what is being done to it:
+	// HandOver or DeleteHeld. It stays held meanwhile, whatever the member list says. "" for any other place.
+	Acting string
 }
 
 // A Switch is sharing outside the project switched off: when, and by whom (a member's user id). The zero Switch is on.
@@ -214,13 +217,14 @@ const placeColumns = "id, kind, IFNULL(owner, ''), IFNULL(name, ''), folder, del
 	"(SELECT off_at FROM outside_off WHERE IFNULL(place_id, 0) = places.id), " +
 	"(SELECT off_by FROM outside_off WHERE IFNULL(place_id, 0) = places.id), " +
 	"(SELECT off_at FROM outside_off WHERE IFNULL(place_id, 0) = 0), " +
-	"(SELECT off_by FROM outside_off WHERE IFNULL(place_id, 0) = 0)"
+	"(SELECT off_by FROM outside_off WHERE IFNULL(place_id, 0) = 0), " +
+	"(SELECT act FROM held_acts WHERE held_acts.place_id = places.id AND held_acts.done_at IS NULL)"
 
 func scanPlace(row interface{ Scan(...any) error }) (Place, error) {
 	var p Place
 	var deleted, offAt, projectOffAt sql.NullInt64
-	var offBy, projectOffBy sql.NullString
-	err := row.Scan(&p.ID, &p.Kind, &p.Owner, &p.Name, &p.Folder, &deleted, &p.Entry, &offAt, &offBy, &projectOffAt, &projectOffBy)
+	var offBy, projectOffBy, acting sql.NullString
+	err := row.Scan(&p.ID, &p.Kind, &p.Owner, &p.Name, &p.Folder, &deleted, &p.Entry, &offAt, &offBy, &projectOffAt, &projectOffBy, &acting)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Place{}, ErrNoPlace
 	}
@@ -228,6 +232,7 @@ func scanPlace(row interface{ Scan(...any) error }) (Place, error) {
 		p.Deleted = time.UnixMilli(deleted.Int64).UTC()
 	}
 	p.OutsideOff, p.ProjectOutsideOff = switchOf(offAt, offBy), switchOf(projectOffAt, projectOffBy)
+	p.Acting = acting.String
 	return p, err
 }
 
@@ -324,10 +329,13 @@ func (x *Index) Places(ctx context.Context) ([]Place, error) {
 	return scanPlaces(x.db.QueryContext(ctx, "SELECT "+placeColumns+" FROM places ORDER BY id"))
 }
 
-// FolderTaken says whether a place, in the trash or not, already uses folder as its top folder.
+// FolderTaken says whether a place, in the trash or not, already uses folder as its top folder, or a held My files that
+// was handed over or deleted used it (held_acts): such a folder is never given to a new place, so nothing that may be
+// left of it on the storage is ever taken over.
 func (x *Index) FolderTaken(ctx context.Context, folder string) (bool, error) {
 	var n int
-	err := x.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM places WHERE folder = ?", folder).Scan(&n)
+	err := x.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM places WHERE folder = ?) + (SELECT COUNT(*) FROM held_acts WHERE folder = ?)`,
+		folder, folder).Scan(&n)
 	return n > 0, err
 }
 

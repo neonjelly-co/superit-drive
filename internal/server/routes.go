@@ -54,6 +54,11 @@ func (s *Server) routes() []route {
 		// project by a project admin; for one shared folder by its managers.
 		{pattern: "PUT /api/sharing-outside", action: access.SwitchSharingOutside, serve: s.switchProjectOutside},
 		{pattern: "PUT /api/places/{place}/sharing-outside", action: access.SwitchSharingOutside, place: "place", serve: s.switchFolderOutside},
+		// When a member is removed (held.go): a project admin sees every held My files and the record of what was done with
+		// them, and hands one over to another member or deletes it, as a whole, never opening it.
+		{pattern: "GET /api/held", action: access.Oversee, serve: s.held},
+		{pattern: "POST /api/held/{place}/hand-over", action: access.HandOverHeld, place: "place", serve: s.handOver},
+		{pattern: "DELETE /api/held/{place}", action: access.DeleteHeld, place: "place", serve: s.deleteHeld},
 
 		// Shared folders as a whole (shared.go).
 		{pattern: "POST /api/places", action: access.MakeSharedFolder, serve: s.newSharedFolder},

@@ -32,7 +32,9 @@
 //     learns what else is in a folder they were not given. Restoring also needs the right to see the place's whole
 //     trash, or to be the one who put the item there.
 //   - A shared folder in the trash can only be restored, by a manager.
-//   - A "My files" whose owner has left the member list is held: nobody may do anything there.
+//   - A "My files" whose owner has left the member list is held: nobody may do anything in it. A project admin may hand
+//     it, as a whole, to another member (HandOverHeld), or delete it for good (DeleteHeld): both act on its top folder
+//     and open nothing in it. Its owner, back in the member list with the same user id, has it back as it was.
 //   - Moving between places, in version 1, is only out of one's own "My files" into a shared folder, where it becomes
 //     the project's: its owner may move it out (MoveOut), and it may go into a folder of a shared folder where they may
 //     upload (MoveIn). Every other move stays inside its place.
@@ -213,8 +215,9 @@ type Place struct {
 	// Owner is the user id of the member whose "My files" this is. A shared folder has none: the project owns it, and
 	// an Owner given for one counts for nothing.
 	Owner string
-	// OwnerLeft is true for a "My files" whose owner is no longer in the member list. It is held, unopened: nobody may
-	// do anything there, whatever was shared from it.
+	// OwnerLeft is true for a "My files" whose owner is no longer in the member list, or that is being handed over or
+	// deleted. It is held, unopened: nobody may do anything in it, whatever was shared from it; a project admin may only
+	// hand it over or delete it, as a whole.
 	OwnerLeft bool
 	// Deleted is true for a shared folder that is in the trash.
 	Deleted bool
@@ -344,6 +347,13 @@ const (
 	// RestoreSharedFolder is bringing a shared folder back out of the trash. Whoever could have deleted it may.
 	RestoreSharedFolder Action = "restore-shared-folder"
 
+	// HandOverHeld is handing a held My files (its owner has left the member list), whole, to another member: into a
+	// folder of its own in their My files, without anything given on it or in it. DeleteHeld is deleting it for good.
+	// Both are a project admin's, at its top folder only, and open nothing in it: what is in it is never listed,
+	// downloaded or named to them. Its owner never may: they are not in the member list.
+	HandOverHeld Action = "hand-over-held"
+	DeleteHeld   Action = "delete-held"
+
 	// MakeLink is making a public link to a file or folder, or a new one in place of the one it has (whose address then
 	// stops working): whoever may share it, while sharing outside the project is on there. It concerns an item.
 	MakeLink Action = "make-link"
@@ -387,7 +397,11 @@ const (
 
 // InAPlace is every action a member may do in a place, in the order an interface lists them.
 var InAPlace = []Action{List, Download, Upload, MakeFolder, Rename, Move, MoveOut, MoveIn, Delete, SeeTrash, Restore,
-	SeeAccess, Share, MakeLink, ManageLink, InviteGuest, ManageAccess, SwitchSharingOutside, DeleteSharedFolder, RestoreSharedFolder}
+	SeeAccess, Share, MakeLink, ManageLink, InviteGuest, ManageAccess, SwitchSharingOutside, DeleteSharedFolder, RestoreSharedFolder,
+	HandOverHeld, DeleteHeld}
+
+// AsAWhole is every action on a held My files as a whole: a project admin's, at its top folder, opening nothing in it.
+var AsAWhole = []Action{HandOverHeld, DeleteHeld}
 
 // Nowhere is every action that concerns no place only. (SwitchSharingOutside concerns no place for the whole project,
 // and is among InAPlace for a shared folder.)
@@ -435,6 +449,11 @@ func Decide(person Person, action Action, place *Place) bool {
 		return place.Kind == SharedFolder && len(place.Path) == 0 && action == RestoreSharedFolder && role == Manager
 	}
 	switch action {
+	case HandOverHeld, DeleteHeld:
+		// A held My files, as a whole, by a project admin: it moves or goes without anything in it being opened. Nobody
+		// does anything in it.
+		return place.Kind == MyFiles && place.Owner != "" && place.Owner != person.UserID && place.OwnerLeft &&
+			len(place.Path) == 0 && person.Role == members.RoleAdmin
 	case MoveIn:
 		// As an upload into the folder, and only into a shared folder: what comes in from elsewhere becomes the project's.
 		return place.Kind == SharedFolder && Decide(person, Upload, place)
