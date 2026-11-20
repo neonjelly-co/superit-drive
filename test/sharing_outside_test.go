@@ -388,7 +388,8 @@ func TestAProjectAdminSwitchesSharingOutsideOffForTheWholeProject(t *testing.T) 
 // A manager switches sharing outside the project off for one shared folder: its links open nothing and its guests get
 // nothing, while everything else works as before. Only its managers (and the project admins, who manage every shared
 // folder) switch it, and only for a shared folder: a My files has no switch of its own, and anyone else is answered as
-// for a place that does not exist. Switched on for the folder, it stays off there while it is off for the whole project.
+// for a place that does not exist. Switched on for the folder, it stays off there while it is off for the whole
+// project.
 // Something with a link moved into it from a My files keeps its link, which opens nothing there.
 func TestAManagerSwitchesSharingOutsideOffForOneSharedFolder(t *testing.T) {
 	t.Parallel()
@@ -583,7 +584,8 @@ func TestAProjectAdminSeesEverythingSharedOutsideTheProject(t *testing.T) {
 	ok(t, "giving Dóra Private as editor", share(t, b, x.place, x.private.ID, dora, "editor"))
 	madeLink(t, d, o, x.place, x.private.ID, false)
 	ok(t, "taking Private from Dóra", unshare(t, b, x.place, x.private.ID, dora))
-	// Dóra's shared folder Payroll: a link on a slip; and a link on a file in the trash, and on one gone from the storage.
+	// Dóra's shared folder Payroll: a link on a slip; and a link on a file in the trash, and one on a file gone from the
+	// storage.
 	payroll := madeSharedFolder(t, o, "Payroll")
 	slip := uploadedInto(t, o, payroll.ID, 0, "Slip.pdf", []byte("slip"))
 	madeLink(t, d, o, payroll.ID, slip.ID, false)

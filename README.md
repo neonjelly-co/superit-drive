@@ -701,7 +701,7 @@ as one that does not exist (404, `notHere`); without a session every route but s
 A cautious organisation can keep everything inside: a project admin switches sharing outside the project (public links
 and guests) off for the whole project, and a shared folder's managers (the project admins among them) for that shared
 folder, such as Payroll. A My files has no switch of its own. The switches live in the Drive's index, not in its
-settings: the platform passes nothing, and they go with the index (its copy on the storage included).
+settings: the platform passes nothing, and they go wherever the index goes (its copy on the storage, once there is one).
 
 Where it is off (the project's switch, or the shared folder's; `access.Place.NoSharingOutside`, set in
 `server.accessPlace` from the place as the index reads it):

@@ -79,9 +79,9 @@ const (
 
 // switchedOff answers someone refused only because sharing outside the project is switched off where they asked
 // (access.SwitchedOff): told so, rather than "not here", since with it on they would be let in, and so learn nothing
-// they could not see then. A member who may share it (making a link, inviting a guest) gets 409 with "outside", where it
-// was switched off ("project" or "folder"); a guest 403 with "unavailable": true; a visitor, whose link's token matched, a page that
-// says the link is not available now.
+// they could not see then. A member who may share it (making a link, inviting a guest) gets 409 with "outside", where
+// it was switched off ("project" or "folder"); a guest 403 with "unavailable": true; a visitor, whose link's token
+// matched, a page that says the link is not available now.
 func (s *Server) switchedOff(w http.ResponseWriter, r *http.Request, c call) {
 	switch {
 	case c.link != nil:
@@ -426,10 +426,12 @@ type spaceJSON struct {
 
 // space says how much space each person's My files and each shared folder uses, for a project admin: every member (0
 // for one who has never opened the Drive), everyone who has left with files held, and every shared folder (those in the
-// trash too), the largest first; and the whole, as the sidebar's meter. Sums of sizes only: nothing in anything is named.
+// trash too), the largest first; and the whole, as the sidebar's meter. Sums of sizes only: nothing in anything is
+// named.
 //
 //	GET /api/oversight/space
-//	200 {"used", "capacity", "people": [{"person" | "former", "folder", "used"}], "sharedFolders": [{"id", "name", "deleted", "used"}]}
+//	200 {"used", "capacity", "people": [{"person" | "former", "folder", "used"}],
+//	     "sharedFolders": [{"id", "name", "deleted", "used"}]}
 func (s *Server) space(w http.ResponseWriter, r *http.Request, _ call) {
 	ctx := r.Context()
 	used, err := s.drive.UsedByPlace(ctx)

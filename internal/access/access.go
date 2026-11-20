@@ -57,14 +57,14 @@
 //     place's top folder, never sharing, never a link, never the trash, never who has access. An invitation counts while
 //     its item is live and its place open, before its end date, and while sharing outside the project is on there; in a
 //     My files it is its giver's share, as a link is: it counts only while they may still share its item.
-//   - Sharing outside the project (public links and guests) can be switched off: for the whole project by a project admin
-//     (SwitchSharingOutside, at no place), and for one shared folder by its managers (SwitchSharingOutside, at its top
-//     folder). Where it is off (Place.NoSharingOutside) no link opens and none is made, no guest gets in and none is
+//   - Sharing outside the project (public links and guests) can be switched off: for the whole project by a project
+//     admin (SwitchSharingOutside, at no place), and for one shared folder by its managers (SwitchSharingOutside, at its
+//     top folder). Where it is off (Place.NoSharingOutside) no link opens and none is made, no guest gets in and none is
 //     invited; links and invitations stay, can be seen and removed, and work again when it is switched back on.
 //     SwitchedOff says when that switch is the only thing in the way, so that whoever would otherwise be let in can be
 //     told so.
-//   - A project admin oversees what leaves the project and the space each person and shared folder uses (Oversee): never
-//     content. A project admin may do nothing in anyone else's My files but what was shared with them.
+//   - A project admin oversees what leaves the project and the space each person and shared folder uses (Oversee):
+//     never content. A project admin may do nothing in anyone else's My files but what was shared with them.
 package access
 
 import (
