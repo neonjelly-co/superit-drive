@@ -21,7 +21,7 @@ var (
 // NewFolder makes an empty folder called name in a folder of the place (nil: its top folder), by by: one a guest makes
 // is labelled with their address.
 func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, name string, by By) (index.Item, error) {
-	if err := CheckName(name); err != nil {
+	if err := by.checkName(name); err != nil {
 		return index.Item{}, err
 	}
 	if in != nil && len(in.Above)+2 > index.MaxDepth {
@@ -87,9 +87,10 @@ func (d *Drive) free(ctx context.Context, p, name string) error {
 	return storageError(err)
 }
 
-// Rename gives a live item of the place a new name, in the folder it is in. It keeps its id.
-func (d *Drive) Rename(ctx context.Context, p index.Place, it index.Item, name string) (index.Item, error) {
-	if err := CheckName(name); err != nil {
+// Rename gives a live item of the place a new name, in the folder it is in, by by (whose name it must be allowed to
+// be). It keeps its id.
+func (d *Drive) Rename(ctx context.Context, p index.Place, it index.Item, name string, by By) (index.Item, error) {
+	if err := by.checkName(name); err != nil {
 		return index.Item{}, err
 	}
 	if name == it.Name {

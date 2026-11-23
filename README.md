@@ -35,6 +35,9 @@ A signed-in request must carry two headers, added by the reverse proxy (which re
 | `Drive-Secret` | The value of `DRIVE_HEADER_SECRET`. Without it, or with any other value, the request is refused, whatever else it carries. |
 | `Remote-User-Id` | The member's stable user id. |
 
+Each must come once: a request with two `Drive-Secret` headers, or two `Remote-User-Id` headers, is refused (403). A
+proxy set up to add the user id, instead of replacing what the browser sent, would put the browser's own value first.
+
 The person must also be in the member list file (`DRIVE_MEMBERS_FILE`), which the Drive reads and never writes. It
 re-reads the file within a second of it changing; replace it by writing a new file and renaming it over the old one.
 The list is the authority for each member's email address, name and role. (Superit's gateway also sends
@@ -101,7 +104,7 @@ a test keeps the two equal.)
 | `DRIVE_CAPACITY` | no | Size of the storage, in bytes or with a unit (`500GB`, `1TB`, `1TiB`). Empty when not known. |
 | `DRIVE_ADDRESS` | yes | The Drive's own address as people reach it, such as `https://files.example.com`. Changes are accepted only from pages at this address, and a public link's address starts with it. |
 | `DRIVE_PROJECT_NAME` | yes | Name of the project (the organisation) the Drive belongs to. |
-| `DRIVE_HEADER_SECRET` | yes | Secret the reverse proxy adds as `Drive-Secret`. At least 32 characters. The key that keeps guests' codes (see [Guests](#guests)) is made from it, so changing it ends the codes on their way (not the sessions). |
+| `DRIVE_HEADER_SECRET` | yes | Secret the reverse proxy adds as `Drive-Secret`. At least 32 characters, and your own (`openssl rand -hex 32`): whoever knows it and reaches the Drive's port is whoever they say they are. The Drive does not start with the secret the worked example once came with, and warns loudly when it runs with the repository's development secret. The key that keeps guests' codes (see [Guests](#guests)) is made from it, so changing it ends the codes on their way (not the sessions). |
 | `DRIVE_MEMBERS_FILE` | yes | Path of the member list file. |
 | `DRIVE_DATA_DIR` | yes | Folder for the index, and its copy in `backup/` (see [Backing up the Drive](#backing-up-the-drive)). The container image sets it to `/data`. |
 | `DRIVE_LISTEN` | no, `:8080` | Address the web server listens on. |
@@ -570,6 +573,11 @@ either: the later copy's sharing is on the files as they are.
 
 The upgrade tried again starts the newer version with the older version's index: it adopts nothing, numbers its copies
 after the older version's, and leaves a copy set aside where it is.
+
+An index of a newer schema in the data folder itself (the image put back to an older version, the data folder not)
+stops the older version from starting, with `the index was made by a newer version of the Drive` and both schema
+versions: it would skip the migrations it does not know and work on tables whose rules it does not keep. Put the data
+folder back as it was before the upgrade, as above, or start the newer version.
 
 Versions up to 0.2.0 do not leave a newer copy alone: after an upgrade from one of them to a newer schema fails, the
 older version does not start. Starting the newer version again on the restored data folder does: it makes its index
@@ -1055,6 +1063,10 @@ GET | PUT | DELETE /s/guest/api/places/{place}/uploads/{upload}, POST …/finish
 DELETE /s/guest/api/places/{place}/items/{item}
 ```
 
+A name a guest gives (to a file they upload, a folder they make, something they rename) is refused with the characters
+that turn the direction of text (U+202A to U+202E, U+2066 to U+2069), as a name sent through an upload-only link is: a
+member reads those names in their own list.
+
 Every answer under `/s/guest` carries `X-Robots-Tag: noindex, nofollow`, the members' `Content-Security-Policy` (the page
 runs the interface's own script) and `Referrer-Policy: same-origin` (the addresses there hold no secret, and
 `no-referrer` would make a change's `Origin` null); the API's answers `Cache-Control: no-store`, the page `no-cache`, and
@@ -1469,7 +1481,7 @@ parts, or anything else in `Range`, get the whole file, as HTTP allows.
 
 **Zips.** A folder, a place's top folder, or some items of a folder download as one zip, made as it is sent: each
 folder is looked at on the storage on the way, and each file streamed from the storage, stored as it is (no
-compression). Folders are in it too, empty ones included. A backslash in a name becomes `_` in the zip. A zip holds
+compression). Folders are in it too, empty ones included. A backslash in a name becomes `_` in the zip, and a number is added when that is another entry's name in the same folder (`a\b.txt` beside `a_b.txt` is `a_b (2).txt`): no two entries have the same name. A zip holds
 at most 10,000 files and folders (each costs a little memory until the zip's end); a larger folder is refused with
 400, and is downloaded a folder inside it at a time. It has no length, and a zip cut short ends the connection, so the
 browser shows the download as failed.
@@ -1614,6 +1626,7 @@ server and example people:
 ```sh
 cd examples/compose
 cp example.env .env
+# Set DRIVE_HEADER_SECRET in .env to a secret of your own (openssl rand -hex 32): the Drive does not start without one.
 # Set DRIVE_VERSION in .env. Until a version is published, build one first, from the repository's top folder:
 #   docker build -t ghcr.io/neonjelly-co/superit-drive:dev .    and set DRIVE_VERSION=dev
 docker compose up -d
@@ -1756,7 +1769,7 @@ expects the name `ghcr.io/neonjelly-co/superit-drive:<version>`. It starts with 
 member list file:
 
 ```sh
-docker run -p 8080:8080 -v /path/to/members:/members:ro \
+docker run -p 127.0.0.1:8080:8080 -v /path/to/members:/members:ro \
   -e DRIVE_MEMBERS_FILE=/members/members.json -e DRIVE_STORAGE_URL=… (and the other settings) superit-drive:dev
 ```
 

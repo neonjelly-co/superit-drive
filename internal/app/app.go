@@ -51,6 +51,10 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	if err := drive.Adopt(ctx, s.DataDir, store, log, clock.Now); err != nil {
 		return err
 	}
+	if s.HeaderSecret == settings.DevelopmentSecret {
+		log.Warn("DRIVE_HEADER_SECRET is the repository's development secret, which everyone can read: whoever reaches the " +
+			"Drive's port is whoever they say they are. Only for development on your own computer; make one of your own otherwise")
+	}
 	x, err := index.Open(ctx, s.DataDir)
 	if err != nil {
 		return err

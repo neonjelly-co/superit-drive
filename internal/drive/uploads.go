@@ -176,7 +176,7 @@ func (d *Drive) tryResume(ctx context.Context) (why string, err error) {
 // The name is looked at now, so that a person is asked "replace or keep both" before the file travels: when it is
 // taken and existing does not say what to do, it is a *Taken error. It is looked at again when the upload is finished.
 func (d *Drive) StartUpload(ctx context.Context, p index.Place, folder *index.Item, name string, size int64, existing Existing, by By) (index.Upload, error) {
-	if err := CheckName(name); err != nil {
+	if err := by.checkName(name); err != nil {
 		return index.Upload{}, err
 	}
 	if size <= 0 {

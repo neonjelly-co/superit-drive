@@ -121,7 +121,16 @@ func (z *zipping) folder(name string, it *index.Item) error {
 
 // items adds items, which are directly in the folder in (nil: the place's top folder), and everything in them, each
 // under prefix.
+//
+// No two entries have the same name: a name changed for the zip (zipName) that is then another item's in the folder,
+// or another changed name, gets a number, as a name kept beside a taken one does. Unpacked, neither replaces the other.
 func (z *zipping) items(ctx context.Context, prefix string, in *index.Item, items []index.Item) error {
+	taken := make(map[string]bool, len(items))
+	for _, it := range items {
+		if zipName(it.Name) == it.Name {
+			taken[it.Name] = true
+		}
+	}
 	for _, it := range items {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -130,7 +139,14 @@ func (z *zipping) items(ctx context.Context, prefix string, in *index.Item, item
 		if in != nil {
 			it.Above = append(append(make([]index.Item, 0, len(in.Above)+1), in.Above...), *in)
 		}
-		name := prefix + zipName(it.Name)
+		entry := zipName(it.Name)
+		if entry != it.Name {
+			for n := 2; taken[entry]; n++ {
+				entry = numbered(zipName(it.Name), n, it.Folder)
+			}
+			taken[entry] = true
+		}
+		name := prefix + entry
 		if it.Folder {
 			if err := z.folder(name+"/", &it); err != nil {
 				return err

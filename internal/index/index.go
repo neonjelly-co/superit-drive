@@ -85,8 +85,22 @@ func (x *Index) migrate(ctx context.Context) (err error) {
 		return err
 	}
 	defer conn.Close()
+	// An index a newer Drive made is not opened: this Drive would skip every migration it does not know, and work on
+	// tables whose rules it does not keep (a restriction a newer version added would quietly stop holding).
+	var version int
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if version > Version() {
+		return fmt.Errorf("%w (its schema is version %d, this Drive's %d)", ErrNewer, version, Version())
+	}
 	return migrateConn(ctx, conn, Version())
 }
+
+// ErrNewer: the index in the data folder was made by a Drive whose schema is newer than this one's migrations make, as
+// after the image was put back to an older version without the data folder. The Drive does not start on it; a copy
+// made by a newer Drive is refused the same way (ErrCopyNewer).
+var ErrNewer = errors.New("the index was made by a newer version of the Drive")
 
 // Version is the schema version this Drive's migrations bring an index to: the number of the last one.
 func Version() int {

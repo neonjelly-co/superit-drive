@@ -1270,3 +1270,21 @@ func TestALinksFilesAndAFoldersEntriesAreCounted(t *testing.T) {
 		}
 	}
 }
+
+// An index a newer Drive made (the image put back to an older version, the data folder not) is not opened: this Drive
+// knows nothing of what the newer one added to it.
+func TestAnIndexMadeByANewerDriveIsNotOpened(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	x, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", Version()+1)); err != nil {
+		t.Fatal(err)
+	}
+	x.Close()
+	if _, err := Open(ctx, dir); !errors.Is(err, ErrNewer) {
+		t.Fatalf("opening an index of a newer schema: %v", err)
+	}
+}

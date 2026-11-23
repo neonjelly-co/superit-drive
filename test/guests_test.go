@@ -1128,6 +1128,14 @@ func TestAGuestWorksInsideWhatWasSharedAsTheirRoleAllows(t *testing.T) {
 			t.Fatalf("%s: got %d %s, want %d", what, res.Status, res.Body, want)
 		}
 	}
+	// A name that turns the direction of text is refused from a guest, as from a visitor: "Invoice" + U+202E + "fdp.exe"
+	// would read as "Invoiceexe.pdf" in the members' list.
+	turned := "Invoice\u202Efdp.exe"
+	ok200("Anna making a folder with a name that turns the text", sendJSON(t, a, http.MethodPost, guestItemPath(x.place, x.bakery.ID, "/folders"), map[string]string{"name": turned}), http.StatusBadRequest)
+	ok200("Anna renaming Brief.pdf to a name that turns the text", sendJSON(t, a, http.MethodPost, guestItemPath(x.place, brief.ID, "/rename"), map[string]string{"name": turned}), http.StatusBadRequest)
+	ok200("Anna uploading a file with a name that turns the text", guestUpload(t, a, x.place, x.bakery.ID, turned, []byte("x"), ""), http.StatusBadRequest)
+	ok200("Anna starting an upload with a name that turns the text", sendJSON(t, a, http.MethodPost, guestItemPath(x.place, x.bakery.ID, "/uploads"), map[string]any{"name": turned, "size": 1}), http.StatusBadRequest)
+	ok200("Bence, a member, making a folder with such a name", newFolder(t, d.As(bence), x.place, x.private.ID, turned), http.StatusCreated)
 	ok200("Anna renaming Brief.pdf", sendJSON(t, a, http.MethodPost, guestItemPath(x.place, brief.ID, "/rename"), map[string]string{"name": "Brief 2026.pdf"}), http.StatusOK)
 	ok200("Anna moving it into her folder", sendJSON(t, a, http.MethodPost, guestItemPath(x.place, brief.ID, "/move"), map[string]any{"to": folder.ID}), http.StatusOK)
 	ok200("Anna deleting Ledger.xlsx", a.Do(t, http.MethodDelete, guestItemPath(x.place, x.ledger.ID, ""), nil), http.StatusNoContent)

@@ -116,7 +116,7 @@ type Upload struct {
 // uploads: a file a member replaces goes to the trash as put there by them; a file a guest uploads is labelled with
 // their address.
 func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, name string, body io.Reader, size int64, existing Existing, by By) (Upload, error) {
-	if err := CheckName(name); err != nil {
+	if err := by.checkName(name); err != nil {
 		return Upload{}, err
 	}
 	dir, ok := folderPath(p, folder)

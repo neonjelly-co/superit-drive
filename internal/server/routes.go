@@ -682,7 +682,7 @@ func (s *Server) rename(w http.ResponseWriter, r *http.Request, c call) {
 	if !s.readBody(w, r, &body) {
 		return
 	}
-	it, err := s.drive.Rename(r.Context(), *c.place, *c.item, body.Name)
+	it, err := s.drive.Rename(r.Context(), *c.place, *c.item, body.Name, c.by())
 	if err != nil {
 		s.changeFailed(w, r, err, body.Name)
 		return

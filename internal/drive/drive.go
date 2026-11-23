@@ -148,6 +148,16 @@ type By struct {
 	Link   int64
 }
 
+// checkName says whether name can be the name of something by makes or renames: as CheckName says for a member, and
+// for anyone outside the project as CheckSentName says, without the characters that turn the direction of text. A
+// guest's "Invoice" + U+202E + "fdp.exe" would read as "Invoiceexe.pdf" in the members' list, as a visitor's would.
+func (b By) checkName(name string) error {
+	if b.Member == "" {
+		return CheckSentName(name)
+	}
+	return CheckName(name)
+}
+
 // added is who added an item from outside the project, as the index labels it: a guest, or a visitor through a link.
 func (b By) added() index.AddedBy {
 	return index.AddedBy{Guest: b.Guest.Address, Link: b.Link != 0}

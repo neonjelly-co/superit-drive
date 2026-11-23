@@ -186,6 +186,9 @@ func TestEveryRouteIsGuarded(t *testing.T) {
 		"secret with a suffix": {SecretHeader: {secret + "x"}, UserIDHeader: {"u-reka"}},
 		"no user id":           {SecretHeader: {secret}},
 		"not a member":         {SecretHeader: {secret}, UserIDHeader: {"u-stranger"}},
+		// A proxy that adds a header instead of replacing it leaves the browser's own value first.
+		"two user ids": {SecretHeader: {secret}, UserIDHeader: {"u-reka", "u-reka"}},
+		"two secrets":  {SecretHeader: {secret, secret}, UserIDHeader: {"u-reka"}},
 	}
 	for _, path := range paths {
 		for name, headers := range cases {

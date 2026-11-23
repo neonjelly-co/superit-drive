@@ -36,7 +36,16 @@ var (
 
 // identify says who is asking. A request without the right secret is refused whatever its identity headers say: only
 // the reverse proxy knows the secret, so only it can vouch for them.
+//
+// Each of the two headers must come once. A proxy set up to add the user id, instead of replacing what the browser
+// sent, would put the browser's own value first: with two there is no telling whose is whose, so nobody is signed in.
 func (s *Server) identify(r *http.Request) (members.Member, *refusal) {
+	if len(r.Header.Values(SecretHeader)) > 1 {
+		return members.Member{}, &refusedSecret
+	}
+	if len(r.Header.Values(UserIDHeader)) > 1 {
+		return members.Member{}, &refusedNoUser
+	}
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get(SecretHeader)), []byte(s.secret)) != 1 {
 		return members.Member{}, &refusedSecret
 	}
