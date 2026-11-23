@@ -128,6 +128,12 @@ func (d *Drive) LinksOn(ctx context.Context, items []int64) ([]index.Link, error
 	return d.index.LinksOn(ctx, items)
 }
 
+// OutsideIn returns every public link and invitation on a live item of the place and on everything inside it, at any
+// depth. Whether each works is for the access package to say.
+func (d *Drive) OutsideIn(ctx context.Context, p index.Place, it index.Item) ([]index.Link, []index.Grant, error) {
+	return d.index.OutsideIn(ctx, p.ID, it.ID)
+}
+
 // LinksInside returns the public links on the items directly in a folder of the place (nil: its top folder).
 func (d *Drive) LinksInside(ctx context.Context, p index.Place, folder *index.Item) ([]index.Link, error) {
 	return d.index.LinksInside(ctx, p.ID, folderID(folder))

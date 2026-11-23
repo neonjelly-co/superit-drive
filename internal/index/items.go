@@ -1,6 +1,7 @@
 package index
 
 import (
+	"encoding/json"
 	"context"
 	"database/sql"
 	"errors"
@@ -273,12 +274,18 @@ var ErrUploading = errors.New("an upload in progress goes into it")
 // reaches the item. An item in the old place's trash that was deleted out of it stays there, and goes back to that
 // place's top folder. It refuses (ErrUploading) while an upload in progress goes into it or into a folder inside it:
 // that upload belongs to the old place.
-func (x *Index) MoveToPlace(ctx context.Context, fromPlace, id, toPlace, folderID int64, name string) (Item, error) {
+//
+// The public links and invitations of left do not go with it: they are removed, in the old place, as it moves. They are
+// those that did not work there (the caller says which, see OutsideIn): where it goes they would work again.
+func (x *Index) MoveToPlace(ctx context.Context, fromPlace, id, toPlace, folderID int64, name string, left Left) (Item, error) {
 	err := x.write(ctx, func(tx *sql.Tx) error {
 		if busy, err := uploading(ctx, tx, fromPlace, id); err != nil {
 			return err
 		} else if busy {
 			return ErrUploading
+		}
+		if err := left.remove(ctx, tx, fromPlace); err != nil {
+			return err
 		}
 		if err := liveFolder(ctx, tx, toPlace, folderID); err != nil {
 			return err
@@ -305,6 +312,49 @@ func (x *Index) MoveToPlace(ctx context.Context, fromPlace, id, toPlace, folderI
 		return Item{}, err
 	}
 	return x.Item(ctx, toPlace, id)
+}
+
+// Left is what is shared outside the project on a moved item, or inside it, that does not go with it: public links and
+// invitations, by their ids.
+type Left struct {
+	Links, Invitations []int64
+}
+
+func (l Left) remove(ctx context.Context, tx *sql.Tx, placeID int64) error {
+	for _, of := range []struct {
+		ids   []int64
+		query string
+	}{
+		{l.Links, `DELETE FROM links WHERE id IN (SELECT value FROM json_each(?)) AND item_id IN (SELECT id FROM items WHERE place_id = ?)`},
+		{l.Invitations, `DELETE FROM grants WHERE id IN (SELECT value FROM json_each(?)) AND place_id = ? AND guest_id IS NOT NULL`},
+	} {
+		if len(of.ids) == 0 {
+			continue
+		}
+		list, err := json.Marshal(of.ids)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, of.query, string(list), placeID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// OutsideIn returns everything shared outside the project on a live item of a place and on everything inside it, at
+// any depth, what is in the trash or missing from the storage included (it moves with the item): the public links and
+// the invitations, each with the item it is on. It says nothing about whether any of them works.
+func (x *Index) OutsideIn(ctx context.Context, placeID, id int64) ([]Link, []Grant, error) {
+	links, err := scanLinks(x.db.QueryContext(ctx, insideItem+" SELECT "+linkColumns+`
+		FROM links JOIN items ON items.id = links.item_id
+		WHERE links.item_id IN (SELECT id FROM inside) ORDER BY links.id`, id, placeID, MaxDepth))
+	if err != nil {
+		return nil, nil, err
+	}
+	invitations, err := scanGrants(x.db.QueryContext(ctx, insideItem+" SELECT "+grantColumns+" FROM "+grantsJoined+`
+		WHERE grants.guest_id IS NOT NULL AND grants.item_id IN (SELECT id FROM inside) ORDER BY grants.id`, id, placeID, MaxDepth))
+	return links, invitations, err
 }
 
 // insideItem is a live item of a place (its id, the place's id) and everything inside it, at any depth (MaxDepth).

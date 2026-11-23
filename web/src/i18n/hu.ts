@@ -322,6 +322,11 @@ export const hu: Messages = {
 		whatEachKeeps: "Amit az egyes elemek megtartanak",
 		keepsOne: "Megtartja a rá és a benne lévőkre adott hozzáférést. A mostani mappáitól kapott hozzáférés megszűnik.",
 		keepsMany: "Mindegyik megtartja a rá és a benne lévőkre adott hozzáférést. A mostani mappáiktól kapott hozzáférés megszűnik.",
+		insideTitle: "Ezek benne a projekten kívül megosztva maradnak:",
+		insideLabel: "Ami benne a projekten kívül megosztva marad",
+		insideLink: "Nyilvános link",
+		insideGuest: "Vendég",
+		leavesDead: "A már nem működő nyilvános linkek és vendégmeghívók nem kerülnek át.",
 		offForProject:
 			"A projekten kívüli megosztás az egész projektben ki van kapcsolva: az áthelyezett elemek nyilvános linkjei és vendégmeghívói megmaradnak, de ott semmit nem nyitnak meg, amíg vissza nem kapcsolják.",
 		offForFolder: (place) =>

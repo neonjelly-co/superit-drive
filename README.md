@@ -742,9 +742,20 @@ who before anything moves, as "who can see this" would show it there: the projec
 what was given on the folders on the way down, and what was given on the item itself, which it keeps. It is decided as
 the move itself would be, and names a folder above the destination only when the mover can open it.
 
+**Public links and invitations that had stopped working stay behind.** In a My files a link or an invitation works only
+while whoever made it may still share its item; in a shared folder it does not depend on its maker, so one that had
+stopped (its maker lost their access, or left the project) would start again there. The move judges every link and
+invitation on the moved item and on everything inside it, at any depth, each where it is now: those that do not work
+are removed as it moves, and logged as a count (an invitation that has ended among them; one on something in the trash
+or missing from the storage unless the owner made it). Those stopped only by sharing outside the project being switched
+off come along. The warning lists every one that works inside what is moved (`"inside"`), with the item it is on, so
+the mover sees what stays reachable from outside the project.
+
 ```
 GET    /api/places/{place}/items/{item}/move?to=42[&place=7]    who would see it there (no "to": the top folder)
-       200 {"becomesProjects", "access": [...as GET …/access answers...], "seenBy": {"everyone", "members"}}
+       200 {"becomesProjects", "access": [...as GET …/access answers...], "seenBy": {"everyone", "members"},
+            "inside": [{"item": {"id", "name"}, "path": [{"id", "name"}], "link": "view" | "upload-only"}
+                     | {"item", "path", "guest": <address>, "role", "until"}]}
 POST   /api/places/{place}/items/{item}/move    {"to": 42 | null, "place": 7}    "place" only for another place
        200 the item, with "place"    400 a move between places that is not allowed    404 a place or folder that is not
        there or that the person cannot add to    409 a name taken there, or something in it being uploaded

@@ -805,7 +805,7 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 	if err := x.AddUpload(ctx, up); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery"); !errors.Is(err, ErrUploading) {
+	if _, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery", Left{}); !errors.Is(err, ErrUploading) {
 		t.Fatalf("moving Bakery with an upload into 2026: %v", err)
 	}
 	if err := x.RemoveUpload(ctx, up.ID); err != nil {
@@ -814,7 +814,7 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 
 	// A row the index still holds under the name there is out of date: the storage has already moved Bakery there.
 	put(t, x, team, 0, "Bakery", false, 1)
-	moved, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery")
+	moved, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery", Left{})
 	if err != nil || moved.ID != bakery.ID || moved.PlaceID != team.ID || moved.ParentID != 0 || len(moved.Above) != 0 {
 		t.Fatalf("Bakery moved into Team: %+v, %v", moved, err)
 	}
@@ -851,7 +851,7 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 	if _, err := x.Item(ctx, bence.ID, bakery.ID); !errors.Is(err, ErrNoItem) {
 		t.Fatal("Old.pdf's folder is still found in Bence's My files")
 	}
-	if _, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery"); !errors.Is(err, ErrNoItem) {
+	if _, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery", Left{}); !errors.Is(err, ErrNoItem) {
 		t.Fatalf("moving Bakery out of Bence's My files again: %v", err)
 	}
 	// A change decided on Bakery while it was in Bence's My files never records anything in his place under it: nothing
@@ -877,7 +877,7 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 			return err
 		}(),
 		"a move into Team, under a folder of Bence's": func() error {
-			_, err := x.MoveToPlace(ctx, bence.ID, notes.ID, team.ID, clients.ID, "Notes.txt")
+			_, err := x.MoveToPlace(ctx, bence.ID, notes.ID, team.ID, clients.ID, "Notes.txt", Left{})
 			return err
 		}(),
 		"a restore into Bakery, through Bence's My files": func() error {
@@ -983,7 +983,7 @@ func TestALinkLivesAndGoesWithItsItem(t *testing.T) {
 	if _, err := x.Restore(ctx, bence.ID, clients.ID, 0, "Clients"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := x.MoveToPlace(ctx, bence.ID, clients.ID, shared.ID, 0, "Clients"); err != nil {
+	if _, err := x.MoveToPlace(ctx, bence.ID, clients.ID, shared.ID, 0, "Clients", Left{}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _, err := x.LinkByToken(ctx, hash(2)); err != nil || got.Place != shared.ID || got.Item != clients.ID {

@@ -317,6 +317,11 @@ export const en = {
 		whatEachKeeps: "What each keeps",
 		keepsOne: "It keeps the access given on it and on everything in it. Access from the folders it is in now ends.",
 		keepsMany: "Each keeps the access given on it and on everything in it. Access from the folders they are in now ends.",
+		insideTitle: "Inside it, these stay shared outside the project:",
+		insideLabel: "What stays shared outside the project inside it",
+		insideLink: "Public link",
+		insideGuest: "Guest",
+		leavesDead: "Public links and guest invitations that no longer work are not taken along.",
 		offForProject:
 			"Sharing outside the project is switched off for the whole project: public links and guest invitations on what is moved stay, but open nothing there until it is switched back on.",
 		offForFolder: (place: string) =>

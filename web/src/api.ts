@@ -268,7 +268,21 @@ export type Found = Item & {
  * becomesProjects: it would leave the person's My files for a shared folder, and become the project's. outside: whether
  * sharing outside the project is on there (where it is off, its public link and guests stop there).
  */
-export type MovePreview = { becomesProjects: boolean; access: Access[]; seenBy: SeenBy; outside: Outside };
+export type MovePreview = { becomesProjects: boolean; access: Access[]; seenBy: SeenBy; outside: Outside; inside: SharedInside[] };
+
+/**
+ * A public link or a guest's invitation that works, on something inside an item that would move: the item it is on, the
+ * folders from the moved one down to it, and the link's kind or the guest's address with their role and end. Those that
+ * do not work are not listed: a move to another place leaves them behind.
+ */
+export type SharedInside = {
+	item: FolderRef;
+	path: FolderRef[];
+	link?: "view" | "upload-only";
+	guest?: string;
+	role?: "viewer" | "editor";
+	until?: string;
+};
 
 /**
  * What a public link lets its visitors do: open and download what it is on ("view"), or, on a folder only, send files
