@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -113,7 +112,7 @@ func (s *Server) makeLink(w http.ResponseWriter, r *http.Request, c call) {
 		Replace bool   `json:"replace"`
 		Kind    string `json:"kind"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+	if err := readSmall(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
 		s.refuse(w, r, http.StatusBadRequest, unreadable)
 		return
 	}

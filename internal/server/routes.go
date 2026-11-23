@@ -638,9 +638,10 @@ func (s *Server) refuseTaken(w http.ResponseWriter, r *http.Request, taken *driv
 	refuseWith(w, r, http.StatusConflict, map[string]any{"exists": kind, "name": taken.Name}, message, taken.Name)
 }
 
-// readBody reads a small JSON body into v. ok is false when the person was already answered.
+// readBody reads a small JSON body into v, which must arrive within bodyWait (answers.go). ok is false when the person
+// was already answered.
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(v); err != nil {
+	if err := readSmall(w, r, v); err != nil {
 		s.refuse(w, r, http.StatusBadRequest, unreadable)
 		return false
 	}

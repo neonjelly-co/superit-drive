@@ -82,24 +82,29 @@ func (s *Server) guardVisitor(w http.ResponseWriter, r *http.Request, rt route) 
 		}
 		return
 	}
-	defer leave()
-	c, ok := s.throughLink(w, r, rt)
+	// The answer is kept while the turn is held, and sent once it is given back (answers.go): a visitor who does not
+	// take their page keeps nobody else waiting.
+	held := &heldAnswer{ResponseWriter: w, most: visitorAnswerMost}
+	defer func() { leave(); s.sendHeld(r, held) }()
+	c, ok := s.throughLink(held, r, rt)
 	if !ok {
 		return
 	}
 	if !access.Decide(c.person, rt.action, c.access) || rt.serve == nil {
 		if rt.serve != nil && access.SwitchedOff(c.person, rt.action, c.access) {
 			// The token matched, and the link would open this: it is not "not here", only not now.
-			s.switchedOff(w, r, c)
+			s.switchedOff(held, r, c)
 			return
 		}
-		s.refuse(w, r, http.StatusNotFound, notHere)
+		s.refuse(held, r, http.StatusNotFound, notHere)
 		return
 	}
 	if rt.action == access.DownloadThroughLink || rt.action == access.UploadThroughLink {
 		leave() // it waits for its transfer slot in the outsiders' own line, which bounds them by itself
+		rt.serve(w, r, c)
+		return
 	}
-	rt.serve(w, r, c)
+	rt.serve(held, r, c)
 }
 
 // throughLink finds, for a visitor, the link their address names (whatever the token is: see drive.LinkByToken), the

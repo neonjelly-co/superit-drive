@@ -76,6 +76,8 @@ type Server struct {
 	// visitors bounds how many visitors' requests are worked on at once (visitors.go); guests how many guests' (and
 	// requests to sign in as one).
 	visitors, guests *admission
+	// heldGoing is how many bytes of long answers kept for visitors and guests wait to be taken (answers.go).
+	heldGoing atomic.Int64
 	// codeKey keys the HMAC of the codes mailed to guests (guests.go): derived from the header secret, which the index
 	// never holds.
 	codeKey []byte
@@ -595,7 +597,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", memberPolicy)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cross-Origin-Resource-Policy", "same-origin")
@@ -603,12 +604,21 @@ func securityHeaders(next http.Handler) http.Handler {
 			h.Set("X-Robots-Tag", "noindex, nofollow")
 			h.Set("Cache-Control", "no-store")
 			if !underGuestPrefix(r.URL.Path) {
-				h.Set("Content-Security-Policy", visitorPolicy)
 				h.Set("Referrer-Policy", "no-referrer")
 			}
 		}
+		h.Set("Content-Security-Policy", policyFor(r.URL.Path))
 		next.ServeHTTP(w, r)
 	})
+}
+
+// policyFor is the Content-Security-Policy of an answer at path, unless it is a page that sets its own: the
+// visitors' under the public prefix, the members' anywhere else (the guests' part of the prefix included).
+func policyFor(path string) string {
+	if underPublicPrefix(path) && !underGuestPrefix(path) {
+		return visitorPolicy
+	}
+	return memberPolicy
 }
 
 // memberPolicy is the Content-Security-Policy of the interface's pages, the members' and the guests': nothing but the

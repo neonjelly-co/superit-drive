@@ -46,6 +46,11 @@ const codesWaiting = 64
 // whose session the cookie names (or nobody, which only signing in allows), the place and the item the request is
 // about and the access given on the way down to it, then access.Decide for the guest.
 func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
+	// The small body of a change is read before a turn is taken (answers.go), so that a body that does not arrive
+	// keeps none. An upload's bytes are not: it leaves its turn before it reads any.
+	if rt.action != access.UploadAsGuest && !s.bodyFirst(w, r, guestBodyMost) {
+		return
+	}
 	leave, ok := s.guests.enter(r.Context())
 	if !ok {
 		if r.Context().Err() == nil {
@@ -54,7 +59,12 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 		}
 		return
 	}
-	defer leave()
+	// The answer is kept while the turn is held, and sent once it is given back: a guest (or anybody) who does not take
+	// it keeps nobody else waiting.
+	real := w
+	held := &heldAnswer{ResponseWriter: real, most: guestAnswerMost}
+	w = held
+	defer func() { leave(); s.sendHeld(r, held) }()
 	if !s.fromOwnPage(r) {
 		s.log.Warn("refused a change that did not come from the Drive's own pages",
 			"method", r.Method, "path", r.URL.Path, "origin", r.Header.Get("Origin"), "address", s.origin)
@@ -88,8 +98,13 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 		s.refuse(w, r, http.StatusNotFound, notHere)
 		return
 	}
-	if rt.action == access.DownloadAsGuest || rt.action == access.UploadAsGuest {
+	switch {
+	case rt.action == access.DownloadAsGuest || rt.action == access.UploadAsGuest:
 		leave() // it waits for its transfer slot in the outsiders' own line, which bounds them by itself
+		w = real
+	case rt.action == access.SignInAsGuest && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		leave() // the guests' page and the interface's files: the Drive's own bytes, which need nothing of it to send
+		w = real
 	}
 	rt.serve(w, r, c)
 }

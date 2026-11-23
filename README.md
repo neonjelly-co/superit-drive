@@ -860,7 +860,10 @@ addresses.
 at most 8 of the 32 slots, in a line of their own (shared with guests), and at most 64 visitors wait in it at once, and
 at most 64 outsiders' turns keep a place in it (more are told 503 at once); a transfer that moves nothing for two
 minutes is ended. Besides transfers, at most 16 visitors' requests are worked on at once, and 64 more wait up to 5
-seconds; more are answered 503 at once. Trying tokens costs a hash and one look in the index, with no lock and no log
+seconds; more are answered 503 at once. A turn is for the Drive's own work, never for a connection: a page is made
+while its turn is held and sent after the turn is given back, to be taken within 30 seconds (long pages waiting to be
+taken hold 8 MiB together at most; one more is told 503), and the small body of a change (a guest's, read before any
+turn is taken; a member's too) must arrive within 15 seconds. Trying tokens costs a hash and one look in the index, with no lock and no log
 line. A zip is bounded as for members (10,000 entries).
 
 #### Upload-only links
