@@ -93,6 +93,39 @@ func TestARequestThatStopsWaitingLosesItsPlace(t *testing.T) {
 	}
 }
 
+// Whoever gives up is out of the line at once, not when a slot is next handed on: while outsiders hold their whole
+// share, none is handed to their line, and those who came and left meanwhile would be kept without bound.
+func TestThoseWhoLeaveAreNotKeptInLine(t *testing.T) {
+	for _, c := range []Class{Members, Outsiders} {
+		g := NewGate(1, 1)
+		hold, _ := g.Wait(context.Background(), c, time.Second)
+		length := func() int { g.mu.Lock(); defer g.mu.Unlock(); return len(g.lines[c]) }
+
+		// One stays waiting throughout, in the middle of those who leave.
+		stays := waitAs(g, context.Background(), c)
+		for i := range 3 * MaxOutsidersWaiting {
+			if i%2 == 0 { // hung up
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				if _, err := g.Wait(ctx, c, time.Minute); !errors.Is(err, context.Canceled) {
+					t.Fatalf("class %d: one who hung up: %v", c, err)
+				}
+			} else if _, err := g.Wait(context.Background(), c, time.Millisecond); !errors.Is(err, ErrBusy) { // waited too long
+				t.Fatalf("class %d: one who waited too long: %v", c, err)
+			}
+			if n := length(); n != 1 {
+				t.Fatalf("class %d: the line holds %d after %d came and left, want only the one still waiting", c, n, i+1)
+			}
+		}
+		hold()
+		release := taken(t, "the one still waiting", stays)
+		if n := length(); n != 0 {
+			t.Fatalf("class %d: the line holds %d with nobody waiting", c, n)
+		}
+		release()
+	}
+}
+
 func TestAKeyKeepsItsPlaceInLine(t *testing.T) {
 	g := NewGate(1, 1)
 	g.hold = 200 * time.Millisecond
