@@ -177,126 +177,94 @@ func (x *Index) BecomeMember(ctx context.Context, guest int64, userID string, ke
 	})
 }
 
-// Limits on guests' codes, which the caller passes.
+// Limits on guests' codes, which the caller passes. A code is the long secret a sign-in link carries.
 type CodeLimits struct {
-	// ValidFor is how long a code works after it was sent; Tries how many wrong tries kill it.
+	// ValidFor is how long a code works after it was sent.
 	ValidFor time.Duration
-	Tries    int
-	// PerGuest is how many codes one guest may be sent within Window; Overall how many all guests together.
-	PerGuest, Overall int
-	Window            time.Duration
-	// Wrong is how many wrong tries of live codes the Drive takes within Window, from everyone together.
-	Wrong int
+	// Every is how long after a code was sent to a guest, and not used yet, the next one may be: asked for sooner, none
+	// is sent, and the one sent then still works (ValidFor must be longer, so that the guest always has a code that
+	// works within reach). Once they have used it, they may be sent another at once.
+	Every time.Duration
+	// Overall is how many codes all guests together may be sent within Window: a bound on the mail the sign-in page can
+	// make the Drive send, set well above what a few addresses reach.
+	Overall int
+	Window  time.Duration
 }
 
-// IssueCode records a code just mailed to the guest, whose hash (an HMAC) is given, at the time given, and spends
-// every other code of theirs, if fewer than limits.PerGuest codes were sent to them, and fewer than limits.Overall to
-// everyone, within limits.Window before it. ok is false otherwise, and nothing changes: the code must not be sent.
-func (x *Index) IssueCode(ctx context.Context, guest int64, hash []byte, at time.Time, limits CodeLimits) (ok bool, err error) {
-	err = x.write(ctx, func(tx *sql.Tx) error {
-		since := at.Add(-limits.Window).UnixMilli()
-		var mine, all int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM guest_codes WHERE guest_id = ? AND sent_at > ?`, guest, since).Scan(&mine); err != nil {
-			return err
-		}
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM guest_codes WHERE sent_at > ?`, since).Scan(&all); err != nil {
-			return err
-		}
-		if mine >= limits.PerGuest || all >= limits.Overall {
-			return nil
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE guest_codes SET spent = 1 WHERE guest_id = ? AND spent = 0`, guest); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO guest_codes (guest_id, code_hash, sent_at) VALUES (?, ?, ?)`,
-			guest, hash, at.UnixMilli()); err != nil {
-			return err
-		}
-		ok = true
-		return nil
-	})
-	return ok && err == nil, err
-}
-
-// TryResult is what a try of a code came to.
-type TryResult int
+// IssueResult is what asking for a code came to.
+type IssueResult int
 
 const (
-	// Wrong: the code is not the guest's newest live code, or there is none (or no such guest).
-	Wrong TryResult = iota
-	// SignedIn: it was, and it is spent now.
-	SignedIn
-	// TooManyTries: so many wrong codes were tried lately, by everyone together, that no try is taken now.
-	TooManyTries
+	// Issued: the code was recorded, and may be sent.
+	Issued IssueResult = iota
+	// TooSoon: a code was sent to the guest within limits.Every and is not used yet; it works, and no other is sent.
+	TooSoon
+	// TooMany: limits.Overall codes were sent to everyone within limits.Window; none is sent now.
+	TooMany
 )
 
-// wrongTries is the row of guest_limits that counts the wrong tries of live codes.
-const wrongTries = "wrong codes"
-
-// TryCode tries a code for the address, whose hash (an HMAC, made as IssueCode's was) is typed, at the time given.
-//
-// Every try does the same work, whatever the address: one change, which holds the count of wrong tries of everyone
-// together, so that how long it takes does not tell whether the address has a code (or anything shared with it). A try
-// of the guest's newest live code (not spent, sent within limits.ValidFor, fewer than limits.Tries wrong tries) that
-// matches signs them in and spends it; one that does not counts as a wrong try of it, and towards limits.Wrong. While
-// limits.Wrong wrong tries were made within limits.Window, no try is taken.
-func (x *Index) TryCode(ctx context.Context, address string, typed []byte, at time.Time, limits CodeLimits) (guest Guest, result TryResult, err error) {
+// IssueCode records a code about to be mailed to the guest, whose hash (an HMAC) is given, at the time given, unless
+// one was sent to them within limits.Every and not used (TooSoon), or limits.Overall to everyone within limits.Window (TooMany):
+// then nothing changes, and the code must not be sent. A guest's earlier codes go on working until they end or one of
+// them is used: whoever asks in a guest's name makes none of theirs useless.
+func (x *Index) IssueCode(ctx context.Context, guest int64, hash []byte, at time.Time, limits CodeLimits) (result IssueResult, err error) {
 	err = x.write(ctx, func(tx *sql.Tx) error {
-		guest, result = Guest{}, Wrong
-		windowStart, count := at.UnixMilli(), 0
-		var start int64
-		var n int
-		switch err := tx.QueryRowContext(ctx, `SELECT window_start, count FROM guest_limits WHERE name = ?`, wrongTries).Scan(&start, &n); {
-		case errors.Is(err, sql.ErrNoRows):
-		case err != nil:
-			return err
-		case start > at.Add(-limits.Window).UnixMilli():
-			windowStart, count = start, n
-		}
-		save := func() error {
-			_, err := tx.ExecContext(ctx, `
-				INSERT INTO guest_limits (name, window_start, count) VALUES (?, ?, ?)
-				ON CONFLICT (name) DO UPDATE SET window_start = excluded.window_start, count = excluded.count`,
-				wrongTries, windowStart, count)
+		result = Issued
+		var mine, all int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM guest_codes WHERE guest_id = ? AND spent = 0 AND sent_at > ?`,
+			guest, at.Add(-limits.Every).UnixMilli()).Scan(&mine); err != nil {
 			return err
 		}
-		if count >= limits.Wrong {
-			result = TooManyTries
-			return save()
+		if mine > 0 {
+			result = TooSoon
+			return nil
 		}
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM guest_codes WHERE sent_at > ?`,
+			at.Add(-limits.Window).UnixMilli()).Scan(&all); err != nil {
+			return err
+		}
+		if all >= limits.Overall {
+			result = TooMany
+			return nil
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO guest_codes (guest_id, code_hash, sent_at) VALUES (?, ?, ?)`,
+			guest, hash, at.UnixMilli())
+		return err
+	})
+	return result, err
+}
+
+// UseCode signs the guest with the address in with a code, whose hash (an HMAC, made as IssueCode's was) is given, at
+// the time given: ok when it is one of that guest's codes, sent within limits.ValidFor and not used yet. It is used
+// then, and works no more; their other codes are as they were.
+//
+// A code is too long to guess, so nothing counts wrong tries: no number of them, for any address, stops a right code
+// from signing its guest in. A try is one look for the hash, the same whatever the address, so how long it takes does
+// not tell whether the address is a guest's.
+func (x *Index) UseCode(ctx context.Context, address string, hash []byte, at time.Time, limits CodeLimits) (guest Guest, ok bool, err error) {
+	err = x.write(ctx, func(tx *sql.Tx) error {
+		guest, ok = Guest{}, false
 		var id int64
-		var held []byte
 		g, err := scanGuest(tx.QueryRowContext(ctx, `
-			SELECT guests.id, guests.address, IFNULL(c.id, 0), IFNULL(c.code_hash, zeroblob(32)) FROM guests
-			LEFT JOIN guest_codes AS c ON c.id = (
-				SELECT id FROM guest_codes WHERE guest_id = guests.id AND spent = 0 AND sent_at > ? AND tries < ?
-				ORDER BY sent_at DESC, id DESC LIMIT 1)
-			WHERE guests.address = ?`, at.Add(-limits.ValidFor).UnixMilli(), limits.Tries, address), &id, &held)
-		if err != nil && !errors.Is(err, ErrNoGuest) {
+			SELECT guests.id, guests.address, c.id FROM guest_codes AS c JOIN guests ON guests.id = c.guest_id
+			WHERE c.code_hash = ? AND guests.address = ? AND c.spent = 0 AND c.sent_at > ?`,
+			hash, address, at.Add(-limits.ValidFor).UnixMilli()), &id)
+		if errors.Is(err, ErrNoGuest) {
+			return nil
+		}
+		if err != nil {
 			return err
 		}
-		if len(held) != len(typed) {
-			held = make([]byte, len(typed))
+		if _, err := tx.ExecContext(ctx, `UPDATE guest_codes SET spent = 1 WHERE id = ?`, id); err != nil {
+			return err
 		}
-		matches := subtle.ConstantTimeCompare(held, typed) == 1
-		switch {
-		case id != 0 && matches:
-			if _, err := tx.ExecContext(ctx, `UPDATE guest_codes SET spent = 1 WHERE guest_id = ?`, g.ID); err != nil {
-				return err
-			}
-			guest, result = g, SignedIn
-		case id != 0:
-			if _, err := tx.ExecContext(ctx, `UPDATE guest_codes SET tries = tries + 1 WHERE id = ?`, id); err != nil {
-				return err
-			}
-			count++
-		}
-		return save()
+		guest, ok = g, true
+		return nil
 	})
 	if err != nil {
-		return Guest{}, Wrong, err
+		return Guest{}, false, err
 	}
-	return guest, result, nil
+	return guest, ok, nil
 }
 
 // StartSession records a session of the guest, whose token's SHA-256 is hash, from started until ends, and keeps at

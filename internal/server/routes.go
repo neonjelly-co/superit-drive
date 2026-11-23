@@ -137,7 +137,7 @@ func (s *Server) routes() []route {
 		{pattern: "GET /s/{token}/items/{item}/zip", action: access.DownloadThroughLink, link: "token", item: "item", serve: s.zip},
 		{pattern: "POST /s/{token}/files", action: access.UploadThroughLink, link: "token", serve: s.sendIn},
 
-		// The guests' part of the public prefix (guests.go): signing in with a code mailed to them, their pages, and what
+		// The guests' part of the public prefix (guests.go): signing in with a link mailed to them, their pages, and what
 		// they do with what was given to them. Always a guest here (by the session their cookie names) or nobody; never
 		// a member, whatever the request says. A change needs the Drive's own Origin, as a member's does. A guest is never
 		// given a place's top folder, so every route in a place names an item, or an upload in progress.

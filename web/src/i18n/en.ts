@@ -515,13 +515,11 @@ export const en = {
 		driveOf: (project: string) => `Drive of ${project}`,
 		signInTitle: "Sign in to see what was shared with you",
 		signInNote:
-			"Someone in this project shared files with your email address. Confirm it, and we mail you a code. You need no account and no password.",
+			"Someone in this project shared files with your email address. Confirm it, and we mail you a link that signs you in. You need no account and no password.",
 		yourAddress: "Your email address",
-		sendCode: "Send me a code",
+		sendLink: "Send me a sign-in link",
 		sentTo: "Sent to {address}. Check your spam folder too.",
-		theCode: "The code from the mail",
-		signIn: "Sign in",
-		anotherCode: "Send another code",
+		openItHere: "Open the link in this browser: it signs in the browser it is opened in. You can close this tab.",
 		anotherAddress: "Use another address",
 		signOut: "Sign out",
 		unavailable: (project: string) =>

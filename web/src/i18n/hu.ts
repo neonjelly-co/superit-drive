@@ -522,13 +522,11 @@ export const hu: Messages = {
 		driveOf: (project) => `${project} Drive-ja`,
 		signInTitle: "Lépj be, hogy lásd, mit osztottak meg veled",
 		signInNote:
-			"Valaki ebből a projektből fájlokat osztott meg az e-mail-címeddel. Erősítsd meg, és küldünk rá egy kódot. Nem kell hozzá fiók és jelszó.",
+			"Valaki ebből a projektből fájlokat osztott meg az e-mail-címeddel. Erősítsd meg, és küldünk rá egy linket, amellyel beléphetsz. Nem kell hozzá fiók és jelszó.",
 		yourAddress: "Az e-mail-címed",
-		sendCode: "Kérek egy kódot",
+		sendLink: "Kérek egy belépési linket",
 		sentTo: "Elküldve ide: {address}. Nézd meg a levélszemét mappát is.",
-		theCode: "Az e-mailben kapott kód",
-		signIn: "Belépés",
-		anotherCode: "Új kód kérése",
+		openItHere: "Ebben a böngészőben nyisd meg a linket: azt a böngészőt lépteti be, amelyikben megnyitod. Ezt a lapot bezárhatod.",
 		anotherAddress: "Másik cím",
 		signOut: "Kilépés",
 		unavailable: (project) =>

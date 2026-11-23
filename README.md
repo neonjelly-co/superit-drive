@@ -23,7 +23,7 @@ guest, My files, shared folder, Drive storage, trash). The Drive also runs witho
 - Members do not sign in to the Drive. A reverse proxy in front of it signs them in and adds headers saying who they
   are (see below). Everyone else comes in under one public prefix, `/s/`, which the reverse proxy opens without sign-in:
   visitors with a public link, who open and download what it is on or, through an upload-only link, send files into a
-  folder and see nothing of it (see [Public links](#public-links)), and guests, who sign in there with a code mailed to
+  folder and see nothing of it (see [Public links](#public-links)), and guests, who sign in there with a link mailed to
   them (see [Guests](#guests)). Every route passes through one authorisation function, `internal/access`.
 
 ### Signing in: headers and the member list
@@ -425,9 +425,9 @@ anyone in by itself, and nothing that only one server can honour:
 
 | Left out | Why |
 |---|---|
-| Guests' sessions (`guest_sessions`: each token's SHA-256) | A session is one browser's on one server. A hash cannot be turned back into a token, but a planted session would sign someone in; a Drive on a new server starts with none, and guests sign in again with a new code. |
-| Codes mailed to guests (`guest_codes`: HMACs) | They last ten minutes, and are keyed from `DRIVE_HEADER_SECRET`, which a new server does not have. |
-| The limits on trying codes (`guest_limits`) | Counters of the last hour on one server. |
+| Guests' sessions (`guest_sessions`: each token's SHA-256) | A session is one browser's on one server. A hash cannot be turned back into a token, but a planted session would sign someone in; a Drive on a new server starts with none, and guests sign in again with a new link. |
+| Codes of the sign-in links mailed to guests (`guest_codes`: HMACs) | They last thirty minutes, and are keyed from `DRIVE_HEADER_SECRET`, which a new server does not have. |
+| `guest_limits` | Counters an earlier version kept of wrong codes; nothing is counted there now. |
 | Uploads in progress (`uploads`) | Their uploader's browser on the old server; their files in `.superit-drive/uploads/` are removed a day after they were last written to, as any the index does not know. |
 | Where the walk is (`walk_cursor`, `walk_started`, `walk_finished`) | By one server's clock; a Drive started from a copy walks the storage at once, from the top. |
 
@@ -465,7 +465,7 @@ always bring it (a file put there since has the access of its folder; what is go
 its link with it, and dropped ten minutes later), and an item deleted since, which the copy has where it was, is found
 in its entry of the trash as itself, with what was given on it and its link, which work again when it is restored. The
 log says which copy it was, when it was copied, and how many places, items, shares, managers, links, guests and acts it
-brought; guests sign in again with a new code.
+brought; guests sign in again with a new link.
 
 - **A copy made by a newer Drive** (its schema is newer than this one's): the Drive does not start, and says so. An
   index built without it would soon put a copy without the shares in its place. Start a version as new as the one that
@@ -505,7 +505,7 @@ is there. Through a copy they planted or changed, they can give more than the fi
 - access to any file in the Drive to any member (a grant), or a member's My files to another member, or the manager role
   on shared folders;
 - public links whose address they chose (anyone with it reaches those files through the Drive, until the link is
-  removed), and invitations to addresses they control (to sign in, a guest still needs the code mailed to that address);
+  removed), and invitations to addresses they control (to sign in, a guest still needs the link mailed to that address);
 - sharing outside the project switched back on, where it was off;
 - an act under way that hands over or deletes a held My files (it changes only what is in the Drive's folder), and a
   record of acts that never happened, or without those that did;
@@ -572,7 +572,7 @@ storage, made by the newer version (see [Starting from a copy](#starting-from-a-
 | The newer version's schema | The older Drive starts from | Kept | Lost |
 |---|---|---|---|
 | Newer (a migration the older version lacks) | The data folder's copy: the snapshot, the index as the older version left it when it stopped for the upgrade. The log says `THE COPY OF THE INDEX ON THE STORAGE IS LEFT ALONE` (`level=ERROR`). | Everything in the index from before the upgrade, guests' sessions included. The files on the storage as the newer version left them, taken in by the walk as after any start from a copy: a file added under it has the access of its folder, and one deleted under it is in the trash as itself. | What changed in the index under the newer version: shares, links, guests' invitations and sessions, shared folders and their managers, switches, acts on held My files. A file moved or renamed under it loses what was given on it: it is a new item at its new place, with the access of its folder. All of it but guests' sessions is in the newer copy, which the Drive moves aside on the storage, as `newer-version-<when>-copy-<number>.sqlite`, and keeps. |
-| The same | The newer version's last copy on the storage, numbered after the snapshot's. The log says the Drive made its index from the copy on the storage. | What changed in the index under the newer version, up to its last copy (the copy it makes as it stops holds every change, unless it was killed). The files on the storage, as above. | Guests' sessions (a copy on the storage holds none: guests sign in again, with a new code), and, when the newer version was killed rather than stopped, what changed after its last copy. |
+| The same | The newer version's last copy on the storage, numbered after the snapshot's. The log says the Drive made its index from the copy on the storage. | What changed in the index under the newer version, up to its last copy (the copy it makes as it stops holds every change, unless it was killed). The files on the storage, as above. | Guests' sessions (a copy on the storage holds none: guests sign in again, with a new link), and, when the newer version was killed rather than stopped, what changed after its last copy. |
 
 **Access removed under the newer version is back.** In the first row, "what changed in the index under the newer
 version" is lost both ways: what was given under it is gone, and what was *taken away* under it works again. A public
@@ -1026,16 +1026,29 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   outside the project is switched off, what was given to them answers 403 with `"unavailable": true` and says so, their
   "Shared with me" leaves it out (not even its name) and says `"unavailable": true`, and they stay signed in: it works
   again, in the same session, when it is switched back on.
-- **Signing in.** The guests' page asks for their address and mails a code: six digits from `crypto/rand`, only the
-  newest of their codes works, once, for 10 minutes, and not after five wrong tries; at most five codes are sent to an
-  address an hour, and at most 100 to all addresses together. A code is sent only to a guest's address with something
-  shared with it that lets them in now (or will once sharing outside the project is switched back on where it is), and
-  never to a member's; the page says the same, at once, for every address
-  (the work is done afterwards, one address at a time, and nothing is logged about an address that is no guest's). Every
-  try of a code does the same work whatever the address; past 100 wrong tries of live codes in an hour, from everyone
-  together, no try is taken (429) until the hour has passed. The index keeps only each code's HMAC-SHA-256, keyed with a
-  key made from `DRIVE_HEADER_SECRET`, which the index never holds.
-- **Staying signed in.** The right code starts a session of 30 days on that browser, kept by the Drive (the index keeps
+- **Signing in.** The guests' page asks for their address and mails it a sign-in link: the guests' page, with the
+  address and a code after the `#` (which no browser sends by itself, so it reaches no log and no other site). Opened,
+  the page sends the code with the address, as a change from the Drive's own page, and the guest is signed in in that
+  browser; a program that only fetches the links in a mail signs nobody in and uses nothing up. The code is 32 bytes
+  from `crypto/rand` (43 characters), far too long to guess, and works once, for 30 minutes. So nothing a stranger does
+  at the sign-in page takes a guest's sign-in away:
+  - wrong codes are not counted, for one address or for all: no number of them stops a right link from working;
+  - asking again leaves the links already mailed working; while one mailed in the last 5 minutes is not used yet, no
+    other is sent to that address (the answer says so to everyone), so that address gets one mail in 5 minutes at most,
+    and always has a link that works; once a link is used, another can be asked for at once;
+  - an address waits once to be sent a link, however often it is asked for; 64 addresses wait at most, and the rest are
+    dropped, answered the same;
+  - all addresses together are sent 1,000 links an hour at most, a bound on the mail the page can make the Drive send
+    that takes more than eighty guests' addresses, asked for without pause, to reach.
+
+  Reaching any of these is logged, once a minute at most, without any address. A link is sent only to a guest's address
+  with something shared with it that lets them in now (or will once sharing outside the project is switched back on
+  where it is), and never to a member's; the page says the same, at once, for every address (the work is done
+  afterwards, one address at a time, and nothing is logged about an address that is no guest's). A try of a code is one
+  look for it, the same whatever the address. The index keeps only each code's HMAC-SHA-256, keyed with a key made from
+  `DRIVE_HEADER_SECRET`, which the index never holds. A guest who reads their mail on another device than the one they
+  want to work on opens the link there: the link signs in the browser it is opened in.
+- **Staying signed in.** The link starts a session of 30 days on that browser, kept by the Drive (the index keeps
   its token's SHA-256; the browser the token, in a cookie): `__Secure-drive-guest` (`drive-guest` when `DRIVE_ADDRESS`
   is plain HTTP), `Path=/s/guest`, `HttpOnly`, `Secure` with HTTPS, `SameSite=Lax` (so it comes along when a guest opens
   the Drive from their mail, and never with another site's change). A guest stays signed in on at most ten browsers;
@@ -1043,7 +1056,7 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   or ends (the guest is removed with it, and their codes, sessions and uploads in progress); when nothing given to them
   lets them in any more (in the trash, gone from the storage, in the My files of someone who left, its giver may no
   longer share it), sharing outside the project switched off aside; and when their address appears in the member list.
-  Signed out, they sign in again with a new code.
+  Signed out, they sign in again with a new link.
 - **A guest who joins the project** (their address appears in the member list) keeps their access as a member: within a
   second of the list changing (and when the Drive starts), every invitation to them that works at that moment becomes
   a grant to that member by user id, with its end date, and the guest is removed. An invitation that does not work then
@@ -1069,8 +1082,10 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
 
 ```
 GET    /s/guest/                                      the guests' page (and /s/guest/assets/…, /s/guest/favicon.svg)
-POST   /s/guest/api/code                {"address"}   202, the same for every address
-POST   /s/guest/api/sign-in             {"address", "code"}   200 and the cookie; 400 not right; 429 too many tries
+POST   /s/guest/api/code                {"address"[, "place", "item"]}   202, the same for every address: a sign-in
+                                        link is mailed (to where the guest was going, when the page says)
+POST   /s/guest/api/sign-in             {"address", "code"}   the link's code: 200 and the cookie; 400 not right,
+                                        used, or more than 30 minutes old
 POST   /s/guest/api/sign-out                          204
 GET    /s/guest/api/me                                {"address", "project"}; 401 {"signIn": true} when not signed in
 GET    /s/guest/api/shared-with-me                    {"items": [{…, "can", "place", "role", "sharedBy", "until"}]}
@@ -1105,7 +1120,7 @@ Where it is off (the project's switch, or the shared folder's; `access.Place.NoS
 - **No public link opens**: a visitor whose link would open what they ask for gets the page "This link is not
   available" (403), anything else the one answer for a link that does not exist. No link is made.
 - **No guest gets in**: what was given to a guest answers 403, `{"unavailable": true, "error"}`; their "Shared with me"
-  leaves it out and says `"unavailable": true`. They stay signed in (and can sign in, and be sent a code), to be told
+  leaves it out and says `"unavailable": true`. They stay signed in (and can sign in, and be sent a link), to be told
   so. No guest is invited, and no invitation's role or end date changed.
 - **What was made stays as it is**: whoever may share an item still sees its link and its guests, each saying it does
   not work now (`"works": false`), and removes them; "who can see this" and the list's sentence no longer count them.
@@ -1177,13 +1192,13 @@ list it has now, at every request, so someone added back with the same user id f
 - **Their My files is held**: kept as it is, its trash included, and closed to everyone, project admins included
   (`access.Place.OwnerLeft`). Nothing shared from it opens: its public links answer as links that do not exist,
   invitations let no guest in (a guest with nothing else that lets them in is signed out at their next request, and
-  is sent no code), what was shared with members or with everyone opens nothing and leaves their "Shared with me", and a
+  is sent no link), what was shared with members or with everyone opens nothing and leaves their "Shared with me", and a
   search finds nothing in it. The public links they made and the guests they invited in someone else's My files stop too
   (they were their shares; what they gave members there stays, for that My files' owner to take away); what they did in
   a shared folder is the project's and goes on: its files, its links, its guests and what they gave on it.
 - **Back with the same user id** (a list briefly wrong, a mistake undone, a new address), they have it back as it was,
   with their trash, and everything shared from it works again; a guest who was signed out meanwhile signs in again with
-  a new code. People are told apart by user id, never by address: two members swapping addresses keep their own files.
+  a new link. People are told apart by user id, never by address: two members swapping addresses keep their own files.
   (Its top folder on the storage keeps the name of their address when they first opened the Drive.)
 - **Until a project admin decides.** Held lasts as long as it takes: nothing ends it but a project admin's act, a
   hand-over or a deletion, each of the held My files as a whole, at its top folder (`access.HandOverHeld`,
@@ -1364,7 +1379,7 @@ about anyone's language is kept on the server: no setting, no cookie, nothing in
   guests at the top of their page), kept in that browser (`localStorage`); otherwise the first of the browser's
   languages that the Drive speaks; English when it names neither. Switching loads the page again in the other language.
   A page is never in two: it loads its words before it shows anything.
-- **The Drive's own answers** (the `"error"` of every refusal, `guests.why` in `GET /api/me`, the guests' "a code is on
+- **The Drive's own answers** (the `"error"` of every refusal, `guests.why` in `GET /api/me`, the guests' "a sign-in link is on
   its way") are in the language of the request: its `lang` query parameter when that is `en` or `hu`, otherwise the one
   of the two its `Accept-Language` prefers (by weight, then order; English when it names neither), with
   `Content-Language` saying which. The interface sends `Accept-Language` with its page's language on every call, and adds
@@ -1376,7 +1391,7 @@ about anyone's language is kept on the server: no setting, no cookie, nothing in
   (`data-words`), so one script, and one hash in the policy, serves both languages. It sends each file with the page's
   `lang`, so a refusal is in the page's language too.
 - **Mail** is in the language of the page whose act sends it: "shared with you" in the language of the member who
-  shared, an invitation in the inviting member's, a guest's code in the language of the guests' page that asked for it.
+  shared, an invitation in the inviting member's, a guest's sign-in link in the language of the guests' page that asked for it.
   The Drive knows no other language of the person it mails.
 - What only the people running the Drive read stays in English: the log, the settings' errors, and the storage check's
   output (which the daemon reads).
@@ -1414,7 +1429,7 @@ sentence's subject; and a noun after a number stays singular (3 elem). Dates and
 ### Mail
 
 The Drive sends three kinds of mail: "shared with you", to a member something was just shared with by name; an
-invitation, to a guest invited to something; and the codes guests sign in with (see [Guests](#guests)). With
+invitation, to a guest invited to something; and the links guests sign in with (see [Guests](#guests)). With
 `DRIVE_SMTP_HOST` empty it sends none and attempts none: sharing with members and public links work the same, and
 inviting guests is unavailable. The line the Drive logs at start says where mail goes
 (`mail="smtp.example.com:587 (starttls)"`) or `mail=off`. Whether mail works is what the last mail sent, or the last
@@ -1442,7 +1457,7 @@ not; inviting a guest checks again when that has run out.
   `DRIVE_SMTP_TLS` says), signing in with `AUTH PLAIN` when there is a login; the server's certificate is checked
   against the system's authorities (the image has them). It uses Go's standard library only.
 - **Never in the way:** a mail is queued (up to 64) and sent in the background, one at a time, within 30 seconds each;
-  the share is answered at once whatever happens to it. (A guest's code is sent by the guests' own sender in the
+  the share is answered at once whatever happens to it. (A guest's sign-in link is sent by the guests' own sender in the
   background, also never in the way of the page that asked.) A mail that fails is logged with what it was about (the
   recipient's user id, the place and item ids) and why, never with its text or the recipient's address, and is not
   tried again; so is one dropped because the queue is full. Mail still queued when the Drive stops is not sent.
@@ -1554,7 +1569,7 @@ everything a member can see, and several items can be selected to move, download
 who may share a file or folder make a public link to it, which anyone opens without signing in (or, on a folder, an
 upload-only link, through which anyone sends files in and sees nothing of what is there, up to 10 GB until it is
 reset), or invite someone
-outside the project by email address as a guest (with the mail settings), who signs in with a mailed code; project
+outside the project by email address as a guest (with the mail settings), who signs in with a mailed link; project
 admins see everything shared outside the project and the space each person and shared folder uses, and switch sharing
 outside the project off for the whole project (managers for one shared folder); when someone leaves the member list,
 their My files is held, unopened, until a project admin hands it to another member or deletes it. Large files

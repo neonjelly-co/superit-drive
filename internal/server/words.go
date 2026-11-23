@@ -111,9 +111,9 @@ var (
 	endHasPassed = text.M("The end date has passed. Choose one that is still to come, or none.",
 		"Ez a nap már elmúlt. Válassz egy későbbit, vagy ne adj meg semmit.")
 	// cannotInvite says why guests cannot be invited, after why mail does not work (%s).
-	cannotInvite = text.M("Inviting guests is unavailable: the Drive mails each guest an invitation and the codes they sign in with. "+
+	cannotInvite = text.M("Inviting guests is unavailable: the Drive mails each guest an invitation and the links they sign in with. "+
 		"%s Make a public link instead.",
-		"Vendéget most nem lehet meghívni: a Drive minden vendégnek e-mailben küldi a meghívót és a belépési kódokat. "+
+		"Vendéget most nem lehet meghívni: a Drive minden vendégnek e-mailben küldi a meghívót és a belépési linkeket. "+
 			"%s Készíts helyette nyilvános linket.")
 )
 
@@ -208,15 +208,13 @@ var (
 
 // Guests (guests.go).
 var (
-	codeAsked = text.M("If anything on this Drive is shared with this address, a code is on its way to it. It works for 10 minutes.",
-		"Ha ezen a Drive-on bármi meg van osztva ezzel a címmel, egy kód már úton van rá. 10 percig érvényes.")
-	wrongCode = text.M("This code is not right, or it no longer works. Check it, or ask for a new one.",
-		"Ez a kód nem jó, vagy már nem érvényes. Ellenőrizd, vagy kérj újat.")
-	tooManyCodes = text.M("Too many wrong codes were tried on this Drive in the last hour. Try again later.",
-		"Az elmúlt órában túl sok hibás kódot próbáltak ki ezen a Drive-on. Próbáld újra később.")
+	codeAsked = text.M("If anything on this Drive is shared with this address, a sign-in link is on its way to it. It works once, for 30 minutes. "+
+		"If one was sent to it in the last few minutes, use that one: no other is sent so soon.",
+		"Ha ezen a Drive-on bármi meg van osztva ezzel a címmel, egy belépési link már úton van rá. Egyszer használható, 30 percig. "+
+			"Ha az elmúlt néhány percben már ment rá link, azt használd: ilyen hamar nem megy újabb.")
+	wrongCode = text.M("This sign-in link no longer works: it was used already, or it is more than 30 minutes old. Ask for a new one.",
+		"Ez a belépési link már nem érvényes: egyszer már használták, vagy több mint 30 perces. Kérj újat.")
 	signInFirst = text.M("Sign in to see this.", "Jelentkezz be, hogy ezt lásd.")
-	sixDigits   = text.M("A code is six digits. Type it as the mail has it.",
-		"A kód hat számjegyből áll. Írd be úgy, ahogy az e-mailben áll.")
 )
 
 // Visitors with a public link: the answers, and the words of their pages (visitors.go, sendin.go).
@@ -331,7 +329,7 @@ var sendWordsOf = func() map[text.Lang]string {
 	return out
 }()
 
-// The Drive's own mail: "shared with you" to a member, an invitation to a guest, and a guest's code.
+// The Drive's own mail: "shared with you" to a member, an invitation to a guest, and a guest's sign-in link.
 var (
 	sharedFileWithYou = text.M("%s shared the file “%s” with you in the Drive of %s.",
 		"%s megosztott veled egy fájlt: „%s”. Projekt: %s.")
@@ -355,14 +353,14 @@ var (
 	guestCanEdit   = text.M("As an editor you can also upload, make folders, rename, move and delete inside it.",
 		"Szerkesztőként fel is tölthetsz bele, mappákat hozhatsz létre benne, és átnevezhetsz, áthelyezhetsz és törölhetsz benne.")
 	accessUntil   = text.M("You have access until %s.", "A hozzáférésed eddig tart: %s.")
-	confirmByCode = text.M("You will be asked to confirm your address with a code we mail to it. You need no account.",
-		"A címedet egy kóddal kell majd megerősítened, amelyet e-mailben küldünk. Fiók nem kell hozzá.")
+	confirmByCode = text.M("You will be asked to confirm your address: we mail it a link that signs you in. You need no account.",
+		"A címedet meg kell majd erősítened: e-mailben küldünk rá egy linket, amellyel beléphetsz. Fiók nem kell hozzá.")
 
-	codeSubject = text.M("Your code for the Drive of %s", "Belépési kód a Drive-hoz (%s)")
-	codeBody    = text.M("Your code is %s\n\nType it on the page where you asked for it. It works once, for 10 minutes.\n\n"+
-		"If you did not ask for it, you can ignore this mail: nobody can sign in without the code.\n",
-		"A kódod: %s\n\nÍrd be azon az oldalon, ahol kérted. Egyszer használható, 10 percig.\n\n"+
-			"Ha nem te kérted, nyugodtan hagyd figyelmen kívül ezt az e-mailt: a kód nélkül senki nem tud belépni.\n")
+	codeSubject = text.M("Sign in to the Drive of %s", "Belépés a Drive-ba (%s)")
+	codeBody    = text.M("Open this link to sign in:\n\n%s\n\nIt works once, for 30 minutes, and signs in the browser you open it in.\n\n"+
+		"If you did not ask for it, you can ignore this mail: nobody can sign in without the link.\n",
+		"Ezzel a linkkel léphetsz be:\n\n%s\n\nEgyszer használható, 30 percig, és abban a böngészőben léptet be, amelyikben megnyitod.\n\n"+
+			"Ha nem te kérted, nyugodtan hagyd figyelmen kívül ezt az e-mailt: a link nélkül senki nem tud belépni.\n")
 )
 
 // jsonOf is words as one JSON object, for the send page's data-words.

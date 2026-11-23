@@ -183,16 +183,25 @@ func guestAddress(typed string) (string, bool) {
 	return address, true
 }
 
-// guestLink is the address that leads a guest to what was shared with them: the guests' page, at the item, with their
-// address after the "#" (which a browser never sends), so the page can offer it to confirm.
-func (s *Server) guestLink(place, item int64, address string) string {
-	link := url.Values{"place": {strconv.FormatInt(place, 10)}, "item": {strconv.FormatInt(item, 10)}}
-	if s.address == nil {
-		return GuestPrefix + "/?" + link.Encode()
+// guestLink is the address that leads a guest to what was shared with them: the guests' page, at the item (the page
+// itself when place or item is 0), with their address after the "#" (which a browser never sends), so the page can
+// offer it to confirm; and, in a sign-in link, the code that signs them in, after it.
+func (s *Server) guestLink(place, item int64, address, code string) string {
+	link := url.Values{}
+	if place > 0 && item > 0 {
+		link = url.Values{"place": {strconv.FormatInt(place, 10)}, "item": {strconv.FormatInt(item, 10)}}
 	}
-	a := *s.address
+	after := "as=" + url.QueryEscape(address)
+	if code != "" {
+		after += "&code=" + code
+	}
+	a := url.URL{}
+	if s.address != nil {
+		a = *s.address
+	}
 	a.Path, a.RawPath, a.RawQuery = GuestPrefix+"/", "", link.Encode()
-	a.Fragment, a.RawFragment = "as="+address, "as="+url.QueryEscape(address)
+	a.Fragment, _ = url.QueryUnescape(after)
+	a.RawFragment = after
 	return a.String()
 }
 
@@ -214,7 +223,7 @@ func (s *Server) tellInvited(c call, guest index.Guest, role access.Role, ends t
 	if !ends.IsZero() {
 		lines = append(lines, accessUntil.In(l, text.Moment(l, ends)))
 	}
-	body := strings.Join(lines, "\n") + "\n\n" + openIt.In(l, s.guestLink(c.place.ID, c.item.ID, guest.Address)) + "\n\n" +
+	body := strings.Join(lines, "\n") + "\n\n" + openIt.In(l, s.guestLink(c.place.ID, c.item.ID, guest.Address, "")) + "\n\n" +
 		confirmByCode.In(l) + "\n"
 	s.mail.Send(mail.Message{
 		To:      guest.Address,

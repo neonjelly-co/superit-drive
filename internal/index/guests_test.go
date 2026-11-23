@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-var limits = CodeLimits{ValidFor: 10 * time.Minute, Tries: 5, PerGuest: 5, Overall: 100, Window: time.Hour, Wrong: 100}
+var limits = CodeLimits{ValidFor: 30 * time.Minute, Every: 5 * time.Minute, Overall: 100, Window: time.Hour}
 
 func code(c string) []byte { return bytes.Repeat([]byte(c[:1]), 32) }
 
@@ -58,8 +58,8 @@ func TestAGuestGoesWithTheirLastInvitation(t *testing.T) {
 	if err := x.StartSession(ctx, anna.ID, code("s"), now, now.Add(time.Hour), 10); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := x.IssueCode(ctx, anna.ID, code("c"), now, limits); err != nil || !ok {
-		t.Fatalf("a code for Anna: %v %v", ok, err)
+	if r, err := x.IssueCode(ctx, anna.ID, code("c"), now, limits); err != nil || r != Issued {
+		t.Fatalf("a code for Anna: %v %v", r, err)
 	}
 
 	// Taking one invitation away leaves her; removing Clients' item for good takes the last, and her with it.
@@ -125,115 +125,96 @@ func TestAGuestsSession(t *testing.T) {
 	}
 }
 
-// A code works once, for its time, while it is the guest's newest, and not after five wrong tries; at most five are
-// sent an hour to one guest. Wrong tries of live codes are counted for everyone together; every try writes the same.
+// A code works once, for its time, for its guest's address alone. Asking again leaves the codes already sent working,
+// and is answered with none while one was sent lately; wrong tries, however many and for whatever address, change
+// nothing. All guests together are sent a bounded number in an hour.
 func TestAGuestsCodes(t *testing.T) {
 	ctx := context.Background()
 	x := open(t)
 	now := time.Now()
 	bence := place(t, x, "u-bence")
 	clients := put(t, x, bence, 0, "Clients", true, 0)
-	anna, _, err := x.Invite(ctx, bence.ID, clients.ID, "anna@client.example", "viewer", time.Time{}, now, "u-bence")
-	if err != nil {
-		t.Fatal(err)
-	}
-	try := func(address, c string, at time.Time, l CodeLimits) TryResult {
+	anna, _, _ := x.Invite(ctx, bence.ID, clients.ID, "anna@client.example", "viewer", time.Time{}, now, "u-bence")
+	other, _, _ := x.Invite(ctx, bence.ID, clients.ID, "bob@other.example", "viewer", time.Time{}, now, "u-bence")
+	use := func(address, c string, at time.Time) bool {
 		t.Helper()
-		g, r, err := x.TryCode(ctx, address, code(c), at, l)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if (r == SignedIn) != (g == anna) {
-			t.Fatalf("a try answered %v with %+v", r, g)
-		}
-		return r
-	}
-	issue := func(c string, at time.Time) bool {
-		t.Helper()
-		ok, err := x.IssueCode(ctx, anna.ID, code(c), at, limits)
-		if err != nil {
-			t.Fatal(err)
+		g, ok, err := x.UseCode(ctx, address, code(c), at, limits)
+		if err != nil || (ok && g.Address != address) {
+			t.Fatalf("using code %s for %s: %+v %v", c, address, g, err)
 		}
 		return ok
 	}
-
-	if r := try(anna.Address, "1", now, limits); r != Wrong {
-		t.Fatalf("a try without a code: %v", r)
-	}
-	if !issue("1", now) {
-		t.Fatal("the first code was not issued")
-	}
-	if r := try(anna.Address, "2", now, limits); r != Wrong {
-		t.Fatalf("a wrong code: %v", r)
-	}
-	if r := try("someone@else.example", "1", now, limits); r != Wrong {
-		t.Fatalf("her code for another address: %v", r)
-	}
-	if r := try(anna.Address, "1", now.Add(11*time.Minute), limits); r != Wrong {
-		t.Fatalf("her code after 11 minutes: %v", r)
-	}
-	if r := try(anna.Address, "1", now.Add(time.Minute), limits); r != SignedIn {
-		t.Fatalf("her code: %v", r)
-	}
-	if r := try(anna.Address, "1", now.Add(time.Minute), limits); r != Wrong {
-		t.Fatalf("her code once used: %v", r)
+	issue := func(guest int64, c string, at time.Time) IssueResult {
+		t.Helper()
+		r, err := x.IssueCode(ctx, guest, code(c), at, limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
 	}
 
-	// Asking again spends the code before; five wrong tries kill one.
-	issue("3", now)
-	issue("4", now)
-	if r := try(anna.Address, "3", now, limits); r != Wrong {
-		t.Fatalf("an older code: %v", r)
+	if use(anna.Address, "1", now) {
+		t.Fatal("a code before any was sent")
 	}
-	for range 4 {
-		try(anna.Address, "5", now, limits)
+	if r := issue(anna.ID, "1", now); r != Issued {
+		t.Fatalf("the first code: %v", r)
 	}
-	if r := try(anna.Address, "4", now, limits); r != Wrong {
-		t.Fatalf("her newest code after five wrong tries: %v", r)
-	}
-	// Five codes an hour: she has had three; two more, then none until the hour has passed.
-	if !issue("6", now) || !issue("7", now.Add(30*time.Minute)) || issue("x", now.Add(31*time.Minute)) {
-		t.Fatal("the fourth or fifth code an hour was not issued, or a sixth was")
-	}
-	if !issue("8", now.Add(61*time.Minute)) {
-		t.Fatal("a code an hour later was not issued")
-	}
-
-	// Everyone's wrong tries together: past the limit, no try is taken, a right one neither, until the hour has passed.
-	few := limits
-	few.Wrong = 3
-	later := now.Add(2 * time.Hour)
-	issue("9", later)
-	for range 2 {
-		if r := try(anna.Address, "0", later, few); r != Wrong {
-			t.Fatalf("a wrong try: %v", r)
+	// Asked again at once, and four minutes on: none is sent. Five minutes on, one is, and the first still works.
+	for _, after := range []time.Duration{0, 4 * time.Minute} {
+		if r := issue(anna.ID, "x", now.Add(after)); r != TooSoon {
+			t.Fatalf("a second code %v after the first: %v, want none so soon", after, r)
 		}
 	}
-	// Tries of addresses without a code are not counted.
-	for range 5 {
-		try("nobody@example.com", "0", later, few)
+	if r := issue(anna.ID, "2", now.Add(5*time.Minute)); r != Issued {
+		t.Fatalf("a second code five minutes after the first: %v", r)
 	}
-	try(anna.Address, "0", later, few)
-	if r := try(anna.Address, "9", later, few); r != TooManyTries {
-		t.Fatalf("her code after three wrong tries, three allowed: %v", r)
+	// Wrong codes, any number of them, for her address and for others: nothing changes.
+	for range 200 {
+		if use(anna.Address, "9", now.Add(6*time.Minute)) || use("someone@else.example", "1", now.Add(6*time.Minute)) {
+			t.Fatal("a wrong code, or a right one for another address, signed someone in")
+		}
 	}
-	issue("9", later.Add(61*time.Minute))
-	if r := try(anna.Address, "9", later.Add(62*time.Minute), few); r != SignedIn {
-		t.Fatalf("her code an hour later: %v", r)
+	if use(other.Address, "1", now.Add(6*time.Minute)) {
+		t.Fatal("Anna's code signed Bob in")
 	}
-	// Overall, a hundred codes an hour.
-	all := limits
-	all.Overall = 2
-	at := later.Add(3 * time.Hour)
-	if ok, _ := x.IssueCode(ctx, anna.ID, code("a"), at, all); !ok {
-		t.Fatal("a code")
+	// Both of hers work, each once; one does not spend the other.
+	if !use(anna.Address, "1", now.Add(6*time.Minute)) {
+		t.Fatal("her first code, after another was sent and two hundred wrong ones were tried")
 	}
-	other, _, _ := x.Invite(ctx, bence.ID, clients.ID, "other@client.example", "viewer", time.Time{}, now, "u-bence")
-	if ok, _ := x.IssueCode(ctx, other.ID, code("b"), at, all); !ok {
-		t.Fatal("another guest's code")
+	if use(anna.Address, "1", now.Add(6*time.Minute)) {
+		t.Fatal("her first code worked twice")
 	}
-	if ok, _ := x.IssueCode(ctx, other.ID, code("c"), at, all); ok {
-		t.Fatal("a third code, two allowed for everyone")
+	// Her second is not used yet, so no other is sent so soon after it; once it is used, one is, at once.
+	if r := issue(anna.ID, "x", now.Add(7*time.Minute)); r != TooSoon {
+		t.Fatalf("a third code two minutes after the second, not used yet: %v", r)
+	}
+	if use(anna.Address, "2", now.Add(36*time.Minute)) {
+		t.Fatal("her second code, thirty-one minutes after it was sent")
+	}
+	if !use(anna.Address, "2", now.Add(34*time.Minute)) {
+		t.Fatal("her second code, twenty-nine minutes after it was sent")
+	}
+	if r := issue(anna.ID, "3", now.Add(34*time.Minute)); r != Issued {
+		t.Fatalf("a code right after she used her last: %v", r)
+	}
+	if r := issue(other.ID, "4", now.Add(34*time.Minute)); r != Issued {
+		t.Fatalf("Bob's first code, just after one was sent to Anna: %v", r)
+	}
+
+	// As many as all guests together may be sent in an hour, and then none until the hour has passed.
+	few := limits
+	few.Overall = 3
+	at := now.Add(3 * time.Hour)
+	for i, g := range []int64{anna.ID, other.ID, anna.ID} {
+		if r, err := x.IssueCode(ctx, g, code("a"), at.Add(time.Duration(i)*6*time.Minute), few); err != nil || r != Issued {
+			t.Fatalf("code %d of three for everyone: %v %v", i+1, r, err)
+		}
+	}
+	if r, _ := x.IssueCode(ctx, other.ID, code("b"), at.Add(20*time.Minute), few); r != TooMany {
+		t.Fatalf("a fourth code within the hour, three allowed for everyone: %v", r)
+	}
+	if r, _ := x.IssueCode(ctx, other.ID, code("b"), at.Add(61*time.Minute), few); r != Issued {
+		t.Fatalf("a code once the hour has passed: %v", r)
 	}
 }
 

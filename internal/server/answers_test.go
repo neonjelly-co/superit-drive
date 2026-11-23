@@ -1,8 +1,10 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -94,5 +96,42 @@ func TestAnAnswerTooLongToKeepIsSentAsItIsMade(t *testing.T) {
 	bareServer(t).sendHeld(httptest.NewRequest(http.MethodGet, "/s/guest/api/me", nil), h)
 	if rec.Code != http.StatusCreated || rec.Body.String() != "123456789abcdef" {
 		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+// Many asks for a sign-in link for one address take one place among those waiting; many addresses take as many places
+// as there are, and the rest are dropped, answered the same.
+func TestAsksForOneAddressWaitOnce(t *testing.T) {
+	s := bareServer(t)
+	ask := func(address string) int {
+		req := httptest.NewRequest(http.MethodPost, GuestPrefix+"/api/code", strings.NewReader(`{"address":"`+address+`"}`))
+		rec := httptest.NewRecorder()
+		s.askForCode(rec, req, call{})
+		return rec.Code
+	}
+	for range 500 {
+		if got := ask("Anna@Client.Example"); got != http.StatusAccepted {
+			t.Fatalf("asking for Anna: got %d", got)
+		}
+	}
+	if n := len(s.codes); n != 1 {
+		t.Fatalf("%d asks wait after 500 for one address, want 1", n)
+	}
+	for i := range 2 * codesWaiting {
+		if got := ask(fmt.Sprintf("guest%d@client.example", i)); got != http.StatusAccepted {
+			t.Fatalf("asking for guest %d: got %d", i, got)
+		}
+	}
+	if n := len(s.codes); n != codesWaiting {
+		t.Fatalf("%d asks wait, want as many as may (%d)", n, codesWaiting)
+	}
+	// Once the sender has come to Anna's, she may wait again.
+	first := <-s.codes
+	s.askingMu.Lock()
+	delete(s.asking, first.address)
+	s.askingMu.Unlock()
+	ask("anna@client.example")
+	if n := len(s.codes); n != codesWaiting || first.address != "anna@client.example" {
+		t.Fatalf("%d asks wait once Anna's was taken and she asked again (the first was for %q)", n, first.address)
 	}
 }

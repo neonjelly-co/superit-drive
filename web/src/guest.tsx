@@ -1,4 +1,4 @@
-// The guests' page: one page under the public prefix (/s/guest/) that signs a guest in with a code mailed to them and
+// The guests' page: one page under the public prefix (/s/guest/) that signs a guest in with a link mailed to them and
 // shows what was shared with them. It calls the guests' own API (forGuests) and never the members'.
 import "./styles.css";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";

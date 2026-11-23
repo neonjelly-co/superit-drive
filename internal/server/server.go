@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/neonjelly-co/superit-drive/internal/access"
@@ -81,10 +82,13 @@ type Server struct {
 	// codeKey keys the HMAC of the codes mailed to guests (guests.go): derived from the header secret, which the index
 	// never holds.
 	codeKey []byte
-	// codes are the addresses that asked for a code, waiting for SendCodes (guests.go); codesDropped is when asks were
-	// last dropped for want of room (Unix seconds), so that it is logged once a minute at most.
-	codes        chan codeAsk
-	codesDropped atomic.Int64
+	// codes are the addresses that asked for a sign-in link, waiting for SendCodes (guests.go), each once (asking); the
+	// three times are when the log last said that asks were dropped, that an address was asked for too soon, and that
+	// too many links were sent: each is said once a minute at most.
+	codes                                    chan codeAsk
+	askingMu                                 sync.Mutex
+	asking                                   map[string]bool
+	codesDropped, codesTooSoon, codesTooMany atomic.Int64
 	// sendPolicy is the Content-Security-Policy of an upload-only link's page (sendin.go).
 	sendPolicy string
 }
@@ -99,7 +103,7 @@ func New(c Config) *Server {
 		visitors: newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
 		guests:   newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
 		codeKey:  key.Sum(nil),
-		codes:    make(chan codeAsk, codesWaiting)}
+		codes:    make(chan codeAsk, codesWaiting), asking: map[string]bool{}}
 	if c.Address != nil {
 		s.origin = originOf(c.Address)
 	}

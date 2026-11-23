@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
@@ -19,39 +18,37 @@ import (
 // with a code mailed to them. The access package decides what an invitation lets a guest do; these invite, find, sign
 // in and out, and count uses.
 //
-// A code is six digits from crypto/rand. The index keeps only its HMAC-SHA-256, keyed with Options.CodeKey (which the
-// index never holds), over the guest's address and the code: a copy of the index tells no code, though six digits
-// could be tried against it in a moment by whoever also has the key. A session's token is 32 random bytes; the index
-// keeps its SHA-256.
+// A code is what a sign-in link carries: 32 bytes from crypto/rand, in base64url, far too long to guess. The index
+// keeps only its HMAC-SHA-256, keyed with Options.CodeKey (which the index never holds), over the guest's address and
+// the code: a copy of the index tells no code. A session's token is 32 random bytes; the index keeps its SHA-256.
+//
+// Because a code cannot be guessed, nothing a stranger does at the sign-in page takes a guest's sign-in away: wrong
+// tries are not counted (there is nothing to protect by counting them), asking again leaves the codes already sent
+// working, and the only bound a stranger can reach for one address is how often it is mailed (CodeEvery), which is
+// shorter than a code works for (CodeValidFor), so that the guest always has a link that works in their mail.
 
 // The rules of guests' codes and sessions.
 const (
 	// CodeValidFor is how long a code works after it was sent.
-	CodeValidFor = 10 * time.Minute
-	// CodeTries is how many wrong tries kill a code.
-	CodeTries = 5
-	// CodesPerHour is how many codes one address is sent in an hour; CodesPerHourOverall how many all of them together
-	// (which bounds what the sign-in page can make the Drive send).
-	CodesPerHour        = 5
-	CodesPerHourOverall = 100
-	// WrongCodesPerHour is how many wrong tries of codes that work the Drive takes in an hour, from everyone together:
-	// past it, no try is taken until the hour has passed.
-	WrongCodesPerHour = 100
+	CodeValidFor = 30 * time.Minute
+	// CodeEvery is how long after a code was sent to an address the next one may be.
+	CodeEvery = 5 * time.Minute
+	// CodesPerHourOverall is how many codes all addresses together are sent in an hour: a bound on the mail the
+	// sign-in page can make the Drive send. It takes more than eighty guests' addresses, asked for as often as they are
+	// answered, to reach it.
+	CodesPerHourOverall = 1000
 	// SessionLasts is how long a guest stays signed in on a browser.
 	SessionLasts = 30 * 24 * time.Hour
 	// SessionsKept is how many browsers one guest stays signed in on at once: signing in on another ends the oldest.
 	SessionsKept = 10
 )
 
-var codeLimits = index.CodeLimits{ValidFor: CodeValidFor, Tries: CodeTries, PerGuest: CodesPerHour,
-	Overall: CodesPerHourOverall, Window: time.Hour, Wrong: WrongCodesPerHour}
+var codeLimits = index.CodeLimits{ValidFor: CodeValidFor, Every: CodeEvery, Overall: CodesPerHourOverall, Window: time.Hour}
 
 // Errors about guests.
 var (
-	// ErrWrongCode: the code is not right, has expired, was used, or there is no code for the address.
+	// ErrWrongCode: the code is not right, has ended, was used, or there is no code for the address.
 	ErrWrongCode = errors.New("the code is not right")
-	// ErrTooManyTries: so many wrong codes were tried on the Drive lately that no try is taken now.
-	ErrTooManyTries = errors.New("too many wrong codes were tried lately")
 )
 
 // GuestByAddress finds the guest whose address is address, as members.Address writes it (index.ErrNoGuest otherwise).
@@ -126,31 +123,28 @@ func (d *Drive) AdmitMembers(ctx context.Context, list *members.List, working fu
 	return n, nil
 }
 
-// NewCode makes a code for the guest and records its HMAC, unless the guest was sent CodesPerHour codes in the last hour,
-// or everyone together CodesPerHourOverall: then ok is false, and no code may be sent. Asking for a code spends the
-// guest's earlier ones.
-func (d *Drive) NewCode(ctx context.Context, guest index.Guest, key []byte) (code string, ok bool, err error) {
+// NewCode makes a code for the guest and records its HMAC, unless one was sent to them within CodeEvery
+// (index.TooSoon), or CodesPerHourOverall to everyone in the last hour (index.TooMany): then no code may be sent. The
+// codes sent to them before go on working.
+func (d *Drive) NewCode(ctx context.Context, guest index.Guest, key []byte) (code string, result index.IssueResult, err error) {
 	code = newCode()
-	ok, err = d.index.IssueCode(ctx, guest.ID, codeHash(key, guest.Address, code), d.now(), codeLimits)
-	if err != nil || !ok {
-		return "", false, err
+	result, err = d.index.IssueCode(ctx, guest.ID, codeHash(key, guest.Address, code), d.now(), codeLimits)
+	if err != nil || result != index.Issued {
+		return "", result, err
 	}
-	return code, true, nil
+	return code, index.Issued, nil
 }
 
-// SignIn tries a code for an address, and on the right one starts a session for its guest: the session's token, for
-// the browser's cookie, and when it ends. ErrWrongCode for anything else, ErrTooManyTries when no try is taken now.
-// Every try, for any address, does the same work (see index.TryCode).
+// SignIn uses a code for an address, and with the right one starts a session for its guest: the session's token, for
+// the browser's cookie, and when it ends. ErrWrongCode for anything else.
 func (d *Drive) SignIn(ctx context.Context, address, code string, key []byte) (guest index.Guest, token string, ends time.Time, err error) {
 	address = members.Address(address)
 	now := d.now()
-	g, result, err := d.index.TryCode(ctx, address, codeHash(key, address, code), now, codeLimits)
+	g, ok, err := d.index.UseCode(ctx, address, codeHash(key, address, code), now, codeLimits)
 	switch {
 	case err != nil:
 		return index.Guest{}, "", time.Time{}, err
-	case result == index.TooManyTries:
-		return index.Guest{}, "", time.Time{}, ErrTooManyTries
-	case result != index.SignedIn:
+	case !ok:
 		return index.Guest{}, "", time.Time{}, ErrWrongCode
 	}
 	token = newSessionToken()
@@ -186,16 +180,14 @@ func (d *Drive) tidyGuests(ctx context.Context) error {
 	return d.index.TidyGuests(ctx, d.now(), time.Hour)
 }
 
-// newCode is six digits from crypto/rand, each of the million equally likely.
+// CodeLength is how many characters a code has: 32 random bytes in base64url.
+const CodeLength = 43
+
+// newCode is 32 bytes from crypto/rand, in base64url: what a sign-in link carries.
 func newCode() string {
-	var b [8]byte
-	for {
-		_, _ = rand.Read(b[:])
-		// The largest multiple of a million below 2^64: anything above it would make low codes likelier.
-		if n := binary.BigEndian.Uint64(b[:]); n < 18446744073709000000 {
-			return fmt.Sprintf("%06d", n%1000000)
-		}
-	}
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 // codeHash is what the index keeps of a code mailed to address: an HMAC-SHA-256 keyed with key.

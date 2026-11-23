@@ -237,11 +237,11 @@ func TestMailIsInTheLanguageOfThePageWhoseActSendsIt(t *testing.T) {
 		}
 		return len(m) > 1
 	})
-	if !strings.HasPrefix(code.subject, "Belépési kód a Drive-hoz (") || !regexp.MustCompile(`^A kódod: \d{6}\n`).MatchString(code.body) {
+	if !strings.HasPrefix(code.subject, "Belépés a Drive-ba (") || !regexp.MustCompile(`^Ezzel a linkkel léphetsz be:\n\n\S+/s/guest/#as=\S+&code=[A-Za-z0-9_-]{43}\n`).MatchString(code.body) {
 		t.Errorf("the code from a Hungarian page:\nSubject: %s\n\n%s", code.subject, code.body)
 	}
 	if res := signIn(t, guest, anna, "000000"); res.Status != http.StatusBadRequest ||
-		errorOf(t, res) != "Ez a kód nem jó, vagy már nem érvényes. Ellenőrizd, vagy kérj újat." {
+		errorOf(t, res) != "Ez a belépési link már nem érvényes: egyszer már használták, vagy több mint 30 perces. Kérj újat." {
 		t.Errorf("a wrong code from a Hungarian page: %d %s", res.Status, res.Body)
 	}
 	if res := guest.Get(t, guestAPI+"/shared-with-me"); res.Status != http.StatusUnauthorized || errorOf(t, res) != "Jelentkezz be, hogy ezt lásd." {

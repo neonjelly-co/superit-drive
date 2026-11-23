@@ -728,9 +728,13 @@ export type GuestShared = GuestItem & { place: number; role: "viewer" | "editor"
 export const guestApi = {
 	/** Who is signed in; an ApiError with `signIn` when nobody is. */
 	me: () => call<{ address: string; project: string }>("GET", `${base}/me`),
-	/** Asks for a code mailed to the address: the answer is the same whatever the address. */
-	askForCode: (address: string) => call<{ message: string }>("POST", `${base}/code`, { address }),
-	/** Signs in with the code: the Drive keeps the guest signed in on this browser for 30 days. */
+	/**
+	 * Asks for a sign-in link mailed to the address, leading to where the guest was going (an item, if any): the answer is
+	 * the same whatever the address.
+	 */
+	askForCode: (address: string, to: { place?: number; item?: number } = {}) =>
+		call<{ message: string }>("POST", `${base}/code`, { address, ...to }),
+	/** Signs in with the code of a sign-in link: the Drive keeps the guest signed in on this browser for 30 days. */
 	signIn: (address: string, code: string) => call<{ address: string }>("POST", `${base}/sign-in`, { address, code }),
 	signOut: () => call<null>("POST", `${base}/sign-out`),
 	/**

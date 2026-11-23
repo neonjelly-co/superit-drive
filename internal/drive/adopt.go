@@ -31,7 +31,7 @@ import (
 // A copy becomes the index only once index.CheckCopy finds it whole, of a schema this Drive's migrations make (an older
 // one is brought up to date as any index is), with every place where the Drive puts places. Then it is cleared
 // (index.ClearCopy): a copy from the storage of guests' sessions, codes and limits and uploads in progress, which only
-// the server they were on can honour (guests sign in again, with a new code); any copy of where the walk was. And the
+// the server they were on can honour (guests sign in again, with a new link); any copy of where the walk was. And the
 // walk starts at once, as after a rollback (adoptionWalk): what changed on the storage since the copy was made comes in
 // as the looks always bring it, and an item deleted since, back in its entry of the trash, goes there as itself.
 //
@@ -203,7 +203,7 @@ func Adopt(ctx context.Context, dataDir string, s *storage.Client, log *slog.Log
 	}
 	from := "the data folder's copy (" + filepath.Join(index.BackupFolder, index.FileName) + "); guests stay signed in"
 	if chosen.storage != "" {
-		from = "the copy on the storage (" + chosen.storage + "); guests sign in again with a new code"
+		from = "the copy on the storage (" + chosen.storage + "); guests sign in again with a new link"
 	}
 	log.Warn("the data folder held no index: the Drive made it from "+from+". The index is as it was when the copy was "+
 		"made; a walk through the storage now takes in what changed there since",

@@ -107,9 +107,10 @@ func signIn(t *testing.T, c *harness.Client, address, code string) harness.Respo
 	return sendJSON(t, c, http.MethodPost, guestAPI+"/sign-in", map[string]string{"address": address, "code": code})
 }
 
-var codeInMail = regexp.MustCompile(`Your code is (\d{6})\n`)
+// codeInMail is the code a sign-in link carries after its "#", following the guest's address.
+var codeInMail = regexp.MustCompile(`/s/guest/[^\s#]*#as=[^&\s]+&code=([A-Za-z0-9_-]{43})\n`)
 
-// codesTo is every code mailed to address so far, oldest first.
+// codesTo is every code mailed to address so far, in a sign-in link, oldest first.
 func codesTo(t *testing.T, smtp *mailtest.Server, address string) []string {
 	t.Helper()
 	var out []string
@@ -162,8 +163,8 @@ func withCookie(d *harness.Drive, c *http.Cookie) *harness.Client {
 	return browser(d).With("Cookie", c.Name+"="+c.Value)
 }
 
-// signedIn has the guest at address ask for a code, read it from their mail (the n-th they got) and sign in with it,
-// and returns their session's cookie.
+// signedIn has the guest at address ask for a sign-in link, read its code from their mail (the n-th they got) and sign
+// in with it, as the guests' page does when the link is opened, and returns their session's cookie.
 func signedIn(t *testing.T, d *harness.Drive, smtp *mailtest.Server, address string) *http.Cookie {
 	t.Helper()
 	n := len(codesTo(t, smtp, address)) + 1
@@ -451,11 +452,13 @@ func TestWithoutMailThatWorksInvitingGuestsIsUnavailable(t *testing.T) {
 	}
 }
 
-// A guest signs in on the public prefix with a six-digit code mailed to them. Asking for one is answered the same for
-// every address; a code goes only to an address with something shared with it (never to a member's, nor to anyone
-// else), at most five an hour per address. Only the newest code works, once, for about ten minutes, and not after five
-// wrong tries; a wrong code is answered the same for every address. Neither the code nor the session is in the index.
-func TestAGuestSignsInWithACodeMailedToThem(t *testing.T) {
+// A guest signs in on the public prefix with a link mailed to them, whose code (after the "#", which no browser sends
+// by itself) the guests' page sends with their address. Asking for one is answered the same for every address; a link
+// goes only to an address with something shared with it (never to a member's, nor to anyone else). It works once, for
+// thirty minutes. Nothing a stranger does takes a guest's sign-in away: wrong codes, however many, change nothing; and
+// asking again while a link is not used sends no other so soon, and leaves that one working. Neither the code nor the
+// session is in the index or the log.
+func TestAGuestSignsInWithALinkMailedToThem(t *testing.T) {
 	t.Parallel()
 	smtp := mailtest.Start(t, mailtest.Options{})
 	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora}, Env: mailSettings(smtp)})
@@ -472,57 +475,65 @@ func TestAGuestSignsInWithACodeMailedToThem(t *testing.T) {
 		res := askForCode(t, browser(d), address)
 		res.Header.Del("Date")
 		if res.Status != http.StatusAccepted || !strings.Contains(string(res.Body), "If anything on this Drive is shared with this address") {
-			t.Fatalf("asking for a code for %s: %d %s", address, res.Status, res.Body)
+			t.Fatalf("asking for a link for %s: %d %s", address, res.Status, res.Body)
 		}
 		if i == 0 {
 			first = res
 		} else if !bytes.Equal(res.Body, first.Body) || !headersEqual(res.Header, first.Header) {
-			t.Errorf("asking for a code for %s answered otherwise than for Anna: %v %s", address, res.Header, res.Body)
+			t.Errorf("asking for a link for %s answered otherwise than for Anna: %v %s", address, res.Header, res.Body)
 		}
 		if sessionCookie(res) != nil {
-			t.Errorf("asking for a code for %s set a cookie", address)
+			t.Errorf("asking for a link for %s set a cookie", address)
 		}
 	}
-	older, code := nthCode(t, smtp, anna, 1), nthCode(t, smtp, anna, 2)
-	quietly(t, smtp, 4)
-	if mails := mailsTo(t, smtp, anna); len(mails) != 3 || mails[1].subject != "Your code for the Drive of Kovács Accounting" ||
-		!strings.Contains(mails[1].body, "It works once, for 10 minutes.") {
-		t.Fatalf("the mails to Anna: %+v", mails)
+	// One link to Anna, though she was asked for twice: the second came too soon after the first, which is not used yet.
+	code := nthCode(t, smtp, anna, 1)
+	quietly(t, smtp, 3)
+	link := d.Address + "/s/guest/#as=anna%40client.example&code=" + code + "\n"
+	if mails := mailsTo(t, smtp, anna); len(mails) != 2 || mails[1].subject != "Sign in to the Drive of Kovács Accounting" ||
+		!strings.Contains(mails[1].body, link) || !strings.Contains(mails[1].body, "It works once, for 30 minutes") {
+		t.Fatalf("the mails to Anna, the second with the link %s: %+v", link, mails)
 	}
 	if res := askForCode(t, browser(d), "not an address"); res.Status != http.StatusBadRequest {
-		t.Fatalf("asking for a code for something that is not an address: %d", res.Status)
+		t.Fatalf("asking for a link for something that is not an address: %d", res.Status)
 	}
 
-	// A wrong code, the older one, or the right one for another address: the same answer as a code for nobody.
+	// A wrong code, or the right one for another address: the same answer as a code for nobody.
 	wrong := signIn(t, browser(d), "nobody@example.com", code)
-	if wrong.Status != http.StatusBadRequest || !strings.Contains(errorOf(t, wrong), "This code is not right") {
+	if wrong.Status != http.StatusBadRequest || !strings.Contains(errorOf(t, wrong), "This sign-in link no longer works") {
 		t.Fatalf("a code for nobody: %d %s", wrong.Status, wrong.Body)
 	}
 	for what, res := range map[string]harness.Response{
-		"the older code":       signIn(t, browser(d), anna, older),
-		"Anna's code for Bob":  signIn(t, browser(d), bob, code),
-		"Anna's code for Dóra": signIn(t, browser(d), dora.Email, code),
+		"Anna's code for Bob":         signIn(t, browser(d), bob, code),
+		"Anna's code for Dóra":        signIn(t, browser(d), dora.Email, code),
+		"another code for Anna":       signIn(t, browser(d), anna, strings.Repeat("A", len(code))),
+		"six digits for Anna":         signIn(t, browser(d), anna, "123456"),
+		"a code that is far too long": signIn(t, browser(d), anna, strings.Repeat("A", 4000)),
 	} {
-		if older == code && what == "the older code" {
-			continue // one in a million
-		}
 		if res.Status != wrong.Status || !bytes.Equal(res.Body, wrong.Body) || sessionCookie(res) != nil {
 			t.Errorf("%s: got %d %s", what, res.Status, res.Body)
 		}
 	}
-	// The right one signs her in: a cookie for the guests' prefix only, that no script reads and no other site's page
+	// Wrong codes, as many as anyone likes, for her address and for others, take nothing from her: none is counted.
+	for i := range 150 {
+		guess := fmt.Sprintf("%043d", i)
+		if res := signIn(t, browser(d), []string{anna, bob, "nobody@example.com"}[i%3], guess); res.Status != http.StatusBadRequest {
+			t.Fatalf("wrong code %d: got %d %s", i, res.Status, res.Body)
+		}
+	}
+	// The link signs her in: a cookie for the guests' prefix only, that no script reads and no other site's page
 	// sends with a change, for 30 days. It works once.
 	res := signIn(t, browser(d), "Anna@Client.Example", code)
 	c := sessionCookie(res)
 	if res.Status != http.StatusOK || c == nil || c.Name != "drive-guest" || c.Path != "/s/guest" || !c.HttpOnly ||
 		c.SameSite != http.SameSiteLaxMode || c.MaxAge < 30*24*3600-60 || c.MaxAge > 30*24*3600 || len(res.Header.Values("Set-Cookie")) != 1 {
-		t.Fatalf("signing in: %d %s %v", res.Status, res.Body, res.Header.Values("Set-Cookie"))
+		t.Fatalf("signing in after 150 wrong codes: %d %s %v", res.Status, res.Body, res.Header.Values("Set-Cookie"))
 	}
 	if got := signedInAs(t, d, c); got != anna {
 		t.Fatalf("signed in as %q", got)
 	}
 	if res := signIn(t, browser(d), anna, code); res.Status != http.StatusBadRequest || sessionCookie(res) != nil {
-		t.Fatalf("the code a second time: %d %s", res.Status, res.Body)
+		t.Fatalf("the link a second time: %d %s", res.Status, res.Body)
 	}
 	if index := indexFile(t, d); bytes.Contains(index, []byte(code)) || bytes.Contains(index, []byte(c.Value)) {
 		t.Fatal("the index holds the code or the session's token")
@@ -531,41 +542,43 @@ func TestAGuestSignsInWithACodeMailedToThem(t *testing.T) {
 		t.Fatalf("the log holds the code, the token or the address:\n%s", logs)
 	}
 
-	// Five wrong tries kill a code.
-	askForCode(t, browser(d), anna)
-	third := nthCode(t, smtp, anna, 3)
-	for i := range 5 {
-		guess := fmt.Sprintf("%06d", i)
-		if guess == third {
-			guess = "999999"
-		}
-		signIn(t, browser(d), anna, guess)
+	// Her link used, she is sent another at once, to where she was going; asked for again and again, no other comes so
+	// soon (the log says so, once), and that one goes on working.
+	sendJSON(t, browser(d), http.MethodPost, guestAPI+"/code", map[string]any{"address": anna, "place": x.place, "item": x.bakery.ID})
+	second := nthCode(t, smtp, anna, 2)
+	if body := mailsTo(t, smtp, anna)[2].body; !strings.Contains(body, fmt.Sprintf("/s/guest/?item=%d&place=%d#as=anna%%40client.example&code=%s\n", x.bakery.ID, x.place, second)) {
+		t.Fatalf("the link to where she was going: %s", body)
 	}
-	if res := signIn(t, browser(d), anna, third); res.Status != http.StatusBadRequest {
-		t.Fatalf("a code after five wrong tries: %d %s", res.Status, res.Body)
-	}
-
-	// At most five codes an hour to one address: Anna has had three; two more come, and no other, however often she asks.
-	for range 4 {
+	for range 20 {
 		askForCode(t, browser(d), anna)
 	}
-	nthCode(t, smtp, anna, 5)
-	quietly(t, smtp, 2+5) // the invitations to Anna and Bob, and Anna's five codes
-	// An hour later she is sent one again; it works for about ten minutes, then no more.
-	d.Restart(t, map[string]string{harness.TestClockShift: "61m"})
+	quietly(t, smtp, 4) // the invitations to Anna and Bob, and Anna's two links
+	harness.Eventually(t, "the log says a link was asked for too soon", func() bool {
+		return len(logLines(d, "a sign-in link was asked for a guest who was sent one lately")) == 1
+	})
+	// Six minutes on she is sent a third; the second still works, and so does the third after it.
+	d.Restart(t, map[string]string{harness.TestClockShift: "6m"})
 	askForCode(t, browser(d), anna)
-	sixth := nthCode(t, smtp, anna, 6)
-	d.Restart(t, map[string]string{harness.TestClockShift: "72m"})
-	if res := signIn(t, browser(d), anna, sixth); res.Status != http.StatusBadRequest {
-		t.Fatalf("a code eleven minutes later: %d %s", res.Status, res.Body)
+	third := nthCode(t, smtp, anna, 3)
+	for which, code := range map[string]string{"second": second, "third": third} {
+		if res := signIn(t, browser(d), anna, code); res.Status != http.StatusOK || sessionCookie(res) == nil {
+			t.Fatalf("her %s link, with another sent since: %d %s", which, res.Status, res.Body)
+		}
+	}
+	// A link works for thirty minutes, then no more.
+	askForCode(t, browser(d), anna)
+	fourth := nthCode(t, smtp, anna, 4)
+	d.Restart(t, map[string]string{harness.TestClockShift: "37m"})
+	if res := signIn(t, browser(d), anna, fourth); res.Status != http.StatusBadRequest {
+		t.Fatalf("a link thirty-one minutes later: %d %s", res.Status, res.Body)
 	}
 	askForCode(t, browser(d), anna)
-	if res := signIn(t, browser(d), anna, nthCode(t, smtp, anna, 7)); res.Status != http.StatusOK {
-		t.Fatalf("a new code: %d %s", res.Status, res.Body)
+	if res := signIn(t, browser(d), anna, nthCode(t, smtp, anna, 5)); res.Status != http.StatusOK {
+		t.Fatalf("a new link: %d %s", res.Status, res.Body)
 	}
 	// Bob, with nothing that lets him in, and Dóra, a member, were never sent one.
 	if got := len(codesTo(t, smtp, bob)) + len(codesTo(t, smtp, dora.Email)); got != 0 {
-		t.Fatalf("%d codes went to Bob and Dóra", got)
+		t.Fatalf("%d links went to Bob and Dóra", got)
 	}
 }
 
