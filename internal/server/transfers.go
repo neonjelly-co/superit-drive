@@ -52,6 +52,12 @@ func classOf(c call) transfers.Class {
 	return transfers.Members
 }
 
+// outsiderLeft says whether a transfer that ended early is a visitor's or a guest's who hung up: that is not logged,
+// or anyone could fill the log by starting transfers and leaving (as fail logs nothing for whoever has gone).
+func (s *Server) outsiderLeft(r *http.Request, c call) bool {
+	return classOf(c) == transfers.Outsiders && r.Context().Err() != nil
+}
+
 // waitTurn waits in line for a transfer slot: a visitor or a guest in the outsiders' own line, for one of the few slots
 // they may hold. ok is false when the person was answered, or has left.
 func (s *Server) waitTurn(w http.ResponseWriter, r *http.Request, c call) (release func(), ok bool) {
@@ -226,7 +232,7 @@ func (s *Server) sendFile(w http.ResponseWriter, r *http.Request, c call, inline
 	}
 	out, done := sending(w)
 	defer done()
-	if _, err := io.Copy(out, f.Body); err != nil {
+	if _, err := io.Copy(out, f.Body); err != nil && !s.outsiderLeft(r, c) {
 		s.log.Info("a download ended before its last byte", "error", err)
 	}
 }
@@ -364,7 +370,9 @@ func (s *Server) zip(w http.ResponseWriter, r *http.Request, c call) {
 		if errors.Is(err, errNoLongerMay) || errors.Is(err, errSwitchedOffNow) {
 			err = errors.New("the person may no longer download the folder")
 		}
-		s.log.Info("a zip ended before its end", "error", err)
+		if !s.outsiderLeft(r, c) {
+			s.log.Info("a zip ended before its end", "error", err)
+		}
 		panic(http.ErrAbortHandler)
 	case errors.Is(err, index.ErrNoItem):
 		s.refuse(w, r, http.StatusNotFound, notHere)
@@ -446,7 +454,9 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, c call) {
 		s.noLonger(w, r, c, err)
 	case errors.Is(err, drive.ErrCutOff) || r.Context().Err() != nil:
 		// The person's connection ended (or they cancelled); nothing was stored. Not the Drive's failure.
-		s.log.Info("an upload ended before the whole file arrived; nothing was stored", "error", err)
+		if !s.outsiderLeft(r, c) {
+			s.log.Info("an upload ended before the whole file arrived; nothing was stored", "error", err)
+		}
 		s.refuse(w, r, http.StatusBadRequest, uploadCutOff)
 	default:
 		s.uploadFailed(w, r, err, name, existing)
@@ -623,7 +633,9 @@ func (s *Server) uploadPart(w http.ResponseWriter, r *http.Request, c call) {
 	case errors.Is(err, drive.ErrBusy):
 		s.refuse(w, r, http.StatusConflict, partOnItsWay)
 	case errors.Is(err, drive.ErrCutOff) || r.Context().Err() != nil:
-		s.log.Info("a part of an upload ended before it all arrived", "error", err)
+		if !s.outsiderLeft(r, c) {
+			s.log.Info("a part of an upload ended before it all arrived", "error", err)
+		}
 		s.refuse(w, r, http.StatusBadRequest, partCutOff)
 	case errors.Is(err, drive.ErrFull):
 		s.refuse(w, r, http.StatusInsufficientStorage, fullNotUploaded)

@@ -96,6 +96,8 @@ type Server struct {
 	refusedChanges, codesDropped, codesTooSoon, codesTooMany *seldom.Line
 	// invitationMails counts the invitations each member had mailed lately (invitations.go).
 	invitationMails *mailCount
+	// inviting lets one invitation or removal of one be worked on at a time (invitations.go).
+	inviting sync.Mutex
 }
 
 // New makes a server.

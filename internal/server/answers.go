@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -16,8 +15,10 @@ import (
 //   - a small body (the JSON of a change) is read before a guest's turn is taken (bodyFirst), and must arrive within
 //     bodyWait, for members too (readBody);
 //   - an answer is made while the turn is held, kept (heldAnswer), and sent after the turn is given back (sendHeld),
-//     within answerWait. A list too long to keep (a guest's, of a folder of thousands) is sent as it is made instead,
-//     its turn held, and must be taken within listWait.
+//     within answerWait. A list too long to keep (a guest's, of a folder of thousands) is sent as it is made instead:
+//     its turn is given back when it turns out that long (spilled), and each write must be taken within stall, as a
+//     transfer's. It goes on reading the index a page at a time meanwhile, as a member's list does, which costs the
+//     Drive little whoever takes it slowly; only a signed-in guest gets one.
 //
 // A transfer's bytes are neither: it leaves its turn once it is decided, and has its own deadlines (transfers.go).
 const (
@@ -28,8 +29,6 @@ const (
 	guestBodyMost = 8 << 10
 	// answerWait is how long a person may take to take an answer that was kept for them.
 	answerWait = 30 * time.Second
-	// listWait is how long a guest may take to take a list too long to keep.
-	listWait = 2 * time.Minute
 	// guestAnswerMost is the longest answer kept for a guest: a longer one (a long list) is sent as it is made.
 	// visitorAnswerMost is the same for a visitor, whose longest page (visitorListLimit items) is well within it.
 	guestAnswerMost   = 64 << 10
@@ -42,10 +41,12 @@ const (
 )
 
 // heldAnswer keeps an answer, instead of sending it, until sendHeld: up to most bytes. One more byte and it is sent
-// as it is made from then on (spilled), within listWait.
+// as it is made from then on (spilled): onSpill is called first, to give the turn back, and each write must be taken
+// within stall.
 type heldAnswer struct {
 	http.ResponseWriter // where it goes in the end; its headers are set there directly
 	most                int
+	onSpill             func()
 	status              int
 	body                bytes.Buffer
 	spilled             bool
@@ -62,6 +63,7 @@ func (h *heldAnswer) WriteHeader(status int) {
 
 func (h *heldAnswer) Write(p []byte) (int, error) {
 	if h.spilled {
+		_ = http.NewResponseController(h.ResponseWriter).SetWriteDeadline(time.Now().Add(stall))
 		return h.ResponseWriter.Write(p)
 	}
 	if h.status == 0 {
@@ -71,7 +73,10 @@ func (h *heldAnswer) Write(p []byte) (int, error) {
 		return h.body.Write(p)
 	}
 	h.spilled = true
-	_ = http.NewResponseController(h.ResponseWriter).SetWriteDeadline(time.Now().Add(listWait))
+	if h.onSpill != nil {
+		h.onSpill() // the turn is given back before anything waits for whoever takes the answer
+	}
+	_ = http.NewResponseController(h.ResponseWriter).SetWriteDeadline(time.Now().Add(stall))
 	h.ResponseWriter.WriteHeader(h.status)
 	if _, err := h.ResponseWriter.Write(h.body.Bytes()); err != nil {
 		return 0, err
@@ -94,7 +99,8 @@ func (s *Server) sendHeld(r *http.Request, h *heldAnswer) {
 	if h.status == 0 {
 		return
 	}
-	if n := int64(h.body.Len()); n > heldFree {
+	// Counted by what the answer holds in memory, which is more than its length.
+	if n := int64(h.body.Cap()); h.body.Len() > heldFree {
 		if s.heldGoing.Add(n) > heldAtOnce {
 			s.heldGoing.Add(-n)
 			_ = rc.SetWriteDeadline(time.Now().Add(answerWait))
@@ -148,18 +154,20 @@ func (s *Server) bodyFirst(w http.ResponseWriter, r *http.Request, most int64) (
 	return true
 }
 
-// readSmall reads a small JSON body into v, which must arrive within bodyWait. A body that did not arrive in time
-// ends the connection.
+// readSmall reads a small JSON body into v. The whole body must arrive within bodyWait, whatever it holds: one whose
+// first bytes are a whole value (or no value at all) and whose rest trickles is not waited for either. A body that did
+// not arrive in time, or is too long, ends the connection. io.EOF for an empty body.
 func readSmall(w http.ResponseWriter, r *http.Request, v any) error {
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(bodyWait))
-	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(v)
-	var syntax *json.SyntaxError
-	var kind *json.UnmarshalTypeError
-	if err == nil || errors.Is(err, io.EOF) || errors.As(err, &syntax) || errors.As(err, &kind) {
-		_ = rc.SetReadDeadline(time.Time{}) // it arrived, right or not
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err != nil {
+		w.Header().Set("Connection", "close") // the deadline stays: nothing more is waited for on this connection
 		return err
 	}
-	w.Header().Set("Connection", "close")
-	return err
+	_ = rc.SetReadDeadline(time.Time{})
+	if len(bytes.TrimSpace(b)) == 0 {
+		return io.EOF
+	}
+	return json.Unmarshal(b, v)
 }

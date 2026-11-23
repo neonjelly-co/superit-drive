@@ -146,6 +146,17 @@ func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 	// The mail is counted before the invitation is made, so that none is made without its mail, and taken off the count
 	// again when no mail goes: the invitation was not made, or the guest had one here already. A member who has had as
 	// many mailed as they may still changes an invitation that is there, which mails nothing.
+	//
+	// Whether the guest has one here is read now, with invitations and their removals taking turns (inviting): on what
+	// guard read, a removal sent together with the invitation made it new, mailed and uncounted.
+	s.inviting.Lock()
+	defer s.inviting.Unlock()
+	given, err := s.drive.GrantsOn(r.Context(), *c.place, idsOf(pathTo(*c.item)))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	c.grants = given
 	now := s.drive.Now()
 	counted := s.invitationMails.take(c.member.UserID, now)
 	if !counted && !invitedHere(c, address) {
@@ -223,7 +234,10 @@ func (s *Server) takeInvitation(w http.ResponseWriter, r *http.Request, c call) 
 		s.refuse(w, r, http.StatusNotFound, notHere)
 		return
 	}
-	s.changedAccess(w, r, c, s.drive.TakeAway(r.Context(), *c.place, c.item, index.Grantee{Guest: guest}, nil))
+	s.inviting.Lock() // in turn with invitations, which count on what is there (invite)
+	err := s.drive.TakeAway(r.Context(), *c.place, c.item, index.Grantee{Guest: guest}, nil)
+	s.inviting.Unlock()
+	s.changedAccess(w, r, c, err)
 }
 
 func guestOfPath(r *http.Request) (int64, bool) {

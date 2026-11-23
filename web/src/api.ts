@@ -441,7 +441,7 @@ export type Session = {
 /** Larger files are uploaded resumably, in parts; smaller ones in one request. */
 export const RESUMABLE_FROM = 32 * 1024 * 1024;
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
 	let res: Response;
 	try {
 		res = await fetch(path, {
@@ -451,6 +451,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 					? { Accept: "application/json", "Accept-Language": lang }
 					: { Accept: "application/json", "Accept-Language": lang, "Content-Type": "application/json" },
 			body: body === undefined ? undefined : JSON.stringify(body),
+			signal,
 		});
 	} catch {
 		throw new ApiError(0, t.connection.unreachable);
@@ -649,7 +650,8 @@ export const api = {
 	 * Files and folders whose names match, across everything the person can see: the best 50 first, and `more` when a
 	 * longer search would find others.
 	 */
-	search: (q: string) => call<{ items: Found[]; more: boolean }>("GET", `${base}/search?${new URLSearchParams({ q })}`),
+	search: (q: string, signal?: AbortSignal) =>
+		call<{ items: Found[]; more: boolean }>("GET", `${base}/search?${new URLSearchParams({ q })}`, undefined, signal),
 	/** What others shared with the person that they reach only through it, the most recently shared first. */
 	sharedWithMe: () => call<{ items: SharedItem[] }>("GET", `${base}/shared-with-me`).then((r) => r.items),
 	/** Moves an item into the place's trash. */

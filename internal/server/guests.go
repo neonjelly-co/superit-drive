@@ -67,7 +67,7 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 	// The answer is kept while the turn is held, and sent once it is given back: a guest (or anybody) who does not take
 	// it keeps nobody else waiting.
 	real := w
-	held := &heldAnswer{ResponseWriter: real, most: guestAnswerMost}
+	held := &heldAnswer{ResponseWriter: real, most: guestAnswerMost, onSpill: leave}
 	w = held
 	defer func() { leave(); s.sendHeld(r, held) }()
 	if !s.fromOwnPage(r) {
