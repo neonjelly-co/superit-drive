@@ -35,6 +35,15 @@ const PartSize = 32 << 20
 // space an unfinished upload takes, so it is not kept longer.
 const AbandonedAfter = 24 * time.Hour
 
+// MaxUploadsInProgress is the most resumable uploads one person (a member, or a guest) may have in progress at once, in
+// every place together. Each is a row of the index and a file on the storage that nobody sees or counts until it is
+// finished, kept for AbandonedAfter when nothing more arrives; the interface uploads one file at a time, so only
+// uploads left behind (a page closed midway, a connection that never came back) add up to this many.
+const MaxUploadsInProgress = 50
+
+// abandonedPage is how many abandoned uploads are read from the index at a time when they are removed.
+const abandonedPage = 100
+
 // maxLeftOvers is the most files left in the uploads folder (by an upload the Drive did not finish, or put there
 // directly) one run removes.
 const maxLeftOvers = 1000
@@ -50,6 +59,8 @@ var (
 	ErrRestart = errors.New("the upload must start again from the beginning")
 	// ErrBadPart: a part that does not fit the file, or is larger than a part may be.
 	ErrBadPart = errors.New("the part does not fit the file")
+	// ErrTooManyUploads: the person already has MaxUploadsInProgress uploads in progress.
+	ErrTooManyUploads = errors.New("the person has as many uploads in progress as they may")
 )
 
 // A WrongOffset error says that a part was sent for another place in the file than where the file now ends: Offset.
@@ -175,8 +186,11 @@ func (d *Drive) tryResume(ctx context.Context) (why string, err error) {
 //
 // The name is looked at now, so that a person is asked "replace or keep both" before the file travels: when it is
 // taken and existing does not say what to do, it is a *Taken error. It is looked at again when the upload is finished.
+//
+// A person who has MaxUploadsInProgress uploads in progress starts no other (ErrTooManyUploads), until one of them is
+// finished, cancelled, or removed as abandoned; nothing is asked of the storage for it.
 func (d *Drive) StartUpload(ctx context.Context, p index.Place, folder *index.Item, name string, size int64, existing Existing, by By) (index.Upload, error) {
-	if err := CheckName(name); err != nil {
+	if err := by.checkName(name); err != nil {
 		return index.Upload{}, err
 	}
 	if size <= 0 {
@@ -189,6 +203,11 @@ func (d *Drive) StartUpload(ctx context.Context, p index.Place, folder *index.It
 	file, ok := pathIn(dir, name)
 	if !ok {
 		return index.Upload{}, &BadName{nameUnusable}
+	}
+	if n, err := d.index.UploadsBy(ctx, by.Member, by.Guest.ID); err != nil {
+		return index.Upload{}, err
+	} else if n >= MaxUploadsInProgress {
+		return index.Upload{}, ErrTooManyUploads
 	}
 	if err := d.askFirst(ctx, file, name, existing); err != nil {
 		return index.Upload{}, err
@@ -216,8 +235,14 @@ func (d *Drive) StartUpload(ctx context.Context, p index.Place, folder *index.It
 			return index.Upload{}, storageError(err)
 		}
 	}
-	if err := d.index.AddUpload(ctx, u); err != nil {
-		_ = d.storage.Delete(context.WithoutCancel(ctx), partialOf(u.ID))
+	// Counted again as it is recorded: of uploads started at once, only as many as may be are.
+	if err := d.index.AddUpload(ctx, u, MaxUploadsInProgress); err != nil {
+		if resumable {
+			d.removePartial(ctx, partialOf(u.ID))
+		}
+		if errors.Is(err, index.ErrTooManyUploads) {
+			return index.Upload{}, ErrTooManyUploads
+		}
 		return index.Upload{}, err
 	}
 	return u, nil
@@ -236,7 +261,7 @@ func (d *Drive) askFirst(ctx context.Context, file, name string, existing Existi
 	case errors.Is(err, storage.ErrNotFound):
 		return nil
 	case err != nil:
-		return storageError(err)
+		return d.nameError(err, name)
 	case existing == Replace && !there.Folder:
 		return nil
 	}
@@ -463,7 +488,7 @@ func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, d
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
 	case err != nil:
-		return Upload{}, storageError(err)
+		return Upload{}, d.nameError(err, name)
 	case existing == Replace && !there.Folder:
 		replacing = true
 	case existing == KeepBoth:
@@ -525,7 +550,7 @@ func (d *Drive) putInPlace(ctx context.Context, p index.Place, folder *index.Ite
 	case errors.Is(err, storage.ErrFull):
 		return index.Item{}, ErrFull
 	case err != nil:
-		return index.Item{}, storageError(err)
+		return index.Item{}, d.nameError(err, name)
 	}
 
 	// Size and time as the storage records them. If it cannot say right now, the file is there all the same: use what
@@ -549,35 +574,43 @@ func (d *Drive) putInPlace(ctx context.Context, p index.Place, folder *index.Ite
 // removeAbandoned removes the uploads no part of which arrived for AbandonedAfter, with their files; and the files in
 // the uploads folder the index does not know (left by an upload the Drive did not finish) that the storage says have
 // not changed for as long.
+//
+// It works through the abandoned uploads a page at a time (abandonedPage), each page after the last upload of the one
+// before, so it holds no more than a page of them, however many there are; one it could not remove is passed by, and
+// tried again on the next run.
 func (d *Drive) removeAbandoned(ctx context.Context) error {
 	cutoff := d.now().Add(-AbandonedAfter)
-	old, err := d.index.UploadsTouchedBefore(ctx, cutoff)
-	if err != nil {
-		return err
-	}
 	var failed error
 	removed := 0
-	for _, u := range old {
-		if err := d.dropUpload(ctx, u, false); err != nil {
-			if !errors.Is(err, ErrBusy) {
-				failed = err // kept, and tried again on the next run
-			}
-			continue
+	var last *index.Upload
+	for {
+		old, err := d.index.UploadsTouchedBefore(ctx, cutoff, last, abandonedPage)
+		if err != nil {
+			return err
 		}
-		removed++
+		for _, u := range old {
+			if err := d.dropUpload(ctx, u, false); err != nil {
+				if !errors.Is(err, ErrBusy) {
+					failed = err // kept, and tried again on the next run
+				}
+				continue
+			}
+			removed++
+		}
+		if len(old) < abandonedPage {
+			break
+		}
+		last = &old[len(old)-1]
 	}
 
-	// The files in the uploads folder the index does not know, unchanged for a day. The folder is read as it arrives and
-	// only those names are kept, at most maxLeftOvers a run: whoever put a great many files there directly costs the
-	// Drive no more memory than that, and the rest go on the next runs.
-	known, err := d.index.UploadIDs(ctx)
-	if err != nil {
-		return err
-	}
+	// The files in the uploads folder unchanged for a day that the index does not know. The folder is read as it arrives
+	// and only the names of those unchanged for a day are kept, at most maxLeftOvers a run: whoever put a great many
+	// files there directly costs the Drive no more memory than that, and the rest go on the next runs. The index is
+	// asked about each of them, rather than for every upload it knows.
 	var leftOver []storage.Entry
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
-	err = d.storage.Each(sctx, UploadsFolder, func(e storage.Entry) error {
-		if len(leftOver) < maxLeftOvers && !known[e.Name] && !e.Changed.IsZero() && e.Changed.Before(cutoff) {
+	err := d.storage.Each(sctx, UploadsFolder, func(e storage.Entry) error {
+		if len(leftOver) < maxLeftOvers && !e.Changed.IsZero() && e.Changed.Before(cutoff) {
 			leftOver = append(leftOver, e)
 		}
 		return nil
@@ -593,6 +626,11 @@ func (d *Drive) removeAbandoned(ctx context.Context) error {
 		p, ok := pathIn(UploadsFolder, e.Name)
 		if !ok || d.claimed(p) {
 			continue
+		}
+		if known, err := d.index.UploadKnown(ctx, e.Name); err != nil {
+			return err
+		} else if known {
+			continue // an upload in progress, kept while parts arrive, or one that could not be removed above
 		}
 		sctx, cancel := context.WithTimeout(ctx, storageTimeout)
 		if e.Folder {

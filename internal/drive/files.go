@@ -61,7 +61,10 @@ var (
 	nameControl = text.M("A name cannot contain line breaks, tabs or other control characters. Choose another name.",
 		"A név nem tartalmazhat sortörést, tabulátort vagy más vezérlőkaraktert. Válassz másik nevet.")
 	nameUnusable = text.M("This name cannot be used. Choose another name.", "Ez a név nem használható. Válassz másik nevet.")
-	nameTurns    = text.M("This name holds characters that change the direction of text. Rename the file and send it again.",
+	// nameRefused is for a name the storage refused (nameError).
+	nameRefused = text.M("The Drive storage does not take this name. Choose another name.",
+		"A Drive-tárhely nem fogadja el ezt a nevet. Válassz másik nevet.")
+	nameTurns = text.M("This name holds characters that change the direction of text. Rename the file and send it again.",
 		"Ebben a névben olyan karakterek vannak, amelyek megfordítják a szöveg irányát. Nevezd át a fájlt, és küldd el újra.")
 )
 
@@ -111,12 +114,20 @@ type Upload struct {
 // folder on the storage, in one PUT, which writes the whole file or nothing; only then is it moved into its folder. A
 // cut-off upload leaves nothing in the folder.
 //
-// When the name is taken, existing decides: ask (a *Taken error before any byte is sent), replace a file, or keep both
-// under a new name. A folder is never replaced. Another upload of the same name still in flight is ErrBusy. by is who
-// uploads: a file a member replaces goes to the trash as put there by them; a file a guest uploads is labelled with
-// their address.
-func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, name string, body io.Reader, size int64, existing Existing, by By) (Upload, error) {
-	if err := CheckName(name); err != nil {
+// While its bytes arrive, the upload holds nothing in the place: neither the place's lock nor a claim on its name, so
+// however slowly they come, the place can be deleted or handed over, and the folder and those above it renamed, moved
+// or deleted meanwhile. Once the file is whole, the place is held and decide is asked: whether the person may still
+// upload into the folder, on everything read again. It returns the place and the folder (nil: the top folder) as they
+// are now, which is where the file goes, or the error to answer with; then nothing is stored.
+//
+// When the name is taken, existing decides: ask (a *Taken error before any byte is sent, or once the file is whole when
+// the name was taken meanwhile), replace a file, or keep both under a new name. A folder is never replaced. Of two
+// uploads of one name at once, the first to be whole is stored, and the other finds the name taken; ErrBusy when the
+// name is being changed at the very moment the file is put in place. by is who uploads: a file a member replaces goes
+// to the trash as put there by them; a file a guest uploads is labelled with their address.
+func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, name string, body io.Reader, size int64, existing Existing, by By,
+	decide func(context.Context) (index.Place, *index.Item, error)) (Upload, error) {
+	if err := by.checkName(name); err != nil {
 		return Upload{}, err
 	}
 	dir, ok := folderPath(p, folder)
@@ -127,16 +138,6 @@ func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, n
 	if !ok {
 		return Upload{}, &BadName{nameUnusable} // CheckName refuses these first
 	}
-	leave, err := d.inPlace(ctx, p)
-	if err != nil {
-		return Upload{}, err
-	}
-	defer leave()
-	release, ok := d.claim(file)
-	if !ok {
-		return Upload{}, ErrBusy
-	}
-	defer release()
 	if err := d.askFirst(ctx, file, name, existing); err != nil {
 		return Upload{}, err
 	}
@@ -147,7 +148,7 @@ func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, n
 	// The upload's own length bounds it, and the person's leaving ends it; no other deadline applies.
 	partial := partialOf(newUploadID())
 	from := &bodyReader{r: body}
-	err = d.storage.Put(ctx, partial, from, size)
+	err := d.storage.Put(ctx, partial, from, size)
 	switch {
 	case from.err != nil:
 		d.removePartial(ctx, partial) // a storage other than Apache may keep what arrived
@@ -157,12 +158,41 @@ func (d *Drive) Upload(ctx context.Context, p index.Place, folder *index.Item, n
 	case err != nil:
 		return Upload{}, storageError(err)
 	}
-	up, err := d.settle(ctx, p, folder, dir, name, existing, partial, by)
+	up, err := d.uploadedInPlace(ctx, p, name, existing, partial, by, decide)
 	if err != nil {
 		d.removePartial(ctx, partial)
 		return Upload{}, err
 	}
 	return up, nil
+}
+
+// uploadedInPlace decides on a whole upload in one request again, holding the place, and moves it into the folder as
+// it is now, under name, claiming the name there for as long as that takes.
+func (d *Drive) uploadedInPlace(ctx context.Context, p index.Place, name string, existing Existing, partial string, by By,
+	decide func(context.Context) (index.Place, *index.Item, error)) (Upload, error) {
+	leave, err := d.inPlace(ctx, p)
+	if err != nil {
+		return Upload{}, err
+	}
+	defer leave()
+	p, folder, err := decide(ctx)
+	if err != nil {
+		return Upload{}, err
+	}
+	dir, ok := folderPath(p, folder)
+	if !ok {
+		return Upload{}, ErrGone
+	}
+	file, ok := pathIn(dir, name)
+	if !ok {
+		return Upload{}, &BadName{nameUnusable}
+	}
+	release, ok := d.claim(file)
+	if !ok {
+		return Upload{}, ErrBusy
+	}
+	defer release()
+	return d.settle(ctx, p, folder, dir, name, existing, partial, by)
 }
 
 // removePartial removes an upload's file from the uploads folder, after an upload that did not end in its folder.
@@ -196,7 +226,7 @@ func (d *Drive) freeName(ctx context.Context, dir, name string, folder bool) (fr
 			return candidate, release, nil
 		case err != nil:
 			release()
-			return "", nil, storageError(err)
+			return "", nil, d.nameError(err, candidate)
 		}
 		release()
 	}

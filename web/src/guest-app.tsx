@@ -1,4 +1,4 @@
-// The guests' page: signing in with a code mailed to them, "Shared with me", and what is in what was shared, with what
+// The guests' page: signing in with a link mailed to them, "Shared with me", and what is in what was shared, with what
 // their role lets them do. One plain column on every screen, a phone's too, in the guest's language (with the switch at
 // the top). It calls only the guests' API (under /s/guest/api), where the Drive decides everything again.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -50,15 +50,32 @@ function useWhere(): [Where, (w: Where) => void] {
 	return [where, go];
 }
 
-/** The address the invitation's link carried after "#as=", for the guest to confirm. */
-function invitedAddress(): string {
-	const hash = window.location.hash;
-	if (!hash.startsWith("#as=")) return "";
-	try {
-		return decodeURIComponent(hash.slice(4));
-	} catch {
-		return "";
-	}
+/**
+ * What a link from the Drive's mail carried after "#": the guest's address, for them to confirm (an invitation's link),
+ * and, in a sign-in link, the code that signs them in. A browser never sends what is after "#" by itself.
+ */
+function fromLink(): { address: string; code: string } {
+	const after = new URLSearchParams(window.location.hash.slice(1));
+	return { address: after.get("as") ?? "", code: after.get("code") ?? "" };
+}
+
+/**
+ * The code of the sign-in link the page was opened with. It leaves the address bar and the history as the page loads,
+ * whoever is signed in in this browser (the address stays, to be confirmed): an address copied from the bar afterwards
+ * signs nobody in.
+ */
+const linkCode = (() => {
+	const { address, code } = fromLink();
+	if (code) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#as=${encodeURIComponent(address)}`);
+	return code;
+})();
+
+/** Where the guest was going, for the sign-in link to lead back there: the item the address names, if any. */
+function goingTo(): { place?: number; item?: number } {
+	const q = new URLSearchParams(window.location.search);
+	const place = Number(q.get("place"));
+	const item = Number(q.get("item"));
+	return Number.isInteger(place) && place > 0 && Number.isInteger(item) && item > 0 ? { place, item } : {};
 }
 
 const signedOut = (e: unknown) => e instanceof ApiError && e.status === 401;
@@ -78,7 +95,7 @@ export function GuestApp() {
 		[queryClient],
 	);
 	// The sign-in stays on the page while the Drive is asked again who this is (coming back to the tab asks again, and
-	// a guest leaves the tab to read their code): asking again must not throw away the address and the code typed.
+	// a guest leaves the tab to read their mail): asking again must not throw away the address typed.
 	const out = useRef(false);
 	if (!me.isPending) out.current = signedOut(me.error);
 	if (out.current) return <SignIn onSignedIn={() => void queryClient.resetQueries()} />;
@@ -131,40 +148,43 @@ const field =
 	"h-10 w-full min-w-0 rounded-md border border-input bg-card px-3 text-base outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 max-md:h-11";
 
 /**
- * Signing in: the guest confirms their address (filled in from the invitation's link), is mailed a code, and types it.
- * The Drive says the same whatever the address, so the page does too.
+ * Signing in: the guest confirms their address (filled in from the invitation's link) and is mailed a link that signs
+ * them in. Opened with such a link, the page asks once more ("Sign in as …") and signs in on that click: never by
+ * itself, so that a program that opens the links in a mail (a scanner, a preview) signs nobody in and uses no link up,
+ * and nobody is signed in as someone else by following a link. The Drive says the same whatever the address, so the
+ * page does too.
  */
 function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
-	const [address, setAddress] = useState(invitedAddress);
+	const [address, setAddress] = useState(() => fromLink().address);
+	// The sign-in link's code, until it was tried: it works once.
+	const [code, setCode] = useState(linkCode);
 	const [sent, setSent] = useState<string>();
-	const [code, setCode] = useState("");
 	const [problem, setProblem] = useState<string>();
 	const [busy, setBusy] = useState(false);
 	const addressId = useId();
-	const codeId = useId();
+
+	const signIn = async () => {
+		setBusy(true);
+		setProblem(undefined);
+		try {
+			await guestApi.signIn(address, code);
+			onSignedIn();
+		} catch (err) {
+			setProblem(err instanceof Error ? err.message : String(err));
+			setCode(""); // back to asking for a link, with the address filled in
+			setBusy(false);
+		}
+	};
 
 	const ask = async (e?: FormEvent) => {
 		e?.preventDefault();
 		setBusy(true);
 		setProblem(undefined);
 		try {
-			setSent((await guestApi.askForCode(address.trim())).message);
-			setCode("");
+			setSent((await guestApi.askForCode(address.trim(), goingTo())).message);
 		} catch (err) {
 			setProblem(err instanceof Error ? err.message : String(err));
 		} finally {
-			setBusy(false);
-		}
-	};
-	const signIn = async (e: FormEvent) => {
-		e.preventDefault();
-		setBusy(true);
-		setProblem(undefined);
-		try {
-			await guestApi.signIn(address.trim(), code);
-			onSignedIn();
-		} catch (err) {
-			setProblem(err instanceof Error ? err.message : String(err));
 			setBusy(false);
 		}
 	};
@@ -173,7 +193,13 @@ function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
 		<Page>
 			<h1 className="text-2xl font-bold">{t.guest.signInTitle}</h1>
 			<p className="mt-2 text-muted-foreground">{t.guest.signInNote}</p>
-			{sent === undefined ? (
+			{code ? (
+				<div className="mt-6 max-w-md">
+					<Button variant="primary" onClick={() => void signIn()} disabled={busy} className="max-w-full">
+						<span className="min-w-0 truncate">{fill(t.guest.signInAs, { address: <span className="font-mono">{address}</span> })}</span>
+					</Button>
+				</div>
+			) : sent === undefined ? (
 				<form onSubmit={ask} className="mt-6 max-w-md">
 					<label htmlFor={addressId} className="text-sm font-medium">
 						{t.guest.yourAddress}
@@ -188,43 +214,24 @@ function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
 						className={`mt-1.5 ${field} font-mono`}
 					/>
 					<Button variant="primary" type="submit" className="mt-4" disabled={busy || !address.trim()}>
-						{t.guest.sendCode}
+						{t.guest.sendLink}
 					</Button>
 				</form>
 			) : (
-				<form onSubmit={signIn} className="mt-6 max-w-md">
+				<div className="mt-6 max-w-md">
 					<p role="status" className="text-sm">
 						{sent}
 					</p>
 					<p className="mt-1 text-sm break-words text-muted-foreground">
 						{fill(t.guest.sentTo, { address: <span className="font-mono">{address.trim()}</span> })}
 					</p>
-					<label htmlFor={codeId} className="mt-5 block text-sm font-medium">
-						{t.guest.theCode}
-					</label>
-					<input
-						id={codeId}
-						inputMode="numeric"
-						autoComplete="one-time-code"
-						pattern="[0-9 ]*"
-						maxLength={7}
-						required
-						value={code}
-						onChange={(e) => setCode(e.target.value)}
-						className={`mt-1.5 ${field} max-w-48 font-mono tracking-widest`}
-					/>
+					<p className="mt-3 text-sm text-muted-foreground">{t.guest.openItHere}</p>
 					<div className="mt-4 flex flex-wrap gap-2">
-						<Button variant="primary" type="submit" disabled={busy || code.replace(/\s/g, "").length !== 6}>
-							{t.guest.signIn}
-						</Button>
-						<Button variant="ghost" onClick={() => void ask()} disabled={busy}>
-							{t.guest.anotherCode}
-						</Button>
 						<Button variant="ghost" onClick={() => setSent(undefined)} disabled={busy}>
 							{t.guest.anotherAddress}
 						</Button>
 					</div>
-				</form>
+				</div>
 			)}
 			{problem && (
 				<p role="alert" className="mt-4 text-sm text-destructive">
@@ -407,7 +414,6 @@ function FolderView({ place, folder, above, go }: { place: number; folder: Guest
 		return () => {
 			stale = true;
 		};
-		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [checking, place, folder.id]);
 	const items = listing.data?.items;
 	const uploads = useUploads(place, folder.id, items);

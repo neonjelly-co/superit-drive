@@ -137,7 +137,7 @@ func (s *Server) routes() []route {
 		{pattern: "GET /s/{token}/items/{item}/zip", action: access.DownloadThroughLink, link: "token", item: "item", serve: s.zip},
 		{pattern: "POST /s/{token}/files", action: access.UploadThroughLink, link: "token", serve: s.sendIn},
 
-		// The guests' part of the public prefix (guests.go): signing in with a code mailed to them, their pages, and what
+		// The guests' part of the public prefix (guests.go): signing in with a link mailed to them, their pages, and what
 		// they do with what was given to them. Always a guest here (by the session their cookie names) or nobody; never
 		// a member, whatever the request says. A change needs the Drive's own Origin, as a member's does. A guest is never
 		// given a place's top folder, so every route in a place names an item, or an upload in progress.
@@ -638,9 +638,10 @@ func (s *Server) refuseTaken(w http.ResponseWriter, r *http.Request, taken *driv
 	refuseWith(w, r, http.StatusConflict, map[string]any{"exists": kind, "name": taken.Name}, message, taken.Name)
 }
 
-// readBody reads a small JSON body into v. ok is false when the person was already answered.
+// readBody reads a small JSON body into v, which must arrive within bodyWait (answers.go). ok is false when the person
+// was already answered.
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(v); err != nil {
+	if err := readSmall(w, r, v); err != nil {
 		s.refuse(w, r, http.StatusBadRequest, unreadable)
 		return false
 	}
@@ -681,7 +682,7 @@ func (s *Server) rename(w http.ResponseWriter, r *http.Request, c call) {
 	if !s.readBody(w, r, &body) {
 		return
 	}
-	it, err := s.drive.Rename(r.Context(), *c.place, *c.item, body.Name)
+	it, err := s.drive.Rename(r.Context(), *c.place, *c.item, body.Name, c.by())
 	if err != nil {
 		s.changeFailed(w, r, err, body.Name)
 		return

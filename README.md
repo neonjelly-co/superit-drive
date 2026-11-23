@@ -23,7 +23,7 @@ guest, My files, shared folder, Drive storage, trash). The Drive also runs witho
 - Members do not sign in to the Drive. A reverse proxy in front of it signs them in and adds headers saying who they
   are (see below). Everyone else comes in under one public prefix, `/s/`, which the reverse proxy opens without sign-in:
   visitors with a public link, who open and download what it is on or, through an upload-only link, send files into a
-  folder and see nothing of it (see [Public links](#public-links)), and guests, who sign in there with a code mailed to
+  folder and see nothing of it (see [Public links](#public-links)), and guests, who sign in there with a link mailed to
   them (see [Guests](#guests)). Every route passes through one authorisation function, `internal/access`.
 
 ### Signing in: headers and the member list
@@ -34,6 +34,9 @@ A signed-in request must carry two headers, added by the reverse proxy (which re
 |---|---|
 | `Drive-Secret` | The value of `DRIVE_HEADER_SECRET`. Without it, or with any other value, the request is refused, whatever else it carries. |
 | `Remote-User-Id` | The member's stable user id. |
+
+Each must come once: a request with two `Drive-Secret` headers, or two `Remote-User-Id` headers, is refused (403). A
+proxy set up to add the user id, instead of replacing what the browser sent, would put the browser's own value first.
 
 The person must also be in the member list file (`DRIVE_MEMBERS_FILE`), which the Drive reads and never writes. It
 re-reads the file within a second of it changing; replace it by writing a new file and renaming it over the old one.
@@ -81,8 +84,10 @@ any request outside `/s/` without the secret.
 also sends when a page on another site makes it call the Drive; so does the Drive's own cookie for guests. So every
 request other than `GET` and `HEAD`, a member's or a guest's (signing in included), must carry an `Origin` header equal
 to `DRIVE_ADDRESS` (browsers add it themselves); any other origin, `null`, or none is refused with 403, and the Drive
-logs both values. The reverse proxy must pass `Origin` through unchanged, and `DRIVE_ADDRESS` must be the address in the
-browser's address bar. The one change that needs no `Origin` is a file sent through an upload-only link: it carries no
+logs both values. Anyone can send such a request under `/s/guest`, so the line is written at most once a minute, with
+the address and the `Origin` cut to 200 bytes and a count of the refusals it left out (`leftOut`; see [What anyone can
+ask for is bounded](#what-anyone-can-ask-for-is-bounded)). The reverse proxy must pass `Origin` through unchanged, and
+`DRIVE_ADDRESS` must be the address in the browser's address bar. The one change that needs no `Origin` is a file sent through an upload-only link: it carries no
 cookie and says nothing about who sends it, so another site's page can do through it only what anyone with the
 address can (and the link's own page sends `Origin: null`, under its `no-referrer` policy).
 
@@ -101,7 +106,7 @@ a test keeps the two equal.)
 | `DRIVE_CAPACITY` | no | Size of the storage, in bytes or with a unit (`500GB`, `1TB`, `1TiB`). Empty when not known. |
 | `DRIVE_ADDRESS` | yes | The Drive's own address as people reach it, such as `https://files.example.com`. Changes are accepted only from pages at this address, and a public link's address starts with it. |
 | `DRIVE_PROJECT_NAME` | yes | Name of the project (the organisation) the Drive belongs to. |
-| `DRIVE_HEADER_SECRET` | yes | Secret the reverse proxy adds as `Drive-Secret`. At least 32 characters. The key that keeps guests' codes (see [Guests](#guests)) is made from it, so changing it ends the codes on their way (not the sessions). |
+| `DRIVE_HEADER_SECRET` | yes | Secret the reverse proxy adds as `Drive-Secret`. At least 32 characters, and your own (`openssl rand -hex 32`): whoever knows it and reaches the Drive's port is whoever they say they are. The Drive does not start with the secret the worked example once came with, and warns loudly when it runs with the repository's development secret. The key that keeps guests' codes (see [Guests](#guests)) is made from it, so changing it ends the codes on their way (not the sessions). |
 | `DRIVE_MEMBERS_FILE` | yes | Path of the member list file. |
 | `DRIVE_DATA_DIR` | yes | Folder for the index, and its copy in `backup/` (see [Backing up the Drive](#backing-up-the-drive)). The container image sets it to `/data`. |
 | `DRIVE_LISTEN` | no, `:8080` | Address the web server listens on. |
@@ -153,6 +158,15 @@ composed form (NFC), so a name from Safari on macOS matches the same name from a
 renaming and moving are each one change on the storage (`MKCOL`, or `MOVE` with `Overwrite: F`), after a look that
 the name is free, and nothing ever replaces what is there.
 
+**Names the storage refuses.** A storage can have names of its own that it will not hold: Apache, and so a Storage
+Box, answers 403 to anything about a name that starts with `.ht` (`.htaccess`, `.htpasswd`). When the storage answers
+403 where the Drive looks for, or puts, something under a name a person chose (an upload, a new folder, a rename, a
+new shared folder, a file sent through an upload-only link), the person is told that the storage does not take this
+name and to choose another (400, as for any name that cannot be used), not that the storage failed (502). The storage
+does not say why it refused, so a storage that refuses every change (its folder made read-only, say) is told to people
+the same way: the log says `the storage refused a name`, with what it answered, at most once a minute (`level=WARN`,
+with a count of those left out), and never as an error for each.
+
 **Uploads** stream straight through the Drive to a file of their own in the hidden uploads folder, never onto the
 server's disk, and are moved into their folder (`MOVE` with `Overwrite: F`) only when whole: a half-finished file
 never shows in a folder, whatever the storage does with a cut-off write. A file of up to 32 MiB arrives in one request,
@@ -163,6 +177,16 @@ When the name is taken, the interface asks first, before the file travels: **rep
 the file that is there into the trash and the upload into its place (the file comes back if that fails), and the file
 keeps its place, its id and so its sharing; **keep both** stores the upload as `Name (2).ext`, `Name (3).ext` and so
 on. A file never replaces a folder. The name is looked at again when the upload is moved into place.
+
+An upload in one request holds nothing in its place while its bytes arrive, however slowly they come: neither the
+place's lock nor its name. So the folder it goes into, and those above it, can be renamed, moved or deleted meanwhile,
+and the shared folder deleted or the held My files handed over. Once the file is whole, the Drive holds the place,
+decides again whether the person may upload into the folder (on everything read again, as a file sent through an
+upload-only link is decided again), and only then claims the name and moves the file in, where the folder is now.
+Someone who lost the right to upload there while their file arrived (a member's access taken away, a guest's
+invitation taken away or ended, sharing outside the project switched off, the folder or the place gone) stores nothing
+and is answered as they would be now. Of two uploads of one name at once, the first to be whole is stored, and the
+other finds the name taken (409 with `exists`, as for any taken name).
 
 **The trash.** Deleting moves the item, with everything in it, into the place's trash on the storage; restoring
 moves it back to the folder it came from (or the place's top folder when that folder is gone), adding ` (2)` to its
@@ -180,7 +204,10 @@ dropped from the index; uploads in progress count once they are in their folder.
 
 An upload nothing has arrived for in a day is removed, with its file, when the Drive starts and every hour; so is a
 file in the uploads folder the index does not know (left by an upload the Drive did not finish) once the storage says
-it has not changed for a day. The copies of the index have a hidden folder of their own, `index/` (see [The copy of the
+it has not changed for a day. The Drive works through the abandoned uploads 100 at a time, so removing them costs the
+same little memory however many there are. A person (a member, or a guest) has at most 50 resumable uploads in
+progress at once, in every place together: one more is refused (429, with a message that says so) until one of
+theirs is finished, cancelled, or removed after its day. The copies of the index have a hidden folder of their own, `index/` (see [The copy of the
 index](#the-copy-of-the-index)); the looks and the walk never read `.superit-drive/`, and no route reaches it.
 
 ### Keeping in step with the storage
@@ -318,6 +345,12 @@ on with them; a walk that could not, the next one, six hours later, begins with 
   deleted does not start again by itself. It can be shared again; the notice says so.
 - **Sharing is never put back, and nothing is given from the storage**: access taken away since, and a link removed
   since, stay away; nothing that was removed comes back.
+- **Sharing made after the snapshot applies to the files as they were then.** The index keeps today's links, shares and
+  invitations, and the storage holds the snapshot's files, so a link or a share made on a folder after the snapshot
+  reaches what the folder held at the snapshot: a file deleted from it before the link was made is in it again (as a
+  new item, with the access of its folder), and is served through that link; a file replaced before it was shared
+  serves its older bytes. Visitors and guests see no notice. After a rollback, whoever shared a folder outside the
+  project since the snapshot should look at what is in it now; "Sharing and space" lists what is shared outside.
 - **A shared folder deleted since** has its top folder back at its own path, while the index holds it in the trash. Its
   entry in the trash no longer holds it, so it is out of the trash again, as if a manager had restored it: with its
   managers, the roles given on it, what was given inside it and its links, as the index kept them. (A manager restoring
@@ -416,9 +449,9 @@ anyone in by itself, and nothing that only one server can honour:
 
 | Left out | Why |
 |---|---|
-| Guests' sessions (`guest_sessions`: each token's SHA-256) | A session is one browser's on one server. A hash cannot be turned back into a token, but a planted session would sign someone in; a Drive on a new server starts with none, and guests sign in again with a new code. |
-| Codes mailed to guests (`guest_codes`: HMACs) | They last ten minutes, and are keyed from `DRIVE_HEADER_SECRET`, which a new server does not have. |
-| The limits on trying codes (`guest_limits`) | Counters of the last hour on one server. |
+| Guests' sessions (`guest_sessions`: each token's SHA-256) | A session is one browser's on one server. A hash cannot be turned back into a token, but a planted session would sign someone in; a Drive on a new server starts with none, and guests sign in again with a new link. |
+| Codes of the sign-in links mailed to guests (`guest_codes`: HMACs) | They last thirty minutes, and are keyed from `DRIVE_HEADER_SECRET`, which a new server does not have. |
+| `guest_limits` | Counters an earlier version kept of wrong codes; nothing is counted there now. |
 | Uploads in progress (`uploads`) | Their uploader's browser on the old server; their files in `.superit-drive/uploads/` are removed a day after they were last written to, as any the index does not know. |
 | Where the walk is (`walk_cursor`, `walk_started`, `walk_finished`) | By one server's clock; a Drive started from a copy walks the storage at once, from the top. |
 
@@ -456,7 +489,7 @@ always bring it (a file put there since has the access of its folder; what is go
 its link with it, and dropped ten minutes later), and an item deleted since, which the copy has where it was, is found
 in its entry of the trash as itself, with what was given on it and its link, which work again when it is restored. The
 log says which copy it was, when it was copied, and how many places, items, shares, managers, links, guests and acts it
-brought; guests sign in again with a new code.
+brought; guests sign in again with a new link.
 
 - **A copy made by a newer Drive** (its schema is newer than this one's): the Drive does not start, and says so. An
   index built without it would soon put a copy without the shares in its place. Start a version as new as the one that
@@ -496,7 +529,7 @@ is there. Through a copy they planted or changed, they can give more than the fi
 - access to any file in the Drive to any member (a grant), or a member's My files to another member, or the manager role
   on shared folders;
 - public links whose address they chose (anyone with it reaches those files through the Drive, until the link is
-  removed), and invitations to addresses they control (to sign in, a guest still needs the code mailed to that address);
+  removed), and invitations to addresses they control (to sign in, a guest still needs the link mailed to that address);
 - sharing outside the project switched back on, where it was off;
 - an act under way that hands over or deletes a held My files (it changes only what is in the Drive's folder), and a
   record of acts that never happened, or without those that did;
@@ -563,13 +596,34 @@ storage, made by the newer version (see [Starting from a copy](#starting-from-a-
 | The newer version's schema | The older Drive starts from | Kept | Lost |
 |---|---|---|---|
 | Newer (a migration the older version lacks) | The data folder's copy: the snapshot, the index as the older version left it when it stopped for the upgrade. The log says `THE COPY OF THE INDEX ON THE STORAGE IS LEFT ALONE` (`level=ERROR`). | Everything in the index from before the upgrade, guests' sessions included. The files on the storage as the newer version left them, taken in by the walk as after any start from a copy: a file added under it has the access of its folder, and one deleted under it is in the trash as itself. | What changed in the index under the newer version: shares, links, guests' invitations and sessions, shared folders and their managers, switches, acts on held My files. A file moved or renamed under it loses what was given on it: it is a new item at its new place, with the access of its folder. All of it but guests' sessions is in the newer copy, which the Drive moves aside on the storage, as `newer-version-<when>-copy-<number>.sqlite`, and keeps. |
-| The same | The newer version's last copy on the storage, numbered after the snapshot's. The log says the Drive made its index from the copy on the storage. | What changed in the index under the newer version, up to its last copy (the copy it makes as it stops holds every change, unless it was killed). The files on the storage, as above. | Guests' sessions (a copy on the storage holds none: guests sign in again, with a new code), and, when the newer version was killed rather than stopped, what changed after its last copy. |
+| The same | The newer version's last copy on the storage, numbered after the snapshot's. The log says the Drive made its index from the copy on the storage. | What changed in the index under the newer version, up to its last copy (the copy it makes as it stops holds every change, unless it was killed). The files on the storage, as above. | Guests' sessions (a copy on the storage holds none: guests sign in again, with a new link), and, when the newer version was killed rather than stopped, what changed after its last copy. |
+
+**Access removed under the newer version is back.** In the first row, "what changed in the index under the newer
+version" is lost both ways: what was given under it is gone, and what was *taken away* under it works again. A public
+link removed then opens again at its old address; a share or an invitation taken away then lets its member or guest in
+again; a guest signed out then (their sessions are in the snapshot) is signed in again. The Drive does not take the
+removals over from the newer copy: it does not know that copy's schema, and cannot tell a removal that was meant from
+the rest of what changed. It compares instead, as it starts, the sharing its index holds with the newer copy's, and
+logs `REMOVED UNDER THE NEWER VERSION, AND BACK` (`level=ERROR`) with how many public links, shares and invitations are
+back, and a line for each link (`a public link removed under the newer version works again`, with its place, item and
+name; the first hundred). Sharing outside the project that was switched off under the newer version is on again too,
+for the whole project or for a shared folder: the Drive logs `SWITCHED OFF UNDER THE NEWER VERSION, AND ON AGAIN`
+(`level=ERROR`) for each, with the shared folder's place. (An end date brought forward under the newer version is back
+where it was, and is not named.) When nothing is back it says so, and when the newer copy's sharing cannot be read (a
+later version changed those tables) it says that it cannot tell. After an upgrade that was undone, read those lines,
+and remove again what should not be back: the links they name, the switches, and for shares and invitations whatever
+"Sharing and space" and each shared folder's access show that should no longer be there.
 
 With the same schema the later copy wins, not the snapshot's, because the files on the storage were not put back
 either: the later copy's sharing is on the files as they are.
 
 The upgrade tried again starts the newer version with the older version's index: it adopts nothing, numbers its copies
 after the older version's, and leaves a copy set aside where it is.
+
+An index of a newer schema in the data folder itself (the image put back to an older version, the data folder not)
+stops the older version from starting, with `the index was made by a newer version of the Drive` and both schema
+versions: it would skip the migrations it does not know and work on tables whose rules it does not keep. Put the data
+folder back as it was before the upgrade, as above, or start the newer version.
 
 Versions up to 0.2.0 do not leave a newer copy alone: after an upgrade from one of them to a newer schema fails, the
 older version does not start. Starting the newer version again on the restored data folder does: it makes its index
@@ -720,7 +774,9 @@ has an admin). Access shared on items in it stays with them while it is in the t
 Each place has a lock in memory: every change inside it (giving or taking access included, and a look at the storage
 as it writes what it found into the index) holds it shared, and moving the whole shared folder into the trash or out
 of it holds it alone, waiting up to ten seconds for the changes under way. A change that starts after the shared folder
-went to the trash finds it gone.
+went to the trash finds it gone. An upload in one request holds the lock only while its whole file is put into its
+folder, never while its bytes arrive: one that trickles keeps no shared folder from being deleted, and one whole after
+its shared folder went to the trash is not stored.
 
 ### Moving into a shared folder
 
@@ -742,9 +798,20 @@ who before anything moves, as "who can see this" would show it there: the projec
 what was given on the folders on the way down, and what was given on the item itself, which it keeps. It is decided as
 the move itself would be, and names a folder above the destination only when the mover can open it.
 
+**Public links and invitations that had stopped working stay behind.** In a My files a link or an invitation works only
+while whoever made it may still share its item; in a shared folder it does not depend on its maker, so one that had
+stopped (its maker lost their access, or left the project) would start again there. The move judges every link and
+invitation on the moved item and on everything inside it, at any depth, each where it is now: those that do not work
+are removed as it moves, and logged as a count (an invitation that has ended among them; one on something in the trash
+or missing from the storage unless the owner made it). Those stopped only by sharing outside the project being switched
+off come along. The warning lists every one that works inside what is moved (`"inside"`), with the item it is on, so
+the mover sees what stays reachable from outside the project.
+
 ```
 GET    /api/places/{place}/items/{item}/move?to=42[&place=7]    who would see it there (no "to": the top folder)
-       200 {"becomesProjects", "access": [...as GET …/access answers...], "seenBy": {"everyone", "members"}}
+       200 {"becomesProjects", "access": [...as GET …/access answers...], "seenBy": {"everyone", "members"},
+            "inside": [{"item": {"id", "name"}, "path": [{"id", "name"}], "link": "view" | "upload-only"}
+                     | {"item", "path", "guest": <address>, "role", "until"}]}
 POST   /api/places/{place}/items/{item}/move    {"to": 42 | null, "place": 7}    "place" only for another place
        200 the item, with "place"    400 a move between places that is not allowed    404 a place or folder that is not
        there or that the person cannot add to    409 a name taken there, or something in it being uploaded
@@ -771,7 +838,9 @@ view link, in the list's sentence) that anyone with the link can.
   how often it was used, and offers "Make a new link" (in its place: the old address stops working) and "Remove link".
 - **Removed is dead for good**: its address answers exactly as one that never existed, or a malformed one (the same
   status, page and headers, after the same work: the token is hashed and looked up either way). A new link gets a new
-  address. Neither the address nor the token is ever written to the log.
+  address. Neither the address nor the token is ever written to the log. A download or zip that was waiting for its
+  turn when the link was removed sends nothing, and a zip on its way is cut short before the next thing it would add
+  (see [Large transfers](#large-transfers-and-the-memory-figure)).
 - **It follows its item**, by the item's id: through rename, move (out of a My files into a shared folder too), and
   replacing a file with an upload. It covers what is in the item where it is now. While the item is in the trash, or in
   a shared folder in the trash, the link opens nothing; restored, it works again at the same address. While the item is
@@ -799,7 +868,7 @@ view link, in the list's sentence) that anyone with the link can.
 ```
 GET    /api/places/{place}/items/{item}/link     200 {"link": {"kind": "view" | "upload-only", "made", "madeBy",
                                                  "former", "uses", "used", "works", and for an upload-only link
-                                                 "takenIn", "limit", "full"} | null}
+                                                 "takenIn", "limit", "files", "filesLimit", "full"} | null}
 POST   /api/places/{place}/items/{item}/link     {"replace": true, "kind": "view" | "upload-only"} (all may be left out:
                                                  a view link, not in place of one)
        201 {"link": {…, "address": "https://files.example.com/s/<token>"}}    the only answer with the address
@@ -860,8 +929,25 @@ addresses.
 at most 8 of the 32 slots, in a line of their own (shared with guests), and at most 64 visitors wait in it at once, and
 at most 64 outsiders' turns keep a place in it (more are told 503 at once); a transfer that moves nothing for two
 minutes is ended. Besides transfers, at most 16 visitors' requests are worked on at once, and 64 more wait up to 5
-seconds; more are answered 503 at once. Trying tokens costs a hash and one look in the index, with no lock and no log
+seconds; more are answered 503 at once. A turn is for the Drive's own work, never for a connection: a page is made
+while its turn is held and sent after the turn is given back, to be taken within 30 seconds (long pages waiting to be
+taken hold 8 MiB together at most; one more is told 503), and the small body of a change (a guest's, read before any
+turn is taken; a member's too) must arrive within 15 seconds. Trying tokens costs a hash and one look in the index, with no lock and no log
 line. A zip is bounded as for members (10,000 entries).
+
+#### What anyone can ask for is bounded
+
+- **Headers.** A request's first line and headers may take 32 KiB together (`app.MaxHeaderBytes`; Go's own slack of
+  4 KiB on top): a longer one is answered 431 before anything about it is looked at, a visitor's, a guest's or a
+  member's. An address the Drive answers and what a browser and the reverse proxy send with it take a few kilobytes.
+- **The log.** The lines someone outside the project can cause as often as they ask are written at most once a minute
+  each, with what they quote of the request cut to 200 bytes, and the next one says how many were left out (`leftOut`;
+  package `seldom`): `refused a change that did not come from the Drive's own pages` (anyone, under `/s/guest`; a
+  member's browser, made to by another site's page), the three lines about asks for a sign-in link (some were
+  dropped, one came too soon after a link was sent, too many links were sent; anyone, the last two with a guest's
+  address; see [Guests](#guests)), and `the storage refused a name` (a visitor through an upload-only link, a
+  guest, a member; see [Layout on the storage](#layout-on-the-storage)). The counts are in memory: a restart forgets them, and
+  the next line of each kind is written at once.
 
 #### Upload-only links
 
@@ -926,15 +1012,19 @@ POST   /s/{token}/files?name=<its name>[&turn=<word>]    Content-Length: <its si
   answered as the link now answers (404); sharing outside the project switched off meanwhile: 403. Its folder moved into
   another place meanwhile: 409, nothing kept (sent again, it goes there).
 
-**10 GB, then a reset.** An upload-only link takes in at most 10 GB (10^9 bytes each, as storage is sold) until whoever
-may share its folder resets it (`POST …/link/reset`, "Make room for more" in its details); what it took stays in the
+**10 GB or a thousand files, then a reset.** An upload-only link takes in at most 10 GB (10^9 bytes each, as storage
+is sold) and at most 1,000 files, an empty file counting as one (bytes alone would let empty files in without end),
+until whoever may share its folder resets it (`POST …/link/reset`, "Make room for more" in its details); what it took stays in the
 folder. Each file's `Content-Length` is held against the limit from before its first byte is read, under one lock for
 all links, so files on their way at once never pass it together, whatever they say about themselves: one that would is
 refused at once (413), one cut off gives its room back, and what is kept is counted only once it is in its folder. A
-full link refuses every file, an empty one too, and its page says so. Changing its kind keeps the count; making a new
-link in its place, or removing it, ends it. The count (`links.taken_in`) is not an access change (no copy of the index
-is made for it); copies carry it as it was when they were made. A test build reads `SUPERIT_DRIVE_TEST_LINK_LIMIT` for a
-smaller limit.
+full link (in bytes or in files) refuses every file, an empty one too, and its page says so; its member sees both
+counts in its details. Changing its kind keeps the counts; making a new link in its place, or removing it, ends them.
+A folder that already holds 10,000 entries, as many as the Drive keeps in step with the storage and puts in a zip,
+takes no file through a link, however often the link is reset (413, as a full link). The counts (`links.taken_in`,
+`links.taken_files`) are not an access change (no copy of the index is made for them); copies carry them as they were
+when they were made. A test build reads `SUPERIT_DRIVE_TEST_LINK_LIMIT` and `SUPERIT_DRIVE_TEST_LINK_FILES` for smaller
+limits.
 
 **Labelled.** A file sent through a link carries `"addedBy": {"link": true}` in members' listings, search and "Shared
 with me" (as a guest's carries `{"guest": <their address>}`), and the interface shows "Through a link" under its name
@@ -944,7 +1034,7 @@ takes the label off. Guests never see labels.
 **What strangers can use up.** A file sent is a transfer in the outsiders' line (8 slots at most, shared with view
 links' downloads and guests): members' 24 are never theirs. A file not let through is answered 503 before any of it is
 read, and its turn keeps its place; at most 64 outsiders' turns are kept at once, so new turns sent as fast as a
-stranger likes cost a fixed amount of memory. Each link takes in at most 10 GB until it is reset. A stranger who sends a
+stranger likes cost a fixed amount of memory. Each link takes in at most 10 GB and 1,000 files until it is reset. A stranger who sends a
 file slowly holds one of the 8 slots, and the room their file says it needs, for as long as bytes keep coming (a
 transfer is ended only after two minutes without any); members are not slowed by it, and whoever may share the folder
 can remove the link. Measured in the [memory test](#large-transfers-and-the-memory-figure).
@@ -981,16 +1071,34 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   outside the project is switched off, what was given to them answers 403 with `"unavailable": true` and says so, their
   "Shared with me" leaves it out (not even its name) and says `"unavailable": true`, and they stay signed in: it works
   again, in the same session, when it is switched back on.
-- **Signing in.** The guests' page asks for their address and mails a code: six digits from `crypto/rand`, only the
-  newest of their codes works, once, for 10 minutes, and not after five wrong tries; at most five codes are sent to an
-  address an hour, and at most 100 to all addresses together. A code is sent only to a guest's address with something
-  shared with it that lets them in now (or will once sharing outside the project is switched back on where it is), and
-  never to a member's; the page says the same, at once, for every address
-  (the work is done afterwards, one address at a time, and nothing is logged about an address that is no guest's). Every
-  try of a code does the same work whatever the address; past 100 wrong tries of live codes in an hour, from everyone
-  together, no try is taken (429) until the hour has passed. The index keeps only each code's HMAC-SHA-256, keyed with a
-  key made from `DRIVE_HEADER_SECRET`, which the index never holds.
-- **Staying signed in.** The right code starts a session of 30 days on that browser, kept by the Drive (the index keeps
+- **Signing in.** The guests' page asks for their address and mails it a sign-in link: the guests' page, with the
+  address and a code after the `#` (which no browser sends by itself, so it reaches no log and no other site). Opened,
+  the page takes the code out of the address bar and the history and offers "Sign in as (the address)"; on that click
+  it sends the code with the address, as a change from the Drive's own page, and the guest is signed in in that
+  browser. Nothing signs in by itself: a program that fetches the links in a mail, or opens them and runs the page (a
+  mail scanner, a preview), signs nobody in and uses nothing up, and nobody is signed in as someone else by following a
+  link. The code is 32 bytes
+  from `crypto/rand` (43 characters), far too long to guess, and works once, for 30 minutes. So nothing a stranger does
+  at the sign-in page takes a guest's sign-in away:
+  - wrong codes are not counted, for one address or for all: no number of them stops a right link from working;
+  - asking again leaves the links already mailed working; while one mailed in the last 5 minutes is not used yet, no
+    other is sent to that address (the answer says so to everyone), so a stranger makes that address get one mail in
+    5 minutes at most, and it always has a link that works; once a link is used, another can be asked for at once, up
+    to 12 links to one address within an hour, used or not;
+  - an address waits once to be sent a link, however often it is asked for; 64 addresses wait at most, and the rest are
+    dropped, answered the same;
+  - all addresses together are sent 1,000 links an hour at most, a bound on the mail the page can make the Drive send
+    that takes more than eighty guests' addresses, asked for without pause, to reach (one address is sent 12 an hour
+    at most).
+
+  Reaching any of these is logged, once a minute at most, without any address. A link is sent only to a guest's address
+  with something shared with it that lets them in now (or will once sharing outside the project is switched back on
+  where it is), and never to a member's; the page says the same, at once, for every address (the work is done
+  afterwards, one address at a time, and nothing is logged about an address that is no guest's). A try of a code is one
+  look for it, the same whatever the address. The index keeps only each code's HMAC-SHA-256, keyed with a key made from
+  `DRIVE_HEADER_SECRET`, which the index never holds. A guest who reads their mail on another device than the one they
+  want to work on opens the link there: the link signs in the browser it is opened in.
+- **Staying signed in.** The link starts a session of 30 days on that browser, kept by the Drive (the index keeps
   its token's SHA-256; the browser the token, in a cookie): `__Secure-drive-guest` (`drive-guest` when `DRIVE_ADDRESS`
   is plain HTTP), `Path=/s/guest`, `HttpOnly`, `Secure` with HTTPS, `SameSite=Lax` (so it comes along when a guest opens
   the Drive from their mail, and never with another site's change). A guest stays signed in on at most ten browsers;
@@ -998,11 +1106,16 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   or ends (the guest is removed with it, and their codes, sessions and uploads in progress); when nothing given to them
   lets them in any more (in the trash, gone from the storage, in the My files of someone who left, its giver may no
   longer share it), sharing outside the project switched off aside; and when their address appears in the member list.
-  Signed out, they sign in again with a new code.
+  Signed out, they sign in again with a new link.
 - **A guest who joins the project** (their address appears in the member list) keeps their access as a member: within a
-  second of the list changing (and when the Drive starts), every invitation to them becomes a grant to that member by
-  user id, with its end date (the higher role, and the later end or none, where they had one already), and the guest
-  is removed. From then on it follows their user id, also when their address changes. A member who leaves never
+  second of the list changing (and when the Drive starts), every invitation to them that works at that moment becomes
+  a grant to that member by user id, with its end date, and the guest is removed. An invitation that does not work then
+  is dropped with the guest, so that nothing taken away comes back: one that has ended, one whose giver may no longer
+  share its item or has left the project, one on something in the trash, and one the new member gave their own address.
+  (One stopped only by sharing outside the project being switched off comes along.) Where the member was given
+  something on the same item already, the two are never mixed: the invitation takes that grant's place only when it is
+  no less on both counts (its role no lower, its end no earlier), and otherwise the member's grant stays as it is.
+  From then on it follows their user id, also when their address changes. A member who leaves never
   becomes a guest; their address invited again is a new guest.
 - **Labels and uses.** A file or folder a guest added (uploaded or made) is labelled with their address, for members
   (`"addedBy": {"guest": …}` in listings, "From a guest" under its name and "Added by" in the details), as a file sent
@@ -1015,12 +1128,23 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   cannot reach, cannot reach as `DRIVE_SMTP_TLS` says, or that refuses its login, inviting is refused (409, `"mail":
   false`) and says why, and `GET /api/me` says so before anyone types (`"guests": {"invite", "why"}`). Sharing with a
   member's address, and public links, still work.
-- **Their transfers** take turns with visitors': outsiders hold at most 8 of the 32 slots, in a line of their own.
+- **At most 30 invitations an hour from one member.** Every new invitation is a mail from the Drive to an address the
+  member typed, with names they chose (their own, and the file's or folder's), and inviting an address, taking the
+  invitation away and inviting it again mails it each time. So a member has 30 invitations mailed within any hour; the
+  next is refused (429, with `Retry-After`), says so, and makes no invitation. Changing an invitation that is there,
+  taking one away and sharing with a member's address are not counted. The count is kept in memory: a restart forgets
+  it, and the hour starts again.
+- **Their transfers** take turns with visitors': outsiders hold at most 8 of the 32 slots, in a line of their own. A
+  download or zip of theirs that waited is decided again when its turn comes, a zip as it goes on, and an upload in one
+  request once its file is whole (see [Large transfers](#large-transfers-and-the-memory-figure)): an invitation taken
+  away or ended meanwhile sends and stores nothing more. A guest has at most 50 resumable uploads in progress.
 
 ```
 GET    /s/guest/                                      the guests' page (and /s/guest/assets/…, /s/guest/favicon.svg)
-POST   /s/guest/api/code                {"address"}   202, the same for every address
-POST   /s/guest/api/sign-in             {"address", "code"}   200 and the cookie; 400 not right; 429 too many tries
+POST   /s/guest/api/code                {"address"[, "place", "item"]}   202, the same for every address: a sign-in
+                                        link is mailed (to where the guest was going, when the page says)
+POST   /s/guest/api/sign-in             {"address", "code"}   the link's code: 200 and the cookie; 400 not right,
+                                        used, or more than 30 minutes old
 POST   /s/guest/api/sign-out                          204
 GET    /s/guest/api/me                                {"address", "project"}; 401 {"signIn": true} when not signed in
 GET    /s/guest/api/shared-with-me                    {"items": [{…, "can", "place", "role", "sharedBy", "until"}]}
@@ -1031,6 +1155,10 @@ POST   /s/guest/api/places/{place}/items/{item}/files | /uploads | /folders | /r
 GET | PUT | DELETE /s/guest/api/places/{place}/uploads/{upload}, POST …/finish     their own uploads in progress
 DELETE /s/guest/api/places/{place}/items/{item}
 ```
+
+A name a guest gives (to a file they upload, a folder they make, something they rename) is refused with the characters
+that turn the direction of text (U+202A to U+202E, U+2066 to U+2069), as a name sent through an upload-only link is: a
+member reads those names in their own list.
 
 Every answer under `/s/guest` carries `X-Robots-Tag: noindex, nofollow`, the members' `Content-Security-Policy` (the page
 runs the interface's own script) and `Referrer-Policy: same-origin` (the addresses there hold no secret, and
@@ -1051,7 +1179,7 @@ Where it is off (the project's switch, or the shared folder's; `access.Place.NoS
 - **No public link opens**: a visitor whose link would open what they ask for gets the page "This link is not
   available" (403), anything else the one answer for a link that does not exist. No link is made.
 - **No guest gets in**: what was given to a guest answers 403, `{"unavailable": true, "error"}`; their "Shared with me"
-  leaves it out and says `"unavailable": true`. They stay signed in (and can sign in, and be sent a code), to be told
+  leaves it out and says `"unavailable": true`. They stay signed in (and can sign in, and be sent a link), to be told
   so. No guest is invited, and no invitation's role or end date changed.
 - **What was made stays as it is**: whoever may share an item still sees its link and its guests, each saying it does
   not work now (`"works": false`), and removes them; "who can see this" and the list's sentence no longer count them.
@@ -1123,13 +1251,13 @@ list it has now, at every request, so someone added back with the same user id f
 - **Their My files is held**: kept as it is, its trash included, and closed to everyone, project admins included
   (`access.Place.OwnerLeft`). Nothing shared from it opens: its public links answer as links that do not exist,
   invitations let no guest in (a guest with nothing else that lets them in is signed out at their next request, and
-  is sent no code), what was shared with members or with everyone opens nothing and leaves their "Shared with me", and a
+  is sent no link), what was shared with members or with everyone opens nothing and leaves their "Shared with me", and a
   search finds nothing in it. The public links they made and the guests they invited in someone else's My files stop too
   (they were their shares; what they gave members there stays, for that My files' owner to take away); what they did in
   a shared folder is the project's and goes on: its files, its links, its guests and what they gave on it.
 - **Back with the same user id** (a list briefly wrong, a mistake undone, a new address), they have it back as it was,
   with their trash, and everything shared from it works again; a guest who was signed out meanwhile signs in again with
-  a new code. People are told apart by user id, never by address: two members swapping addresses keep their own files.
+  a new link. People are told apart by user id, never by address: two members swapping addresses keep their own files.
   (Its top folder on the storage keeps the name of their address when they first opened the Drive.)
 - **Until a project admin decides.** Held lasts as long as it takes: nothing ends it but a project admin's act, a
   hand-over or a deletion, each of the held My files as a whole, at its top folder (`access.HandOverHeld`,
@@ -1247,6 +1375,7 @@ GET    /api/search?q=<part of a name>
                        "path", "fromTop"}],                   where it is, as far as the person can open the folders above it
             "more": false}
        400 nothing to search for, or more than 255 bytes
+       503 too many searches are under way (Retry-After), or this one took too long and was ended
 ```
 
 It finds files and folders by name (never by what is in them) across everything the person can see, and nothing else:
@@ -1270,6 +1399,13 @@ It finds files and folders by name (never by what is in them) across everything 
   directly is found once its folder was opened or the walk passed it (within a walk's interval and length, see
   [Keeping in step with the storage](#keeping-in-step-with-the-storage)); what went from it is not found from the first
   look that missed it.
+- **A few at once, each for a bounded time.** A search reads every name in its scope, on one of the index's four
+  connections, which everything else the Drive does needs too (measured at the index before there was a bound: eight
+  searches at once over 50,000 items made an unrelated lookup take up to 2.8 seconds, from 0.3 ms). So two searches
+  run at once (`index.SearchesAtOnce`), whoever asked; the rest wait their turn, for at most 5 seconds, then are told
+  the Drive is busy searching (503, `Retry-After`); and one that has run for 5 seconds is ended in the middle of its
+  reading and says so (503), its connection free again. The bound is for everyone together: one member's many searches
+  make another's wait, but never longer than that.
 
 ### Selecting several
 
@@ -1310,7 +1446,7 @@ about anyone's language is kept on the server: no setting, no cookie, nothing in
   guests at the top of their page), kept in that browser (`localStorage`); otherwise the first of the browser's
   languages that the Drive speaks; English when it names neither. Switching loads the page again in the other language.
   A page is never in two: it loads its words before it shows anything.
-- **The Drive's own answers** (the `"error"` of every refusal, `guests.why` in `GET /api/me`, the guests' "a code is on
+- **The Drive's own answers** (the `"error"` of every refusal, `guests.why` in `GET /api/me`, the guests' "a sign-in link is on
   its way") are in the language of the request: its `lang` query parameter when that is `en` or `hu`, otherwise the one
   of the two its `Accept-Language` prefers (by weight, then order; English when it names neither), with
   `Content-Language` saying which. The interface sends `Accept-Language` with its page's language on every call, and adds
@@ -1322,7 +1458,7 @@ about anyone's language is kept on the server: no setting, no cookie, nothing in
   (`data-words`), so one script, and one hash in the policy, serves both languages. It sends each file with the page's
   `lang`, so a refusal is in the page's language too.
 - **Mail** is in the language of the page whose act sends it: "shared with you" in the language of the member who
-  shared, an invitation in the inviting member's, a guest's code in the language of the guests' page that asked for it.
+  shared, an invitation in the inviting member's, a guest's sign-in link in the language of the guests' page that asked for it.
   The Drive knows no other language of the person it mails.
 - What only the people running the Drive read stays in English: the log, the settings' errors, and the storage check's
   output (which the daemon reads).
@@ -1360,7 +1496,7 @@ sentence's subject; and a noun after a number stays singular (3 elem). Dates and
 ### Mail
 
 The Drive sends three kinds of mail: "shared with you", to a member something was just shared with by name; an
-invitation, to a guest invited to something; and the codes guests sign in with (see [Guests](#guests)). With
+invitation, to a guest invited to something; and the links guests sign in with (see [Guests](#guests)). With
 `DRIVE_SMTP_HOST` empty it sends none and attempts none: sharing with members and public links work the same, and
 inviting guests is unavailable. The line the Drive logs at start says where mail goes
 (`mail="smtp.example.com:587 (starttls)"`) or `mail=off`. Whether mail works is what the last mail sent, or the last
@@ -1388,7 +1524,7 @@ not; inviting a guest checks again when that has run out.
   `DRIVE_SMTP_TLS` says), signing in with `AUTH PLAIN` when there is a login; the server's certificate is checked
   against the system's authorities (the image has them). It uses Go's standard library only.
 - **Never in the way:** a mail is queued (up to 64) and sent in the background, one at a time, within 30 seconds each;
-  the share is answered at once whatever happens to it. (A guest's code is sent by the guests' own sender in the
+  the share is answered at once whatever happens to it. (A guest's sign-in link is sent by the guests' own sender in the
   background, also never in the way of the page that asked.) A mail that fails is logged with what it was about (the
   recipient's user id, the place and item ids) and why, never with its text or the recipient's address, and is not
   tried again; so is one dropped because the queue is full. Mail still queued when the Drive stops is not sent.
@@ -1408,7 +1544,7 @@ upload-only link too), or one part of a resumable upload. Three rules hold the f
   gets it before an outsider. Outsiders wait in a line of their own, at most 64 of them, and at most 64 outsiders' turns
   keep a place in it (an upload's, below); more are told at once that the Drive is busy. A
   download waits its turn in line (holding only its idle connection),
-  for up to ten minutes, then gets 503. An upload is answered at once with 503, `{"busy": true}` and `Retry-After`,
+  for up to ten minutes, then gets 503; when its turn comes, it is decided again (below). An upload is answered at once with 503, `{"busy": true}` and `Retry-After`,
   before any of its bytes are read, and keeps its place in line: a resumable upload by its id, an upload in one request
   by the `turn` it names (any word the interface makes up for it, counted only for that person). When its turn comes, a
   slot is kept for it for 30 seconds; a place not asked about again for a minute is lost. The interface shows such an
@@ -1446,10 +1582,18 @@ parts, or anything else in `Range`, get the whole file, as HTTP allows.
 
 **Zips.** A folder, a place's top folder, or some items of a folder download as one zip, made as it is sent: each
 folder is looked at on the storage on the way, and each file streamed from the storage, stored as it is (no
-compression). Folders are in it too, empty ones included. A backslash in a name becomes `_` in the zip. A zip holds
+compression). Folders are in it too, empty ones included. A backslash in a name becomes `_` in the zip, and a number is added when that is another entry's name in the same folder (`a\b.txt` beside `a_b.txt` is `a_b (2).txt`): no two entries have the same name. A zip holds
 at most 10,000 files and folders (each costs a little memory until the zip's end); a larger folder is refused with
 400, and is downloaded a folder inside it at a time. It has no length, and a zip cut short ends the connection, so the
 browser shows the download as failed.
+
+**Decided again.** A download, a file opened or a zip that waited for its turn is decided again when its turn comes,
+on everything read again: through a link removed meanwhile, by a guest whose invitation was taken away or ended, where
+sharing outside the project was switched off, or by a member whose access was taken away, it is refused as it would
+be if asked for then, and sends nothing. A zip is decided again as it goes on too: before each file and folder it
+adds, and every 15 seconds while it sends one large file. Once the person may no longer download the folder, the zip
+is cut short there, and nothing put into the folder after that is ever in it; a reader who takes a zip slowly keeps
+it no longer than that. (A file's own download, once its bytes are on their way, goes on to its end.)
 
 ```
 GET    /api/places/{place}/zip[?item=12&item=15]                  the top folder, or those items of it, as one zip
@@ -1463,6 +1607,7 @@ POST   /api/places/{place}/uploads?name=…&size=…[&existing=replace|keep-both
 POST   /api/places/{place}/items/{folder}/uploads?name=…&size=…[&existing=…]           start (into a folder)
        201 {"id", "name", "size", "offset": 0, "resumable", "partSize", "waiting"}
        409 {"error", "exists": "file"|"folder", "name"}  the name is taken: ask, then start again with existing
+       429 {"error"}                                     the person has 50 uploads in progress: no more until one ends
 GET    /api/places/{place}/uploads/{upload}                       where it stands: the same as the start's answer
 PUT    /api/places/{place}/uploads/{upload}?offset=<n>            one part, from n, with its Content-Length
        200 {"offset", "size"}                                     where what has arrived ends now
@@ -1500,7 +1645,7 @@ everything a member can see, and several items can be selected to move, download
 who may share a file or folder make a public link to it, which anyone opens without signing in (or, on a folder, an
 upload-only link, through which anyone sends files in and sees nothing of what is there, up to 10 GB until it is
 reset), or invite someone
-outside the project by email address as a guest (with the mail settings), who signs in with a mailed code; project
+outside the project by email address as a guest (with the mail settings), who signs in with a mailed link; project
 admins see everything shared outside the project and the space each person and shared folder uses, and switch sharing
 outside the project off for the whole project (managers for one shared folder); when someone leaves the member list,
 their My files is held, unopened, until a project admin hands it to another member or deletes it. Large files
@@ -1591,6 +1736,7 @@ server and example people:
 ```sh
 cd examples/compose
 cp example.env .env
+# Set DRIVE_HEADER_SECRET in .env to a secret of your own (openssl rand -hex 32): the Drive does not start without one.
 # Set DRIVE_VERSION in .env. Until a version is published, build one first, from the repository's top folder:
 #   docker build -t ghcr.io/neonjelly-co/superit-drive:dev .    and set DRIVE_VERSION=dev
 docker compose up -d
@@ -1638,7 +1784,8 @@ Pushing a tag `v<major>.<minor>.<patch>`, such as `v1.2.0`, runs `.github/workfl
 builds the image for x86 and arm64 (the Dockerfile cross-compiles, so neither needs emulation) and publishes it as
 `ghcr.io/neonjelly-co/superit-drive:1.2.0`, with the version built into the binary. Nothing else is published, never
 a moving tag such as `latest`. A tag that is not such a version publishes nothing, and a version the registry already
-has is refused, not replaced. A published image does not reach Superit's customers by itself: that happens only when
+has is refused, not replaced: the workflow publishes only when the registry itself answers that the version is not
+there, and fails on any other answer (the registry down, a timeout, a login refused), to be run again. A published image does not reach Superit's customers by itself: that happens only when
 the daemon's version catalogue lists the version with a tested upgrade path.
 
 Before the first tag, on GitHub:
@@ -1703,8 +1850,10 @@ starts again; and `SUPERIT_DRIVE_TEST_WALK_EVERY` and `SUPERIT_DRIVE_TEST_WALK_P
 walk through the storage start that soon, run that often and rest that long after each folder; and
 `SUPERIT_DRIVE_TEST_COPY_QUIET`, `SUPERIT_DRIVE_TEST_COPY_LATEST` and `SUPERIT_DRIVE_TEST_COPY_RETRY` (Go durations) make
 the copy of the index follow access changes that soon (see [The copy of the index](#the-copy-of-the-index)); and
-`SUPERIT_DRIVE_TEST_LINK_LIMIT` (bytes) is how much an upload-only link takes in before it is full, so a test need not
-send 10 GB (see [Upload-only links](#upload-only-links)). A Drive
+`SUPERIT_DRIVE_TEST_LINK_LIMIT` (bytes) and `SUPERIT_DRIVE_TEST_LINK_FILES` (files) are how much an upload-only link
+takes in before it is full, so a test need not send 10 GB or a thousand files (see [Upload-only links](#upload-only-links)); and
+`SUPERIT_DRIVE_TEST_SEARCH_MOST` (a Go duration) is how long a search may take before it is ended, so a test need not
+fill the index (see [Search](#search)). A Drive
 built without the tag reads no such variable. Tests change the storage directly with the harness's own WebDAV client
 (`Drive.Storage`), including a `MOVE` that keeps a file's time (a storage that answered wrong for a while), `Fill`,
 which puts thousands of files straight onto the stand-in storage's disk, and `Snapshot` and `RollBack`, which copy the
@@ -1733,7 +1882,7 @@ expects the name `ghcr.io/neonjelly-co/superit-drive:<version>`. It starts with 
 member list file:
 
 ```sh
-docker run -p 8080:8080 -v /path/to/members:/members:ro \
+docker run -p 127.0.0.1:8080:8080 -v /path/to/members:/members:ro \
   -e DRIVE_MEMBERS_FILE=/members/members.json -e DRIVE_STORAGE_URL=… (and the other settings) superit-drive:dev
 ```
 
@@ -1757,6 +1906,7 @@ internal/server/       HTTP: routes.go lists every route; server.go's guard runs
                        link; under /s/guest, the guest's session) → own page (for changes; through a link, only
                        reading) → place → item in it, or in its trash, or the person's upload in progress into it →
                        the access given there → access.Decide; transfers.go has downloads, zips and uploads,
+                       again.go a transfer decided again (when its turn comes, as a zip goes on, once an upload is whole),
                        opening.go what opens in the browser and how, search.go the search by name, links.go making,
                        changing and removing public links, visitors.go the public prefix and the visitor's pages,
                        sendin.go an upload-only link's page and the files sent through it,
@@ -1775,6 +1925,7 @@ internal/index/        the SQLite index (search.go: names as a search compares t
                        off (SQLite's recipe for rebuilding a table) and checked with foreign_key_check before each
                        commits
 internal/clock/        the Drive's clock, which test builds can move forward
+internal/seldom/       the log's lines that anyone can cause: written at most once in a while, and cut short
 internal/transfers/    what holds the memory figure: capped network buffers, and the 32 transfer slots
 internal/storage/      the WebDAV client
 internal/storagecheck/ `superit-drive check-storage`: can a WebDAV server hold the Drive's files?

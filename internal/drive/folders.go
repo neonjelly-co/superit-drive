@@ -21,7 +21,7 @@ var (
 // NewFolder makes an empty folder called name in a folder of the place (nil: its top folder), by by: one a guest makes
 // is labelled with their address.
 func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, name string, by By) (index.Item, error) {
-	if err := CheckName(name); err != nil {
+	if err := by.checkName(name); err != nil {
 		return index.Item{}, err
 	}
 	if in != nil && len(in.Above)+2 > index.MaxDepth {
@@ -63,7 +63,7 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 	case errors.Is(err, storage.ErrFull):
 		return index.Item{}, ErrFull
 	case err != nil:
-		return index.Item{}, storageError(err)
+		return index.Item{}, d.nameError(err, name)
 	}
 	d.changed(folderKey{p.ID, folderID(in)})
 	it, err := d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()}, d.now(), by.added())
@@ -84,12 +84,13 @@ func (d *Drive) free(ctx context.Context, p, name string) error {
 	case errors.Is(err, storage.ErrNotFound):
 		return nil
 	}
-	return storageError(err)
+	return d.nameError(err, name)
 }
 
-// Rename gives a live item of the place a new name, in the folder it is in. It keeps its id.
-func (d *Drive) Rename(ctx context.Context, p index.Place, it index.Item, name string) (index.Item, error) {
-	if err := CheckName(name); err != nil {
+// Rename gives a live item of the place a new name, in the folder it is in, by by (whose name it must be allowed to
+// be). It keeps its id.
+func (d *Drive) Rename(ctx context.Context, p index.Place, it index.Item, name string, by By) (index.Item, error) {
+	if err := by.checkName(name); err != nil {
 		return index.Item{}, err
 	}
 	if name == it.Name {
@@ -146,7 +147,10 @@ func CanGoInto(it index.Item, to *index.Item) error {
 // It is a change inside both places, so it holds both places' locks, always the one with the lower id first: two moves
 // in opposite directions cannot each hold one and wait for the other. Neither place may have gone to the trash
 // meanwhile (ErrPlaceGone).
-func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item, to index.Place, into *index.Item) (index.Item, error) {
+//
+// The public links and invitations of left, on it or inside it, are not taken along (index.Left): those that did not
+// work where it was.
+func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item, to index.Place, into *index.Item, left index.Left) (index.Item, error) {
 	if from.ID == to.ID {
 		return index.Item{}, errors.New("a move inside one place is Move")
 	}
@@ -211,7 +215,7 @@ func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item
 	}
 	// A listing of the item itself under its old place, under way, is out of date too.
 	d.changed(folderKey{from.ID, it.ParentID}, folderKey{to.ID, folderID(into)}, folderKey{from.ID, it.ID})
-	moved, err := d.index.MoveToPlace(ctx, from.ID, it.ID, to.ID, folderID(into), it.Name)
+	moved, err := d.index.MoveToPlace(ctx, from.ID, it.ID, to.ID, folderID(into), it.Name, left)
 	switch {
 	case errors.Is(err, index.ErrUploading):
 		// An upload started between the look above and now: put the item back where it was, so the two agree.
@@ -221,6 +225,10 @@ func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item
 		// The folder it went into moved away, or went, meanwhile.
 		d.putBack(ctx, it.Folder, src, dest)
 		return index.Item{}, ErrGone
+	}
+	if err == nil && len(left.Links)+len(left.Invitations) > 0 {
+		d.log.Info("public links and invitations that no longer worked were not taken along with what was moved to a shared folder",
+			"item", it.ID, "from", from.ID, "to", to.ID, "links", len(left.Links), "invitations", len(left.Invitations))
 	}
 	return moved, err
 }
@@ -277,7 +285,7 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 		}
 		return index.Item{}, ErrGone
 	case err != nil:
-		return index.Item{}, storageError(err)
+		return index.Item{}, d.nameError(err, name)
 	}
 	d.changed(folderKey{p.ID, it.ParentID}, folderKey{p.ID, folderID(to)})
 	moved, err := d.index.Relocate(ctx, p.ID, it.ID, folderID(to), name)

@@ -278,6 +278,7 @@ export const hu: Messages = {
 		takenIn: "Beküldve",
 		takenInLabel: "A linken beküldött mennyiség",
 		takenInOf: (taken, limit) => `${limit} keretből ${taken}`,
+		filesOf: (n, limit) => `${limit} fájlból ${n}`,
 		nothingYet: "még semmi",
 		full: "Nem fogad több fájlt, amíg nem engeded, hogy fogadjon még. Amit eddig küldtek rajta, a mappában marad.",
 		notWorking:
@@ -299,7 +300,8 @@ export const hu: Messages = {
 			"Ekkor mindenki, akinek megvan a cím, megnyithat és letölthet mindent ebben a mappában, azt is, amit mások küldtek rajta keresztül. A cím ugyanaz marad.",
 		showConfirm: "Láthatják",
 		resetTitle: "Fogadjon még fájlokat a link?",
-		resetNote: (limit) => `Mostantól újra fogad fájlokat, legfeljebb ennyit: ${limit}. Az eddig beküldött fájlok a helyükön maradnak.`,
+		resetNote: (limit, files) =>
+			`Mostantól újra fogad fájlokat, összesen legfeljebb ennyit: ${limit}, legfeljebb ${files} fájlban. Az eddig beküldött fájlok a helyükön maradnak.`,
 		resetConfirm: "Fogadjon még",
 	},
 	move: {
@@ -322,6 +324,11 @@ export const hu: Messages = {
 		whatEachKeeps: "Amit az egyes elemek megtartanak",
 		keepsOne: "Megtartja a rá és a benne lévőkre adott hozzáférést. A mostani mappáitól kapott hozzáférés megszűnik.",
 		keepsMany: "Mindegyik megtartja a rá és a benne lévőkre adott hozzáférést. A mostani mappáiktól kapott hozzáférés megszűnik.",
+		insideTitle: "Ezek benne a projekten kívül megosztva maradnak:",
+		insideLabel: "Ami benne a projekten kívül megosztva marad",
+		insideLink: "Nyilvános link",
+		insideGuest: "Vendég",
+		leavesDead: "A már nem működő nyilvános linkek és vendégmeghívók nem kerülnek át.",
 		offForProject:
 			"A projekten kívüli megosztás az egész projektben ki van kapcsolva: az áthelyezett elemek nyilvános linkjei és vendégmeghívói megmaradnak, de ott semmit nem nyitnak meg, amíg vissza nem kapcsolják.",
 		offForFolder: (place) =>
@@ -515,13 +522,12 @@ export const hu: Messages = {
 		driveOf: (project) => `${project} Drive-ja`,
 		signInTitle: "Lépj be, hogy lásd, mit osztottak meg veled",
 		signInNote:
-			"Valaki ebből a projektből fájlokat osztott meg az e-mail-címeddel. Erősítsd meg, és küldünk rá egy kódot. Nem kell hozzá fiók és jelszó.",
+			"Valaki ebből a projektből fájlokat osztott meg az e-mail-címeddel. Erősítsd meg, és küldünk rá egy linket, amellyel beléphetsz. Nem kell hozzá fiók és jelszó.",
 		yourAddress: "Az e-mail-címed",
-		sendCode: "Kérek egy kódot",
+		sendLink: "Kérek egy belépési linket",
+		signInAs: "Belépés ezzel a címmel: {address}",
 		sentTo: "Elküldve ide: {address}. Nézd meg a levélszemét mappát is.",
-		theCode: "Az e-mailben kapott kód",
-		signIn: "Belépés",
-		anotherCode: "Új kód kérése",
+		openItHere: "Ebben a böngészőben nyisd meg a linket: azt a böngészőt lépteti be, amelyikben megnyitod. Ezt a lapot bezárhatod.",
 		anotherAddress: "Másik cím",
 		signOut: "Kilépés",
 		unavailable: (project) =>

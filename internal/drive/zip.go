@@ -32,7 +32,12 @@ var ErrTooMany = errors.New("too many files and folders for one zip")
 // start is called once, just before the first byte, and returns where the zip goes. An error before that (an id in
 // only that is not directly in the folder is index.ErrNoItem; a folder with too much in it, ErrTooMany) means nothing
 // was written; an error after it means the zip was cut short.
-func (d *Drive) Zip(ctx context.Context, p index.Place, folder *index.Item, name string, only []int64, start func() io.Writer) error {
+//
+// still is asked before each file and folder is added, a folder before it is looked at: whether the person may still
+// download the folder. Its error ends the zip there, cut short, so nothing put into the folder after they no longer
+// may is ever in it.
+func (d *Drive) Zip(ctx context.Context, p index.Place, folder *index.Item, name string, only []int64,
+	still func(context.Context) error, start func() io.Writer) error {
 	prefix := zipName(name) + "/"
 	var items []index.Item
 	var err error
@@ -81,7 +86,7 @@ func (d *Drive) Zip(ctx context.Context, p index.Place, folder *index.Item, name
 		return ErrTooMany
 	}
 
-	z := &zipping{d: d, place: p, w: zip.NewWriter(start())}
+	z := &zipping{d: d, place: p, still: still, w: zip.NewWriter(start())}
 	if prefix != "" {
 		if err := z.folder(prefix, folder); err != nil {
 			return err
@@ -95,8 +100,10 @@ func (d *Drive) Zip(ctx context.Context, p index.Place, folder *index.Item, name
 
 // zipping is one zip being written.
 type zipping struct {
-	d       *Drive
-	place   index.Place
+	d     *Drive
+	place index.Place
+	// still says whether the person may still download what is zipped: an error when not.
+	still   func(context.Context) error
 	w       *zip.Writer
 	entries int
 }
@@ -121,16 +128,35 @@ func (z *zipping) folder(name string, it *index.Item) error {
 
 // items adds items, which are directly in the folder in (nil: the place's top folder), and everything in them, each
 // under prefix.
+//
+// No two entries have the same name: a name changed for the zip (zipName) that is then another item's in the folder,
+// or another changed name, gets a number, as a name kept beside a taken one does. Unpacked, neither replaces the other.
 func (z *zipping) items(ctx context.Context, prefix string, in *index.Item, items []index.Item) error {
+	taken := make(map[string]bool, len(items))
+	for _, it := range items {
+		if zipName(it.Name) == it.Name {
+			taken[it.Name] = true
+		}
+	}
 	for _, it := range items {
 		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := z.still(ctx); err != nil {
 			return err
 		}
 		// Items as the index lists them do not carry the folders above them; the path on the storage needs them.
 		if in != nil {
 			it.Above = append(append(make([]index.Item, 0, len(in.Above)+1), in.Above...), *in)
 		}
-		name := prefix + zipName(it.Name)
+		entry := zipName(it.Name)
+		if entry != it.Name {
+			for n := 2; taken[entry]; n++ {
+				entry = numbered(zipName(it.Name), n, it.Folder)
+			}
+			taken[entry] = true
+		}
+		name := prefix + entry
 		if it.Folder {
 			if err := z.folder(name+"/", &it); err != nil {
 				return err

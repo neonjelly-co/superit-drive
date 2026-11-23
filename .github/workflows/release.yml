@@ -80,8 +80,17 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Refuse a version that is already published
         run: |
+          # Published only when the registry itself answers that the version is not there. Any other answer (the
+          # registry down, a timeout, a login refused) says nothing about it, and taking it for "not there" would
+          # replace a published version: the run fails, and can be run again.
           if found=$(docker buildx imagetools inspect "$IMAGE:$VERSION" 2>&1); then
             echo "::error::$IMAGE:$VERSION is already published. A version is never replaced: tag a new one."
+            exit 1
+          fi
+          # That answer is one whole line, naming the version. "not found" anywhere else (a 404 from the sign-in on the
+          # way, a command that is not there) is not it.
+          if ! grep -qxF "ERROR: $IMAGE:$VERSION: not found" <<<"$found"; then
+            echo "::error::The registry did not say whether $IMAGE:$VERSION is published, so nothing is published: $found"
             exit 1
           fi
           echo "Not in the registry yet: $found"

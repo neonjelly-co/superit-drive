@@ -1,11 +1,14 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
@@ -118,7 +121,12 @@ func (s *Server) move(w http.ResponseWriter, r *http.Request, c call) {
 	if p.ID == c.place.ID {
 		it, err = s.drive.Move(r.Context(), *c.place, *c.item, into)
 	} else {
-		it, err = s.drive.MoveToPlace(r.Context(), *c.place, *c.item, p, into)
+		var left index.Left
+		if _, left, err = s.outsideIn(r.Context(), *c.place, *c.item); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		it, err = s.drive.MoveToPlace(r.Context(), *c.place, *c.item, p, into, left)
 	}
 	var taken *drive.Taken
 	switch {
@@ -172,8 +180,18 @@ func (s *Server) movePreview(w http.ResponseWriter, r *http.Request, c call) {
 		s.fail(w, r, err)
 		return
 	}
+	// Out of a place: not the public links and invitations, on it or inside it, that do not work where it is. Where it
+	// goes they would work again, so they are left behind (and removed) as it moves.
+	var inside []sharedInside
+	var left index.Left
+	if p.ID != c.place.ID {
+		if inside, left, err = s.outsideIn(r.Context(), *c.place, *c.item); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
 	for _, g := range given {
-		if g.Item == c.item.ID {
+		if g.Item == c.item.ID && !slices.Contains(left.Invitations, g.ID) {
 			there = append(there, g)
 		}
 	}
@@ -183,6 +201,7 @@ func (s *Server) movePreview(w http.ResponseWriter, r *http.Request, c call) {
 		s.fail(w, r, err)
 		return
 	}
+	links = slices.DeleteFunc(links, func(l index.Link) bool { return slices.Contains(left.Links, l.ID) })
 	moved := *c.item
 	moved.Above = path
 	path = append(path, moved)
@@ -192,5 +211,125 @@ func (s *Server) movePreview(w http.ResponseWriter, r *http.Request, c call) {
 		"outside":         outsideHere(p),
 		"access":          s.accessLines(who, p, path, there, links),
 		"seenBy":          seenBy(s.members.Current(), s.accessPlace(p, idsOf(path), there).WithLinks(s.accessLinks(links)...)),
+		"inside":          insideJSON(inside, *c.item),
 	})
+}
+
+// sharedInside is a public link or an invitation that works, on a moved item or on something inside it.
+type sharedInside struct {
+	item       index.Item
+	link       *index.Link
+	invitation *index.Grant
+}
+
+// outsideIn judges every public link and invitation on the live item it of the place p and on everything inside it, at
+// any depth, each alone and where it is now, with sharing outside the project being switched off left aside (what that
+// stops works again when it is switched back on): working are those that work, in the order links then invitations,
+// and left those that do not, which a move to another place does not take along. In a My files a link or an invitation
+// works only while its maker may still share its item there; in a shared folder it does not depend on its maker, so one
+// that had stopped would start again there. One on something in the trash, or missing from the storage, is left unless
+// the place's owner made it: nobody else's is sure to work when it comes back.
+func (s *Server) outsideIn(ctx context.Context, p index.Place, it index.Item) (working []sharedInside, left index.Left, err error) {
+	links, invitations, err := s.drive.OutsideIn(ctx, p, it)
+	if err != nil {
+		return nil, index.Left{}, err
+	}
+	list := s.members.Current()
+	// Where each item they are on is: nil for one that is not live.
+	type spot struct {
+		item  index.Item
+		where *access.Place
+	}
+	spots := map[int64]*spot{}
+	at := func(id int64) (*spot, error) {
+		if sp, ok := spots[id]; ok {
+			return sp, nil
+		}
+		on := it
+		if id != it.ID {
+			if on, err = s.drive.Item(ctx, p, id); errors.Is(err, index.ErrNoItem) {
+				spots[id] = nil
+				return nil, nil
+			} else if err != nil {
+				return nil, err
+			}
+		}
+		path := idsOf(pathTo(on))
+		grants, err := s.drive.GrantsOn(ctx, p, path)
+		if err != nil {
+			return nil, err
+		}
+		where := s.accessPlace(p, path, grants)
+		where.NoSharingOutside = false
+		spots[id] = &spot{on, where}
+		return spots[id], nil
+	}
+	for i := range links {
+		l := &links[i]
+		sp, err := at(l.Item)
+		if err != nil {
+			return nil, index.Left{}, err
+		}
+		switch {
+		case sp == nil && l.MadeBy == p.Owner && p.Kind == index.MyFiles:
+		case sp != nil && linkWorks(*l, sp.where, list):
+			working = append(working, sharedInside{item: sp.item, link: l})
+		default:
+			left.Links = append(left.Links, l.ID)
+		}
+	}
+	for i := range invitations {
+		g := &invitations[i]
+		sp, err := at(g.Item)
+		if err != nil {
+			return nil, index.Left{}, err
+		}
+		switch {
+		case sp == nil && g.By == p.Owner && p.Kind == index.MyFiles:
+		case sp != nil && invitationWorks(sp.where, accessGrant(*g, list)):
+			working = append(working, sharedInside{item: sp.item, invitation: g})
+		default:
+			left.Invitations = append(left.Invitations, g.ID)
+		}
+	}
+	return working, left, nil
+}
+
+// sharedInsideJSON is, in a move's preview, a public link or an invitation on something inside what is moved: the item
+// it is on, the folders from the moved one down to it, and either the link's kind or the guest with their role and end.
+type sharedInsideJSON struct {
+	Item  folderJSON   `json:"item"`
+	Path  []folderJSON `json:"path"`
+	Link  string       `json:"link,omitempty"`
+	Guest string       `json:"guest,omitempty"`
+	Role  string       `json:"role,omitempty"`
+	Until *time.Time   `json:"until,omitempty"`
+}
+
+// insideJSON lists what works inside the moved item: not what is on the item itself, which "access" says.
+func insideJSON(working []sharedInside, moved index.Item) []sharedInsideJSON {
+	out := []sharedInsideJSON{}
+	for _, w := range working {
+		if w.item.ID == moved.ID {
+			continue
+		}
+		j := sharedInsideJSON{Item: folderJSON{ID: w.item.ID, Name: w.item.Name}, Path: []folderJSON{}}
+		for i, above := range w.item.Above {
+			if i > len(moved.Above) { // below the moved item
+				j.Path = append(j.Path, folderJSON{ID: above.ID, Name: above.Name})
+			}
+		}
+		switch {
+		case w.link != nil:
+			j.Link = w.link.Kind
+		case w.invitation != nil:
+			j.Guest, j.Role = w.invitation.GuestAddress, w.invitation.Role
+			if !w.invitation.Ends.IsZero() {
+				ends := w.invitation.Ends
+				j.Until = &ends
+			}
+		}
+		out = append(out, j)
+	}
+	return out
 }

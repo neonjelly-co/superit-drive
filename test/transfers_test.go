@@ -41,7 +41,9 @@ func uploadsPath(placeID, folderID int64) string {
 	return fmt.Sprintf("/api/places/%d/items/%d/uploads", placeID, folderID)
 }
 
-func sessionPath(placeID int64, id string) string { return fmt.Sprintf("/api/places/%d/uploads/%s", placeID, id) }
+func sessionPath(placeID int64, id string) string {
+	return fmt.Sprintf("/api/places/%d/uploads/%s", placeID, id)
+}
 
 func startUpload(t *testing.T, c *harness.Client, placeID, folderID int64, name string, size int, existing string) harness.Response {
 	t.Helper()
@@ -297,7 +299,9 @@ func TestAnUploadInProgressIsItsUploadersAlone(t *testing.T) {
 			"seeing where it stands": func(c *harness.Client) harness.Response { return c.Get(t, sessionPath(x.place, id)) },
 			"sending a part":         func(c *harness.Client) harness.Response { return sendPart(t, c, x.place, id, 1<<20, []byte("planted")) },
 			"finishing it":           func(c *harness.Client) harness.Response { return finishUpload(t, c, x.place, id, "replace") },
-			"cancelling it":          func(c *harness.Client) harness.Response { return c.Do(t, http.MethodDelete, sessionPath(x.place, id), nil) },
+			"cancelling it": func(c *harness.Client) harness.Response {
+				return c.Do(t, http.MethodDelete, sessionPath(x.place, id), nil)
+			},
 		}
 	}
 	for _, c := range []struct {
@@ -617,6 +621,7 @@ func TestAFolderOrASelectionDownloadsAsOneZip(t *testing.T) {
 	offer := randomBytes(t, 300_000)
 	offerItem := uploadedInto(t, c, placeID, bakery.ID, "Offer – árvíztűrő.pdf", offer)
 	uploadedInto(t, c, placeID, clients.ID, `Back\slash.txt`, []byte("notes"))
+	uploadedInto(t, c, placeID, clients.ID, "Back_slash.txt", []byte("its own")) // the name the other gets in a zip
 	top := uploadedInto(t, c, placeID, 0, "Top.txt", []byte("top"))
 	d.Storage.Put(t, rekasTop+"/Clients/Bakery Ltd/Put directly.txt", "on the storage") // in the zip without being opened
 
@@ -625,7 +630,7 @@ func TestAFolderOrASelectionDownloadsAsOneZip(t *testing.T) {
 		t.Fatalf("Clients as a zip: got %d, %q, %q", res.Status, res.Header.Get("Content-Type"), res.Header.Get("Content-Disposition"))
 	}
 	want := map[string]string{
-		"Clients/": "", "Clients/Bakery Ltd/": "", "Clients/Empty/": "", "Clients/Back_slash.txt": "notes",
+		"Clients/": "", "Clients/Bakery Ltd/": "", "Clients/Empty/": "", "Clients/Back_slash.txt": "its own", "Clients/Back_slash (2).txt": "notes",
 		"Clients/Bakery Ltd/Offer – árvíztűrő.pdf": string(offer), "Clients/Bakery Ltd/Put directly.txt": "on the storage",
 	}
 	if got := zipEntries(t, res.Body); !mapsEqual(got, want) {
@@ -637,13 +642,13 @@ func TestAFolderOrASelectionDownloadsAsOneZip(t *testing.T) {
 	if savedAs(res) != "My files.zip" {
 		t.Fatalf("My files as a zip: %q", res.Header.Get("Content-Disposition"))
 	}
-	if got := zipEntries(t, res.Body); len(got) != 8 || got["My files/Top.txt"] != "top" || got["My files/Clients/Bakery Ltd/Offer – árvíztűrő.pdf"] != string(offer) {
+	if got := zipEntries(t, res.Body); len(got) != 9 || got["My files/Top.txt"] != "top" || got["My files/Clients/Bakery Ltd/Offer – árvíztűrő.pdf"] != string(offer) {
 		t.Fatalf("My files.zip holds %q", keys(got))
 	}
 
 	// A selection: those items at the top of the zip.
 	res = c.Get(t, zipPath(placeID, 0, top.ID, clients.ID))
-	if got := zipEntries(t, res.Body); len(got) != 7 || got["Top.txt"] != "top" || got["Clients/Back_slash.txt"] != "notes" {
+	if got := zipEntries(t, res.Body); len(got) != 8 || got["Top.txt"] != "top" || got["Clients/Back_slash (2).txt"] != "notes" {
 		t.Fatalf("a selection of Top.txt and Clients holds %q", keys(got))
 	}
 	if got := zipEntries(t, c.Get(t, zipPath(placeID, bakery.ID, offerItem.ID)).Body); len(got) != 1 || got["Offer – árvíztűrő.pdf"] != string(offer) {

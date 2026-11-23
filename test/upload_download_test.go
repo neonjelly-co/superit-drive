@@ -274,25 +274,27 @@ func TestAnUploadNeverReplacesWhatIsThere(t *testing.T) {
 		t.Errorf("the folder Drafts changed: %+v", entries)
 	}
 
-	// Two uploads of one name at once: the second is refused while the first is still on its way, and the first
-	// is kept whole.
+	// Two uploads of one name at once: neither holds the name while its bytes arrive, so the first to be whole is
+	// stored, and the other, whole later, finds the name taken, as any upload of a taken name does. It replaces nothing,
+	// and leaves nothing behind.
 	body, write := io.Pipe()
-	first := slowUpload(d, reka, placeID, "same.txt", body, 6)
-	if _, err := write.Write([]byte("fir")); err != nil {
+	slow := slowUpload(d, reka, placeID, "same.txt", body, 6)
+	if _, err := write.Write([]byte("slo")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond) // the first upload is now writing to the storage
-	if res := upload(t, d.As(reka), placeID, "same.txt", []byte("second")); res.Status != http.StatusConflict {
-		t.Errorf("a second upload of a name being uploaded: got %d %s, want 409", res.Status, res.Body)
+	time.Sleep(300 * time.Millisecond) // the slow upload is now writing to the storage
+	if res := upload(t, d.As(reka), placeID, "same.txt", []byte("quick!")); res.Status != http.StatusCreated {
+		t.Errorf("an upload of a name whose other upload is still arriving: got %d %s, want 201", res.Status, res.Body)
 	}
-	_, _ = write.Write([]byte("st!"))
+	_, _ = write.Write([]byte("wer"))
 	_ = write.Close()
-	if status := <-first; status != http.StatusCreated {
-		t.Fatalf("the first upload: got %d, want 201", status)
+	if status := <-slow; status != http.StatusConflict {
+		t.Fatalf("the upload that was whole second: got %d, want 409", status)
 	}
-	if got, _ := d.Storage.Get(t, rekasTop+"/same.txt"); string(got) != "first!" {
-		t.Errorf("same.txt holds %q, want the first upload whole", got)
+	if got, _ := d.Storage.Get(t, rekasTop+"/same.txt"); string(got) != "quick!" {
+		t.Errorf("same.txt holds %q, want the upload that was whole first", got)
 	}
+	harness.Eventually(t, "the uploads folder is empty", func() bool { return len(inUploads(t, d.Storage)) == 0 })
 }
 
 // slowUpload starts an upload of length bytes read from body as they come, as a member's browser on the Drive's page,

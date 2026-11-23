@@ -3,8 +3,10 @@ package server
 import (
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/access"
@@ -17,6 +19,59 @@ import (
 // Inviting guests, from a member's "Give access": typing an address that is not a member's invites a guest to a file or
 // folder; an address that is a member's shares it with them as with any member. Their routes are in routes.go with all
 // the others; guard has decided before any of these runs. What a guest reaches is in guests.go.
+
+// invitationMailsPerHour is how many invitations one member has mailed in an hour; the next is refused, and says so.
+// Inviting an address, taking the invitation away and inviting it again mails it each time, with names the member
+// chose (their own, and the file's or folder's): without a bound, a member could send anyone any number of mails from
+// the Drive.
+const invitationMailsPerHour = 30
+
+// A mailCount counts the mails each person caused within a while, and says when one has had as many as they may. It is
+// kept in memory, a few times per person at most: a restart forgets it, and the count starts again.
+type mailCount struct {
+	most   int
+	within time.Duration
+
+	mu   sync.Mutex
+	sent map[string][]time.Time // by person, when each mail still counted was sent, the oldest first
+}
+
+func newMailCount(most int, within time.Duration) *mailCount {
+	return &mailCount{most: most, within: within, sent: map[string][]time.Time{}}
+}
+
+// take counts one more mail for who at now; ok is false, and nothing is counted, when they have had as many as they may
+// within the while before now. Whoever caused none within it is forgotten.
+func (c *mailCount) take(who string, now time.Time) (ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for person, sent := range c.sent {
+		sent = slices.DeleteFunc(sent, func(at time.Time) bool { return now.Sub(at) >= c.within })
+		if len(sent) == 0 {
+			delete(c.sent, person)
+		} else {
+			c.sent[person] = sent
+		}
+	}
+	if len(c.sent[who]) >= c.most {
+		return false
+	}
+	c.sent[who] = append(c.sent[who], now)
+	return true
+}
+
+// giveBack takes the mail counted for who at at off the count again: it was not sent after all.
+func (c *mailCount) giveBack(who string, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sent := c.sent[who]
+	if i := slices.IndexFunc(sent, func(t time.Time) bool { return t.Equal(at) }); i >= 0 {
+		c.sent[who] = slices.Delete(sent, i, i+1)
+	}
+	if len(c.sent[who]) == 0 {
+		delete(c.sent, who)
+	}
+}
 
 // guestJSON is a guest as a member reads them: their address, and their id for the routes that change an invitation.
 type guestJSON struct {
@@ -40,6 +95,7 @@ type invitationJSON struct {
 //	200 {"access": […], "member": {…}} | {"access": […], "guest": {"id", "address"}, "invited": true}
 //	400 not an address, a role that cannot be given, an end date that has passed
 //	409 sharing outside the project is off here ("outside": "project" | "folder"), or mail does not work ("mail": false)
+//	429 the member had invitationMailsPerHour invitations mailed within the last hour (Retry-After)
 func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 	var body invitationJSON
 	if !s.readBody(w, r, &body) {
@@ -87,7 +143,31 @@ func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 		refuseWith(w, r, http.StatusConflict, map[string]any{"mail": false}, cannotInvite, why.In(text.Of(r)))
 		return
 	}
+	// The mail is counted before the invitation is made, so that none is made without its mail, and taken off the count
+	// again when no mail goes: the invitation was not made, or the guest had one here already. A member who has had as
+	// many mailed as they may still changes an invitation that is there, which mails nothing.
+	//
+	// Whether the guest has one here is read now, with invitations and their removals taking turns (inviting): on what
+	// guard read, a removal sent together with the invitation made it new, mailed and uncounted.
+	s.inviting.Lock()
+	defer s.inviting.Unlock()
+	given, err := s.drive.GrantsOn(r.Context(), *c.place, idsOf(pathTo(*c.item)))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	c.grants = given
+	now := s.drive.Now()
+	counted := s.invitationMails.take(c.member.UserID, now)
+	if !counted && !invitedHere(c, address) {
+		w.Header().Set("Retry-After", strconv.Itoa(int(time.Hour/time.Second)))
+		s.refuse(w, r, http.StatusTooManyRequests, tooManyInvitations, invitationMailsPerHour)
+		return
+	}
 	guest, invited, err := s.drive.Invite(r.Context(), *c.place, *c.item, address, string(body.Role), ends, c.member.UserID)
+	if counted && (err != nil || !invited) {
+		s.invitationMails.giveBack(c.member.UserID, now)
+	}
 	if err != nil {
 		s.changedAccess(w, r, c, err)
 		return
@@ -96,6 +176,14 @@ func (s *Server) invite(w http.ResponseWriter, r *http.Request, c call) {
 		s.tellInvited(c, guest, body.Role, ends, text.Of(r))
 	}
 	s.answerAccess(w, r, c, map[string]any{"guest": guestJSON{ID: guest.ID, Address: guest.Address}, "invited": invited})
+}
+
+// invitedHere says whether the guest with the address has an invitation on the item the request is about, as guard read
+// what was given there.
+func invitedHere(c call, address string) bool {
+	return slices.ContainsFunc(c.grants, func(given index.Grant) bool {
+		return given.Guest != 0 && given.GuestAddress == address && given.Item == c.item.ID
+	})
 }
 
 // invitationRules checks the role and end date of an invitation: viewer or editor, and an end date still to come. ok is
@@ -146,7 +234,10 @@ func (s *Server) takeInvitation(w http.ResponseWriter, r *http.Request, c call) 
 		s.refuse(w, r, http.StatusNotFound, notHere)
 		return
 	}
-	s.changedAccess(w, r, c, s.drive.TakeAway(r.Context(), *c.place, c.item, index.Grantee{Guest: guest}, nil))
+	s.inviting.Lock() // in turn with invitations, which count on what is there (invite)
+	err := s.drive.TakeAway(r.Context(), *c.place, c.item, index.Grantee{Guest: guest}, nil)
+	s.inviting.Unlock()
+	s.changedAccess(w, r, c, err)
 }
 
 func guestOfPath(r *http.Request) (int64, bool) {
@@ -183,16 +274,25 @@ func guestAddress(typed string) (string, bool) {
 	return address, true
 }
 
-// guestLink is the address that leads a guest to what was shared with them: the guests' page, at the item, with their
-// address after the "#" (which a browser never sends), so the page can offer it to confirm.
-func (s *Server) guestLink(place, item int64, address string) string {
-	link := url.Values{"place": {strconv.FormatInt(place, 10)}, "item": {strconv.FormatInt(item, 10)}}
-	if s.address == nil {
-		return GuestPrefix + "/?" + link.Encode()
+// guestLink is the address that leads a guest to what was shared with them: the guests' page, at the item (the page
+// itself when place or item is 0), with their address after the "#" (which a browser never sends), so the page can
+// offer it to confirm; and, in a sign-in link, the code that signs them in, after it.
+func (s *Server) guestLink(place, item int64, address, code string) string {
+	link := url.Values{}
+	if place > 0 && item > 0 {
+		link = url.Values{"place": {strconv.FormatInt(place, 10)}, "item": {strconv.FormatInt(item, 10)}}
 	}
-	a := *s.address
+	after := "as=" + url.QueryEscape(address)
+	if code != "" {
+		after += "&code=" + code
+	}
+	a := url.URL{}
+	if s.address != nil {
+		a = *s.address
+	}
 	a.Path, a.RawPath, a.RawQuery = GuestPrefix+"/", "", link.Encode()
-	a.Fragment, a.RawFragment = "as="+address, "as="+url.QueryEscape(address)
+	a.Fragment, _ = url.QueryUnescape(after)
+	a.RawFragment = after
 	return a.String()
 }
 
@@ -214,7 +314,7 @@ func (s *Server) tellInvited(c call, guest index.Guest, role access.Role, ends t
 	if !ends.IsZero() {
 		lines = append(lines, accessUntil.In(l, text.Moment(l, ends)))
 	}
-	body := strings.Join(lines, "\n") + "\n\n" + openIt.In(l, s.guestLink(c.place.ID, c.item.ID, guest.Address)) + "\n\n" +
+	body := strings.Join(lines, "\n") + "\n\n" + openIt.In(l, s.guestLink(c.place.ID, c.item.ID, guest.Address, "")) + "\n\n" +
 		confirmByCode.In(l) + "\n"
 	s.mail.Send(mail.Message{
 		To:      guest.Address,

@@ -72,7 +72,7 @@ func (d *Drive) makeSharedFolder(ctx context.Context, name, folder, creator stri
 	case err == nil:
 		return index.Place{}, false, nil
 	case !errors.Is(err, storage.ErrNotFound):
-		return index.Place{}, false, storageError(err)
+		return index.Place{}, false, d.nameError(err, name)
 	}
 	err = d.storage.CreateFolder(sctx, folder)
 	switch {
@@ -81,7 +81,7 @@ func (d *Drive) makeSharedFolder(ctx context.Context, name, folder, creator stri
 	case errors.Is(err, storage.ErrFull):
 		return index.Place{}, false, ErrFull
 	case err != nil:
-		return index.Place{}, false, storageError(err)
+		return index.Place{}, false, d.nameError(err, name)
 	}
 	d.marked(ctx)
 	p, err = d.index.AddSharedFolder(ctx, name, folder, creator, d.now())

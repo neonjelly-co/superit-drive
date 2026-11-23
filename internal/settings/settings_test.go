@@ -75,6 +75,20 @@ func TestRefusesBadValues(t *testing.T) {
 	}
 }
 
+// The secret the worked example once came with is public: the Drive does not start with it. The repository's
+// development secret is as public, and is for development: it is accepted here, and the Drive warns as it starts.
+func TestRefusesThePublishedExampleSecret(t *testing.T) {
+	env := complete()
+	env["DRIVE_HEADER_SECRET"] = PublishedExampleSecret
+	if _, err := FromEnv(func(k string) string { return env[k] }); err == nil || !strings.Contains(err.Error(), "DRIVE_HEADER_SECRET is the example's") {
+		t.Fatalf("the example's secret: %v", err)
+	}
+	env["DRIVE_HEADER_SECRET"] = DevelopmentSecret
+	if _, err := FromEnv(func(k string) string { return env[k] }); err != nil {
+		t.Fatalf("the development secret: %v", err)
+	}
+}
+
 // Without a mail server, the Drive sends no mail. With one, it needs an address to send from, and every value must make
 // sense: a mistake is refused at start rather than passing for "no mail".
 func TestMailSettings(t *testing.T) {

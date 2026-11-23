@@ -1,6 +1,7 @@
 package drive
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -30,7 +31,7 @@ import (
 // A copy becomes the index only once index.CheckCopy finds it whole, of a schema this Drive's migrations make (an older
 // one is brought up to date as any index is), with every place where the Drive puts places. Then it is cleared
 // (index.ClearCopy): a copy from the storage of guests' sessions, codes and limits and uploads in progress, which only
-// the server they were on can honour (guests sign in again, with a new code); any copy of where the walk was. And the
+// the server they were on can honour (guests sign in again, with a new link); any copy of where the walk was. And the
 // walk starts at once, as after a rollback (adoptionWalk): what changed on the storage since the copy was made comes in
 // as the looks always bring it, and an item deleted since, back in its entry of the trash, goes there as itself.
 //
@@ -79,6 +80,9 @@ type newerCopy struct {
 	where  string // where on the storage it is
 	seq    int64  // the number in its name
 	reason error  // what the check said of it
+	// sharing is the sharing it holds, when that could be read: what the index made without it holds beyond that was
+	// removed under the newer version, and is back.
+	sharing *index.SharingIn
 }
 
 // A candidate is a copy of the index the Drive may make its index from.
@@ -175,6 +179,10 @@ func Adopt(ctx context.Context, dataDir string, s *storage.Client, log *slog.Log
 	if err := index.ClearCopy(ctx, file, clearing); err != nil {
 		return fmt.Errorf("readying the copy of the index: %w", err)
 	}
+	var back *broughtBack
+	if newer != nil {
+		back = whatCameBack(ctx, file, newer)
+	}
 	if err := syncFile(file); err != nil {
 		return err
 	}
@@ -191,10 +199,11 @@ func Adopt(ctx context.Context, dataDir string, s *storage.Client, log *slog.Log
 			"not in it; the files on the storage are, as the walk finds them. The newer copy is kept: once this Drive has put "+
 			"a copy of its own on the storage, numbered after it, the newer one is moved aside there",
 			"copy", newer.where, "number", newer.seq)
+		back.log(log)
 	}
 	from := "the data folder's copy (" + filepath.Join(index.BackupFolder, index.FileName) + "); guests stay signed in"
 	if chosen.storage != "" {
-		from = "the copy on the storage (" + chosen.storage + "); guests sign in again with a new code"
+		from = "the copy on the storage (" + chosen.storage + "); guests sign in again with a new link"
 	}
 	log.Warn("the data folder held no index: the Drive made it from "+from+". The index is as it was when the copy was "+
 		"made; a walk through the storage now takes in what changed there since",
@@ -203,6 +212,92 @@ func Adopt(ctx context.Context, dataDir string, s *storage.Client, log *slog.Log
 		"items", chosen.sum.Items, "shares", chosen.sum.Grants, "managers", chosen.sum.Managers, "links", chosen.sum.Links,
 		"guests", chosen.sum.Guests, "acts", chosen.sum.Acts)
 	return nil
+}
+
+// broughtBack is the sharing an index made from an older copy holds that the newer copy, left alone, does not: what was
+// removed under the newer version, and works again. nil when either could not be read.
+type broughtBack struct {
+	links               []index.LinkIn
+	grants, invitations int
+	// switches are the places where sharing outside the project was switched off under the newer version, and is on
+	// again (0: the whole project).
+	switches []int64
+}
+
+// mostLinksNamed is how many links that came back the log names one by one; it counts the rest.
+const mostLinksNamed = 100
+
+func whatCameBack(ctx context.Context, file string, newer *newerCopy) *broughtBack {
+	if newer.sharing == nil {
+		return nil
+	}
+	ours, err := index.SharingOf(ctx, file)
+	if err != nil {
+		return nil
+	}
+	back := &broughtBack{}
+	for hash, l := range ours.Links {
+		if _, kept := newer.sharing.Links[hash]; !kept {
+			back.links = append(back.links, l)
+		}
+	}
+	slices.SortFunc(back.links, func(a, b index.LinkIn) int { return cmp.Compare(a.Item, b.Item) })
+	for g := range ours.Grants {
+		if !newer.sharing.Grants[g] {
+			back.grants++
+		}
+	}
+	for g := range ours.Invitations {
+		if !newer.sharing.Invitations[g] {
+			back.invitations++
+		}
+	}
+	for place := range newer.sharing.SwitchedOff {
+		if !ours.SwitchedOff[place] {
+			back.switches = append(back.switches, place)
+		}
+	}
+	slices.Sort(back.switches)
+	return back
+}
+
+// log says, loudly when there is anything, what was removed under the newer version and is back: every public link
+// (up to mostLinksNamed), and how many grants and invitations. Someone must look at each: the Drive cannot tell a
+// removal that was meant from anything else that changed under the newer version, so it takes none over.
+func (b *broughtBack) log(log *slog.Logger) {
+	if b == nil {
+		log.Error("WHAT WAS REMOVED UNDER THE NEWER VERSION MAY BE BACK: the newer copy's sharing could not be read, so the " +
+			"Drive cannot tell which public links, shares and invitations removed under the newer version its index holds " +
+			"again. Look through who can see what (Sharing and space, and each shared folder)")
+		return
+	}
+	for _, place := range b.switches {
+		if place == 0 {
+			log.Error("SWITCHED OFF UNDER THE NEWER VERSION, AND ON AGAIN: sharing outside the project was switched off for the " +
+				"whole project under the newer version, and the index does not hold that. Public links and guests' invitations " +
+				"work again. Switch it off again if it should be")
+			continue
+		}
+		log.Error("SWITCHED OFF UNDER THE NEWER VERSION, AND ON AGAIN: sharing outside the project was switched off for a shared "+
+			"folder under the newer version, and the index does not hold that. Public links and guests' invitations in it work "+
+			"again. Switch it off again if it should be", "place", place)
+	}
+	if len(b.links)+b.grants+b.invitations == 0 {
+		if len(b.switches) == 0 {
+			log.Info("nothing that was removed under the newer version is back: every public link, share and invitation in the " +
+				"index is in the newer copy too, and sharing outside the project is switched off wherever it was there")
+		}
+		return
+	}
+	log.Error("REMOVED UNDER THE NEWER VERSION, AND BACK: the index holds public links, shares or invitations that were "+
+		"removed under the newer version, whose removal is not in it. They work again. Remove again those that should not",
+		"links", len(b.links), "shares", b.grants, "invitations", b.invitations)
+	for i, l := range b.links {
+		if i == mostLinksNamed {
+			break
+		}
+		log.Warn("a public link removed under the newer version works again", "place", l.Place, "item", l.Item, "name", l.Name)
+	}
 }
 
 // topFolderAllowed says whether folder is where the Drive puts the top folder of a place of that kind: one name in "My
@@ -312,11 +407,15 @@ func storageCopy(ctx context.Context, dataDir string, s *storage.Client, log *sl
 	}
 	switch {
 	case errors.Is(err, index.ErrCopyNewer):
+		var sharing *index.SharingIn
+		if in, err := index.SharingOf(ctx, file); err == nil {
+			sharing = &in
+		}
 		os.Remove(file)
 		// The Drive's own copies will be numbered after it: a number past half of what a copy may have is none a Drive
 		// reached, and would leave them too little room.
 		if ownCopy(local, mark) && seq < index.MaxCopySeq/2 {
-			return nil, &newerCopy{name: newest.Name, where: where, seq: seq, reason: err}, nil
+			return nil, &newerCopy{name: newest.Name, where: where, seq: seq, reason: err, sharing: sharing}, nil
 		}
 		return nil, nil, fmt.Errorf("the data folder holds no index, and the copy of it on the storage (%s) %w: the Drive does not "+
 			"start, so that it does not make an index without it and then replace it; start a version of the Drive as new as "+

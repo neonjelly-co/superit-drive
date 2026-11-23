@@ -29,13 +29,16 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/mail"
 	"github.com/neonjelly-co/superit-drive/internal/members"
+	"github.com/neonjelly-co/superit-drive/internal/seldom"
 	"github.com/neonjelly-co/superit-drive/internal/text"
 	"github.com/neonjelly-co/superit-drive/internal/transfers"
 )
@@ -76,15 +79,25 @@ type Server struct {
 	// visitors bounds how many visitors' requests are worked on at once (visitors.go); guests how many guests' (and
 	// requests to sign in as one).
 	visitors, guests *admission
+	// heldGoing is how many bytes of long answers kept for visitors and guests wait to be taken (answers.go).
+	heldGoing atomic.Int64
 	// codeKey keys the HMAC of the codes mailed to guests (guests.go): derived from the header secret, which the index
 	// never holds.
 	codeKey []byte
-	// codes are the addresses that asked for a code, waiting for SendCodes (guests.go); codesDropped is when asks were
-	// last dropped for want of room (Unix seconds), so that it is logged once a minute at most.
-	codes        chan codeAsk
-	codesDropped atomic.Int64
+	// codes are the addresses that asked for a sign-in link, waiting for SendCodes (guests.go), each once (asking).
+	codes    chan codeAsk
+	askingMu sync.Mutex
+	asking   map[string]bool
 	// sendPolicy is the Content-Security-Policy of an upload-only link's page (sendin.go).
 	sendPolicy string
+	// The log's lines that anyone can cause, each written at most once in seldom.Each: a change refused for its Origin
+	// (logRefusedChange); and, of the asks for a sign-in link, that some were dropped (askForCode), that one came too
+	// soon after a link was sent to its guest, and that too many links were sent to everyone (sendCode).
+	refusedChanges, codesDropped, codesTooSoon, codesTooMany *seldom.Line
+	// invitationMails counts the invitations each member had mailed lately (invitations.go).
+	invitationMails *mailCount
+	// inviting lets one invitation or removal of one be worked on at a time (invitations.go).
+	inviting sync.Mutex
 }
 
 // New makes a server.
@@ -97,7 +110,10 @@ func New(c Config) *Server {
 		visitors: newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
 		guests:   newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
 		codeKey:  key.Sum(nil),
-		codes:    make(chan codeAsk, codesWaiting)}
+		codes:    make(chan codeAsk, codesWaiting), asking: map[string]bool{},
+		refusedChanges: seldom.Every(seldom.Each), codesDropped: seldom.Every(seldom.Each),
+		codesTooSoon: seldom.Every(seldom.Each), codesTooMany: seldom.Every(seldom.Each),
+		invitationMails: newMailCount(invitationMailsPerHour, time.Hour)}
 	if c.Address != nil {
 		s.origin = originOf(c.Address)
 	}
@@ -181,8 +197,9 @@ type call struct {
 	member members.Member
 	link   *index.Link
 	guest  *index.Guest
-	// person is who is asking, as the access package decided on them.
+	// person is who is asking, as the access package decided on them; action what they asked to do, as the route says.
 	person access.Person
+	action access.Action
 	place  *index.Place
 	access *access.Place
 	// grants is what was given on the place's top folder and on the way down to the item, as access saw it.
@@ -284,13 +301,11 @@ func (s *Server) guard(rt route) http.Handler {
 			return
 		}
 		if !s.fromOwnPage(r) {
-			// Most often DRIVE_ADDRESS is not the address people use; the log says both, so it can be put right.
-			s.log.Warn("refused a change that did not come from the Drive's own pages",
-				"method", r.Method, "path", r.URL.Path, "origin", r.Header.Get("Origin"), "address", s.origin)
+			s.logRefusedChange(r)
 			s.refuse(w, r, http.StatusForbidden, refusedOrigin)
 			return
 		}
-		c := call{member: member, person: personOf(member)}
+		c := call{member: member, person: personOf(member), action: rt.action}
 		if rt.place != "" && !s.findWhere(w, r, rt, &c) {
 			return
 		}
@@ -446,6 +461,15 @@ func (s *Server) fromOwnPage(r *http.Request) bool {
 	return originOf(o) == s.origin
 }
 
+// logRefusedChange logs a change refused because it did not come from the Drive's own pages. Most often DRIVE_ADDRESS
+// is not the address people use; the log says both, so it can be put right. Under the guests' prefix anyone can cause
+// the line, before any session is looked at, and a page on another site can make a member's browser cause it: it is
+// written at most once in seldom.Each, with the method, the path and the Origin cut short.
+func (s *Server) logRefusedChange(r *http.Request) {
+	s.refusedChanges.Log(s.log, slog.LevelWarn, "refused a change that did not come from the Drive's own pages",
+		"method", seldom.Cut(r.Method), "path", seldom.Cut(r.URL.Path), "origin", seldom.Cut(r.Header.Get("Origin")), "address", s.origin)
+}
+
 // originOf is the origin of an address as a browser writes it in Origin: scheme and host in lower case, and the port
 // only when it is not the scheme's default.
 func originOf(u *url.URL) string {
@@ -595,7 +619,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", memberPolicy)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cross-Origin-Resource-Policy", "same-origin")
@@ -603,12 +626,21 @@ func securityHeaders(next http.Handler) http.Handler {
 			h.Set("X-Robots-Tag", "noindex, nofollow")
 			h.Set("Cache-Control", "no-store")
 			if !underGuestPrefix(r.URL.Path) {
-				h.Set("Content-Security-Policy", visitorPolicy)
 				h.Set("Referrer-Policy", "no-referrer")
 			}
 		}
+		h.Set("Content-Security-Policy", policyFor(r.URL.Path))
 		next.ServeHTTP(w, r)
 	})
+}
+
+// policyFor is the Content-Security-Policy of an answer at path, unless it is a page that sets its own: the
+// visitors' under the public prefix, the members' anywhere else (the guests' part of the prefix included).
+func policyFor(path string) string {
+	if underPublicPrefix(path) && !underGuestPrefix(path) {
+		return visitorPolicy
+	}
+	return memberPolicy
 }
 
 // memberPolicy is the Content-Security-Policy of the interface's pages, the members' and the guests': nothing but the

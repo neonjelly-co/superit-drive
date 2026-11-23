@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -166,6 +168,48 @@ func registerSearchFunctions() error {
 	return searchFunctionsErr
 }
 
+// A search reads everything in its scope, and holds one of the index's few connections while it does. So only
+// SearchesAtOnce of them run at once, which leaves the other connections to everything else the Drive does; the rest
+// wait their turn, for SearchWait at most (ErrSearchBusy), and one that has its turn is ended after SearchMost
+// (ErrSearchTooLong): however many are asked for, and however much there is to read, they cost a bounded part of the
+// index for a bounded time.
+const (
+	SearchesAtOnce = 2
+	SearchWait     = 5 * time.Second
+	SearchMost     = 5 * time.Second
+)
+
+var (
+	// ErrSearchBusy: as many searches as run at once were under way, and none ended while this one waited.
+	ErrSearchBusy = errors.New("too many searches are under way")
+	// ErrSearchTooLong: the search took longer than one may, and was ended.
+	ErrSearchTooLong = errors.New("the search took too long and was ended")
+)
+
+// EndSearchesAfter makes a search end after most instead of SearchMost: only a test build's Drive asks for it
+// (clock.SearchMost). Call it before the index is used.
+func (x *Index) EndSearchesAfter(most time.Duration) { x.searchMost = most }
+
+// searchTurn waits for one of the turns searches take. ErrSearchBusy when none came free in time; ctx's own error when
+// it ended first. Call leave when the search is over.
+func (x *Index) searchTurn(ctx context.Context) (leave func(), err error) {
+	select {
+	case x.searching <- struct{}{}:
+		return func() { <-x.searching }, nil
+	default:
+	}
+	timer := time.NewTimer(x.searchWait)
+	defer timer.Stop()
+	select {
+	case x.searching <- struct{}{}:
+		return func() { <-x.searching }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, ErrSearchBusy
+	}
+}
+
 // A Scope is where a search looks: whole places (every live item in them, at any depth), and single live items with
 // everything in them, each in its place. The caller decides what goes into it, through internal/access, and an item
 // inside a place of Places, or inside another of Items, must not be in Items too.
@@ -177,7 +221,8 @@ type Scope struct {
 // Search returns the live items in scope whose names match what is searched for (Match), the best matches first, then
 // by name, at most limit of them. It walks the folder tree down from the scope and reads nothing outside it: nothing in
 // the trash, nothing inside a folder in the trash, nothing missing from the storage, no other place. It reads only the
-// index, holds no lock of the Drive, and the database stops it at limit.
+// index, holds no lock of the Drive, and the database stops it at limit. It takes one of the searches' turns
+// (ErrSearchBusy when none comes free in time) and is ended when it takes too long (ErrSearchTooLong).
 func (x *Index) Search(ctx context.Context, scope Scope, search string, limit int) ([]Item, error) {
 	key := SearchKey(search)
 	if key == "" || limit <= 0 || (len(scope.Places) == 0 && len(scope.Items) == 0) {
@@ -195,8 +240,18 @@ func (x *Index) Search(ctx context.Context, scope Scope, search string, limit in
 	if err != nil {
 		return nil, err
 	}
-	found, err := scanItems(x.db.QueryContext(ctx, searchSQL, string(places), string(items), MaxDepth, key, limit))
+	leave, err := x.searchTurn(ctx)
 	if err != nil {
+		return nil, err
+	}
+	defer leave()
+	within, cancel := context.WithTimeout(ctx, x.searchMost)
+	defer cancel()
+	found, err := scanItems(x.db.QueryContext(within, searchSQL, string(places), string(items), MaxDepth, key, limit))
+	switch {
+	case err != nil && within.Err() != nil && ctx.Err() == nil:
+		return nil, ErrSearchTooLong // the database was stopped in the middle of it, and its connection is free again
+	case err != nil:
 		return nil, fmt.Errorf("searching the index: %w", err)
 	}
 	return found, nil

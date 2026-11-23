@@ -3,6 +3,7 @@ package test
 import (
 	"bytes"
 	"database/sql"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -38,7 +39,7 @@ type failedUpgrade struct {
 // "Under the newer version.txt" into Clients, which Dóra was given before; and stops it once its copy holds that. With
 // newerSchema, the newer version's copy on the storage is of a schema this Drive does not know, as a version with a
 // migration this one lacks makes it; without, it is of this Drive's schema. The Drive is left stopped.
-func upgradeFailed(t *testing.T, d *harness.Drive, x bences, newerSchema bool) failedUpgrade {
+func upgradeFailed(t *testing.T, d *harness.Drive, x bences, newerSchema bool, alsoUnderIt ...func(b *harness.Client)) failedUpgrade {
 	t.Helper()
 	d.Stop(t)
 	snapshot, err := os.ReadFile(filepath.Join(d.DataDir, "backup", "index.sqlite"))
@@ -52,6 +53,9 @@ func upgradeFailed(t *testing.T, d *harness.Drive, x bences, newerSchema bool) f
 	b := d.As(bence)
 	ok(t, "sharing Secret.txt with Dóra under the newer version", share(t, b, x.place, x.secret.ID, dora, "viewer"))
 	uploadedInto(t, b, x.place, x.clients.ID, "Under the newer version.txt", []byte("newer"))
+	for _, do := range alsoUnderIt {
+		do(b)
+	}
 	copiesSettled(t, d, n)
 	d.Stop(t)
 	if newerSchema {
@@ -116,6 +120,34 @@ func logLines(d *harness.Drive, parts ...string) []string {
 // leftAlone is how the log begins to say that a newer copy was left alone.
 const leftAlone = "THE COPY OF THE INDEX ON THE STORAGE IS LEFT ALONE: the copy of the index was made by a newer version of the Drive"
 
+// What was removed under the newer version is back once the upgrade is undone: the index is the one from before it.
+// The Drive cannot take the removals over (it does not know the newer copy's schema, nor which of its changes were
+// meant), so it says loudly which public links work again, and how many shares and invitations.
+func TestADriveRolledBackSaysWhatRemovedSharingIsBack(t *testing.T) {
+	t.Parallel()
+	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora}, Env: copiesSoon("300ms", "2s")})
+	x, _, notesPage := sharedBeforeTheCopy(t, d)
+	u := upgradeFailed(t, d, x, true, func(b *harness.Client) {
+		// Under the newer version Bence removes the link on Notes.txt and takes Clients from Dóra.
+		if res := removeLink(t, b, x.place, x.notes.ID); res.Status/100 != 2 {
+			t.Fatalf("removing the link on Notes.txt under the newer version: %d %s", res.Status, res.Body)
+		}
+		ok(t, "taking Clients from Dóra under the newer version", unshare(t, b, x.place, x.clients.ID, dora))
+	})
+	putBack(t, d, u.snapshot)
+	d.Restart(t, nil)
+	adopted(t, d, "data folder")
+	if p := readPage(t, visitor(d), notesPage); p.name != "Notes.txt" {
+		t.Fatalf("the link on Notes.txt, removed under the newer version, after the upgrade was undone: %+v", p)
+	}
+	if got := logLines(d, "level=ERROR", "REMOVED UNDER THE NEWER VERSION, AND BACK", "links=1 shares=1 invitations=0"); len(got) != 1 {
+		t.Fatalf("the log does not say loudly, once, what removed sharing is back:\n%s", d.Logs())
+	}
+	if got := logLines(d, "a public link removed under the newer version works again", "name=Notes.txt"); len(got) != 1 {
+		t.Fatalf("the log does not name the link that is back:\n%s", d.Logs())
+	}
+}
+
 // After an upgrade that failed, whose newer version left a copy of a newer schema on the storage, the Drive starts from
 // the data folder's copy, and says loudly that it left the newer copy alone. What was given under the newer version is
 // not in its index; the file put there under it is on the storage, and comes in with the access of its folder. The newer
@@ -133,6 +165,9 @@ func TestADriveRolledBackAfterAFailedUpgradeStarts(t *testing.T) {
 	adopted(t, d, "data folder")
 	if got := logLines(d, "level=ERROR", leftAlone, "copy="+u.newer+" number="+strconv.FormatInt(u.seq, 10)); len(got) != 1 {
 		t.Fatalf("the log does not say loudly, once, that the newer copy was left alone:\n%s", d.Logs())
+	}
+	if got := logLines(d, "nothing that was removed under the newer version is back"); len(got) != 1 {
+		t.Fatalf("the log does not say that nothing removed under the newer version is back:\n%s", d.Logs())
 	}
 	o := d.As(dora)
 	if got := sharedNames(t, o); !slices.Equal(got, []string{entry("Clients", x.place)}) {
@@ -353,5 +388,32 @@ func TestAfterAFailedUpgradeOfTheSameSchemaTheLaterCopyOnTheStorageWins(t *testi
 	}
 	if got := logLines(d, leftAlone); len(got) != 0 {
 		t.Fatalf("a copy of the same schema was left alone: %q", got)
+	}
+}
+
+// Sharing outside the project switched off under the newer version is on again after the upgrade is undone (the
+// snapshot is from before it): the Drive says so, loudly, and does not say that nothing is back.
+func TestADriveRolledBackSaysThatSharingOutsideIsOnAgain(t *testing.T) {
+	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora}, Env: copiesSoon("300ms", "2s")})
+	x, _, notesPage := sharedBeforeTheCopy(t, d)
+	u := upgradeFailed(t, d, x, true, func(b *harness.Client) {
+		if res := switchOutside(t, d.As(reka), false); res.Status/100 != 2 {
+			t.Fatalf("switching sharing outside off under the newer version: %d %s", res.Status, res.Body)
+		}
+		if res := visitor(d).Get(t, notesPage); res.Status == http.StatusOK {
+			t.Fatal("the link opened with sharing outside the project switched off")
+		}
+	})
+	putBack(t, d, u.snapshot)
+	d.Restart(t, nil)
+	adopted(t, d, "data folder")
+	if res := visitor(d).Get(t, notesPage); res.Status != http.StatusOK {
+		t.Fatalf("the link after the upgrade was undone: got %d, want it open again (the switch is from after the snapshot)", res.Status)
+	}
+	if got := logLines(d, "level=ERROR", "SWITCHED OFF UNDER THE NEWER VERSION, AND ON AGAIN", "whole project"); len(got) != 1 {
+		t.Fatalf("the log says %d times that sharing outside the project is on again, want once:\n%s", len(got), d.Logs())
+	}
+	if got := logLines(d, "nothing that was removed under the newer version is back"); len(got) != 0 {
+		t.Fatalf("the log says nothing is back, with the switch on again: %q", got)
 	}
 }

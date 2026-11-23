@@ -679,7 +679,7 @@ func TestAnUploadIsOnlyItsMembersAndGoesWithItsFolder(t *testing.T) {
 	top := Upload{ID: "fedcba9876543210fedcba9876543210", PlaceID: bence.ID, Member: "u-bence", Name: "Top.bin", Size: 5,
 		Started: now, Touched: now.Add(-2 * time.Hour)}
 	for _, u := range []Upload{into, top} {
-		if err := x.AddUpload(ctx, u); err != nil {
+		if err := x.AddUpload(ctx, u, 10); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -703,13 +703,13 @@ func TestAnUploadIsOnlyItsMembersAndGoesWithItsFolder(t *testing.T) {
 		}
 	}
 
-	if old, err := x.UploadsTouchedBefore(ctx, now.Add(-time.Hour)); err != nil || len(old) != 1 || old[0].ID != top.ID {
+	if old, err := x.UploadsTouchedBefore(ctx, now.Add(-time.Hour), nil, 10); err != nil || len(old) != 1 || old[0].ID != top.ID {
 		t.Fatalf("uploads untouched for an hour: %+v, %v", old, err)
 	}
 	if err := x.TouchUpload(ctx, top.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	if old, _ := x.UploadsTouchedBefore(ctx, now.Add(-time.Hour)); len(old) != 0 {
+	if old, _ := x.UploadsTouchedBefore(ctx, now.Add(-time.Hour), nil, 10); len(old) != 0 {
 		t.Fatalf("uploads untouched for an hour, after a part arrived: %+v", old)
 	}
 
@@ -723,13 +723,108 @@ func TestAnUploadIsOnlyItsMembersAndGoesWithItsFolder(t *testing.T) {
 	if err := x.RemoveUpload(ctx, top.ID); err != nil {
 		t.Fatal(err)
 	}
-	if ids, err := x.UploadIDs(ctx); err != nil || len(ids) != 0 {
-		t.Fatalf("uploads left: %v, %v", ids, err)
+	for _, u := range []Upload{into, top} {
+		if known, err := x.UploadKnown(ctx, u.ID); err != nil || known {
+			t.Fatalf("the upload %s is still known: %v, %v", u.Name, known, err)
+		}
 	}
 	// Not into a folder of another place.
 	if err := x.AddUpload(ctx, Upload{ID: into.ID, PlaceID: reka.ID, FolderID: put(t, x, bence, 0, "Other", true, 0).ID,
-		Member: "u-reka", Name: "x", Size: 1, Started: now, Touched: now}); err == nil {
+		Member: "u-reka", Name: "x", Size: 1, Started: now, Touched: now}, 10); err == nil {
 		t.Fatal("the index holds an upload in one place into a folder of another")
+	}
+}
+
+// A person has at most so many uploads in progress, in every place together: one more is not recorded. Another
+// person's do not count against them, and one of theirs gone makes room for another.
+func TestAPersonHasAtMostSoManyUploadsInProgress(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	now := time.Now()
+	bence, reka := place(t, x, "u-bence"), place(t, x, "u-reka")
+	clients := put(t, x, bence, 0, "Clients", true, 0)
+	anna, _, err := x.Invite(ctx, bence.ID, clients.ID, "anna@client.example", "editor", time.Time{}, now, "u-bence")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := func(who string, n int) string { return fmt.Sprintf("%s%031d", who, n) }
+	const most = 3
+	for who, u := range map[string]Upload{
+		"a": {PlaceID: bence.ID, Member: "u-bence"},
+		"b": {PlaceID: reka.ID, Member: "u-reka"},
+		"c": {PlaceID: bence.ID, FolderID: clients.ID, Guest: anna.ID},
+	} {
+		u.Name, u.Size, u.Started, u.Touched = "Big.bin", 1, now, now
+		for n := range most {
+			u.ID = id(who, n)
+			if err := x.AddUpload(ctx, u, most); err != nil {
+				t.Fatalf("upload %d of %q: %v", n+1, who, err)
+			}
+		}
+		u.ID = id(who, most)
+		if err := x.AddUpload(ctx, u, most); !errors.Is(err, ErrTooManyUploads) {
+			t.Fatalf("one upload more of %q: %v, want ErrTooManyUploads", who, err)
+		}
+		if known, err := x.UploadKnown(ctx, u.ID); err != nil || known {
+			t.Fatalf("the upload of %q that was one too many is known: %v, %v", who, known, err)
+		}
+		if n, err := x.UploadsBy(ctx, u.Member, u.Guest); err != nil || n != most {
+			t.Fatalf("uploads in progress of %q: %d, %v", who, n, err)
+		}
+	}
+	// Bence's in Réka's place count as his: every place together.
+	late := Upload{ID: id("d", 0), PlaceID: reka.ID, Member: "u-bence", Name: "x", Size: 1, Started: now, Touched: now}
+	if err := x.AddUpload(ctx, late, most); !errors.Is(err, ErrTooManyUploads) {
+		t.Fatalf("Bence's upload in another place: %v, want ErrTooManyUploads", err)
+	}
+	if err := x.RemoveUpload(ctx, id("a", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.AddUpload(ctx, late, most); err != nil {
+		t.Fatalf("Bence's upload once one of his was gone: %v", err)
+	}
+}
+
+// The uploads nothing arrived for since a time are read a page at a time, the oldest first, each page after the last
+// upload of the one before: every one of them once, those touched at the same moment too, and none touched since.
+func TestAbandonedUploadsAreReadInPages(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	now := time.Now()
+	bence := place(t, x, "u-bence")
+	var want []string
+	for n := range 25 {
+		u := Upload{ID: fmt.Sprintf("%032d", n), PlaceID: bence.ID, Member: "u-bence", Name: "Big.bin", Size: 1, Started: now,
+			Touched: now.Add(-48*time.Hour + time.Duration(n/4)*time.Minute)} // four at each moment
+		if n >= 20 {
+			u.Touched = now // still arriving
+		} else {
+			want = append(want, u.ID)
+		}
+		if err := x.AddUpload(ctx, u, 100); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []string
+	var last *Upload
+	for pages := 0; ; pages++ {
+		page, err := x.UploadsTouchedBefore(ctx, now.Add(-24*time.Hour), last, 3)
+		if err != nil || len(page) > 3 {
+			t.Fatalf("page %d: %d uploads, %v", pages+1, len(page), err)
+		}
+		for _, u := range page {
+			got = append(got, u.ID)
+		}
+		if len(page) < 3 {
+			break
+		}
+		last = &page[len(page)-1]
+		if pages > 20 {
+			t.Fatal("the pages do not end")
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("the abandoned uploads, a page at a time: %q, want %q", got, want)
 	}
 }
 
@@ -802,10 +897,10 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 	// An upload in progress into a folder inside it belongs to the old place: the move waits for it.
 	up := Upload{ID: "0123456789abcdef0123456789abcdef", PlaceID: bence.ID, FolderID: y2026.ID, Member: "u-dora", Name: "Big.bin",
 		Size: 10, Started: now, Touched: now}
-	if err := x.AddUpload(ctx, up); err != nil {
+	if err := x.AddUpload(ctx, up, 10); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery"); !errors.Is(err, ErrUploading) {
+	if _, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery", Left{}); !errors.Is(err, ErrUploading) {
 		t.Fatalf("moving Bakery with an upload into 2026: %v", err)
 	}
 	if err := x.RemoveUpload(ctx, up.ID); err != nil {
@@ -814,7 +909,7 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 
 	// A row the index still holds under the name there is out of date: the storage has already moved Bakery there.
 	put(t, x, team, 0, "Bakery", false, 1)
-	moved, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery")
+	moved, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery", Left{})
 	if err != nil || moved.ID != bakery.ID || moved.PlaceID != team.ID || moved.ParentID != 0 || len(moved.Above) != 0 {
 		t.Fatalf("Bakery moved into Team: %+v, %v", moved, err)
 	}
@@ -851,7 +946,7 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 	if _, err := x.Item(ctx, bence.ID, bakery.ID); !errors.Is(err, ErrNoItem) {
 		t.Fatal("Old.pdf's folder is still found in Bence's My files")
 	}
-	if _, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery"); !errors.Is(err, ErrNoItem) {
+	if _, err := x.MoveToPlace(ctx, bence.ID, bakery.ID, team.ID, 0, "Bakery", Left{}); !errors.Is(err, ErrNoItem) {
 		t.Fatalf("moving Bakery out of Bence's My files again: %v", err)
 	}
 	// A change decided on Bakery while it was in Bence's My files never records anything in his place under it: nothing
@@ -877,7 +972,7 @@ func TestAnItemMovedToAnotherPlaceKeepsOnlyItsOwnGrants(t *testing.T) {
 			return err
 		}(),
 		"a move into Team, under a folder of Bence's": func() error {
-			_, err := x.MoveToPlace(ctx, bence.ID, notes.ID, team.ID, clients.ID, "Notes.txt")
+			_, err := x.MoveToPlace(ctx, bence.ID, notes.ID, team.ID, clients.ID, "Notes.txt", Left{})
 			return err
 		}(),
 		"a restore into Bakery, through Bence's My files": func() error {
@@ -983,7 +1078,7 @@ func TestALinkLivesAndGoesWithItsItem(t *testing.T) {
 	if _, err := x.Restore(ctx, bence.ID, clients.ID, 0, "Clients"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := x.MoveToPlace(ctx, bence.ID, clients.ID, shared.ID, 0, "Clients"); err != nil {
+	if _, err := x.MoveToPlace(ctx, bence.ID, clients.ID, shared.ID, 0, "Clients", Left{}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _, err := x.LinkByToken(ctx, hash(2)); err != nil || got.Place != shared.ID || got.Item != clients.ID {
@@ -1235,5 +1330,56 @@ func TestALinksKind(t *testing.T) {
 	}
 	if err := x.TakenIn(ctx, up.ID, 5); err != nil {
 		t.Fatalf("taken in through a link removed meanwhile: %v", err)
+	}
+}
+
+// What a link took in is counted in bytes and in files, an empty file too, and both start again at a reset; a folder's
+// entries are counted up to a limit, without what is in the trash.
+func TestALinksFilesAndAFoldersEntriesAreCounted(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	now := time.Now()
+	bence := place(t, x, "u-bence")
+	clients := put(t, x, bence, 0, "Clients", true, 0)
+	l, err := x.MakeLink(ctx, bence.ID, clients.ID, make([]byte, 32), UploadLink, "u-bence", now, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int64{0, 5, 0} {
+		if err := x.TakenIn(ctx, l.ID, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := x.LinkByID(ctx, l.ID); got.TakenFiles != 3 || got.TakenIn != 5 {
+		t.Fatalf("after three files, two of them empty: %+v", got)
+	}
+	if got, err := x.ResetLink(ctx, bence.ID, clients.ID); err != nil || got.TakenFiles != 0 || got.TakenIn != 0 {
+		t.Fatalf("after a reset: %+v %v", got, err)
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		put(t, x, bence, clients.ID, name, false, 1)
+	}
+	for limit, want := range map[int]int{10: 3, 2: 2} {
+		if n, err := x.EntriesIn(ctx, bence.ID, clients.ID, limit); err != nil || n != want {
+			t.Fatalf("entries in Clients, counted up to %d: %d %v, want %d", limit, n, err, want)
+		}
+	}
+}
+
+// An index a newer Drive made (the image put back to an older version, the data folder not) is not opened: this Drive
+// knows nothing of what the newer one added to it.
+func TestAnIndexMadeByANewerDriveIsNotOpened(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	x, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", Version()+1)); err != nil {
+		t.Fatal(err)
+	}
+	x.Close()
+	if _, err := Open(ctx, dir); !errors.Is(err, ErrNewer) {
+		t.Fatalf("opening an index of a newer schema: %v", err)
 	}
 }

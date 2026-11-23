@@ -49,6 +49,7 @@ import (
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/members"
+	"github.com/neonjelly-co/superit-drive/internal/seldom"
 	"github.com/neonjelly-co/superit-drive/internal/storage"
 )
 
@@ -73,6 +74,26 @@ func storageError(err error) error {
 	return fmt.Errorf("%w: %w", ErrStorage, err)
 }
 
+// nameError is storageError for a step that looks for, or puts, something on the storage under a name a person chose:
+// when the storage refuses it there (storage.ErrRefused: Apache does for ".htaccess" and every other name that starts
+// with ".ht"), the name is one the Drive cannot store, a *BadName the person is told about, not a failure of the
+// storage. The storage does not say why it refused, so one that refuses every change (its folder set read-only, say)
+// reads the same: the log says what it answered, at most once in seldom.Each, since anyone who may choose a name can
+// cause the line.
+func (d *Drive) nameError(err error, name string) error {
+	if !errors.Is(err, storage.ErrRefused) {
+		return storageError(err)
+	}
+	answer := ""
+	var status *storage.StatusError
+	if errors.As(err, &status) {
+		answer = status.Doing + ": " + status.Status
+	}
+	d.refusedNames.Log(d.log, slog.LevelWarn, "the storage refused a name; the person was told to choose another",
+		"name", seldom.Cut(name), "storage", answer)
+	return &BadName{nameRefused}
+}
+
 // Options are what a Drive needs besides its index and storage.
 type Options struct {
 	// Now is the clock; time.Now when nil.
@@ -85,6 +106,9 @@ type Options struct {
 	// LinkLimit is how much an upload-only link takes in, in bytes, until it is reset: DefaultLinkLimit when 0. Only a
 	// test build sets another (clock.LinkLimit).
 	LinkLimit int64
+	// LinkFiles is how many files an upload-only link takes in until it is reset: DefaultLinkFiles when 0. Only a test
+	// build sets another (clock.LinkFiles).
+	LinkFiles int64
 }
 
 // Drive is one Drive: its index and its storage.
@@ -93,8 +117,10 @@ type Drive struct {
 	storage *storage.Client
 	now     func() time.Time
 	log     *slog.Logger
+	// refusedNames is the log's line about a name the storage refused (nameError).
+	refusedNames *seldom.Line
 
-	// writing holds the storage paths being changed (an upload in flight, a rename or move on its way), so two
+	// writing holds the storage paths being changed (an upload being put in place, a rename or move on its way), so two
 	// changes of one name cannot both pass the check that it is free, and a listing leaves the name alone.
 	mu      sync.Mutex
 	writing map[string]bool
@@ -133,6 +159,7 @@ type Drive struct {
 	// linkLimit is how much an upload-only link takes in until it is reset; intake keeps what is on its way through each
 	// (sendin.go).
 	linkLimit int64
+	linkFiles int64
 	intake    intake
 }
 
@@ -142,6 +169,16 @@ type By struct {
 	Member string
 	Guest  index.Guest
 	Link   int64
+}
+
+// checkName says whether name can be the name of something by makes or renames: as CheckName says for a member, and
+// for anyone outside the project as CheckSentName says, without the characters that turn the direction of text. A
+// guest's "Invoice" + U+202E + "fdp.exe" would read as "Invoiceexe.pdf" in the members' list, as a visitor's would.
+func (b By) checkName(name string) error {
+	if b.Member == "" {
+		return CheckSentName(name)
+	}
+	return CheckName(name)
 }
 
 // added is who added an item from outside the project, as the index labels it: a guest, or a visitor through a link.
@@ -154,7 +191,11 @@ func (d *Drive) Now() time.Time { return d.now() }
 
 // New makes a Drive.
 func New(x *index.Index, s *storage.Client, o Options) *Drive {
-	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}, stopAt: o.StopAt, linkLimit: o.LinkLimit}
+	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}, stopAt: o.StopAt, linkLimit: o.LinkLimit, linkFiles: o.LinkFiles,
+		refusedNames: seldom.Every(seldom.Each)}
+	if d.linkFiles <= 0 {
+		d.linkFiles = DefaultLinkFiles
+	}
 	if d.linkLimit <= 0 {
 		d.linkLimit = DefaultLinkLimit
 	}
@@ -210,9 +251,9 @@ func (l *placeLocks) of(id int64) *sync.RWMutex {
 	return l.m[id]
 }
 
-// inPlace holds the place's lock for a change inside it (an upload, a new folder, a rename or move, deleting or
-// restoring an item, and a listing, which makes a missing top folder again), and checks that the place is still there
-// and not in the trash. Without it, a request that found a shared folder just before it went to the trash could make
+// inPlace holds the place's lock for a change inside it (an upload put in place once it is whole, a new folder, a
+// rename or move, deleting or restoring an item, and a listing, which makes a missing top folder again), and checks
+// that the place is still there and not in the trash. Without it, a request that found a shared folder just before it went to the trash could make
 // its top folder again afterwards, and write into it.
 func (d *Drive) inPlace(ctx context.Context, p index.Place) (release func(), err error) {
 	l := d.locks.of(p.ID)
@@ -250,7 +291,7 @@ func (d *Drive) inPlaces(ctx context.Context, a, b index.Place) (release func(),
 const wholePlaceWait = 10 * time.Second
 
 // wholePlace holds the place's lock alone, once the changes inside it have ended; ErrBusy when they have not within
-// wholePlaceWait. Changes inside the place that start meanwhile go first: a long upload is never held up by this.
+// wholePlaceWait. Changes inside the place that start meanwhile go first: a long move is never held up by this.
 func (d *Drive) wholePlace(ctx context.Context, id int64) (release func(), err error) {
 	l := d.locks.of(id)
 	deadline := time.Now().Add(wholePlaceWait)
@@ -420,7 +461,7 @@ func (d *Drive) claimed(p string) bool {
 	return d.writing[p]
 }
 
-// busyInside says whether a change holds a path inside the folder at dir, such as an upload into it.
+// busyInside says whether a change holds a path inside the folder at dir, such as an upload being put into it.
 func (d *Drive) busyInside(dir string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()

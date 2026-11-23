@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/neonjelly-co/superit-drive/internal/mail/mailtest"
 	"github.com/neonjelly-co/superit-drive/test/harness"
 )
 
@@ -340,6 +341,105 @@ func TestMovesIntoASharedFolderBeingDeletedAllEnd(t *testing.T) {
 			t.Errorf("%s: not moved, but it stayed %v, in the trash with Team %v", f.name, stayed, inTrash[f.name])
 		case statuses[i] != http.StatusOK && statuses[i] != http.StatusNotFound:
 			t.Errorf("%s: moving it answered %d", f.name, statuses[i])
+		}
+	}
+}
+
+// In a My files a public link or an invitation works only while whoever made it may still share the item; in a shared
+// folder it does not depend on its maker. So those inside a moved folder that had stopped working are left behind by the
+// move, or they would start again: Dóra's, who lost her access, and Máté's, who left the project. Those that work come
+// along, also when only sharing outside the project being switched off stops them, and the Drive names them before the
+// move, however deep they are.
+func TestAMoveIntoASharedFolderLeavesDeadLinksAndInvitationsBehind(t *testing.T) {
+	t.Parallel()
+	const carol = "carol@client.example"
+	smtp := mailtest.Start(t, mailtest.Options{})
+	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora, mate}, Env: mailSettings(smtp)})
+	b := d.As(bence)
+	x := bencesFiles(t, d)
+	team := madeSharedFolder(t, b, "Team")
+	// Dóra, an editor of Clients, makes a link on 2026 and invites Anna to Ledger.xlsx; Bence takes her access away.
+	ok(t, "sharing Clients with Dóra", share(t, b, x.place, x.clients.ID, dora, "editor"))
+	_, dorasPage := madeLink(t, d, d.As(dora), x.place, x.y2026.ID, false)
+	invited(t, d.As(dora), x.place, x.ledger.ID, anna, "viewer", nil)
+	annas := signedIn(t, d, smtp, anna)
+	ok(t, "taking Clients from Dóra", unshare(t, b, x.place, x.clients.ID, dora))
+	// Máté, an editor of Bakery, makes a link on Offer.pdf and invites Bob to 2026; he leaves the project.
+	ok(t, "sharing Bakery with Máté", share(t, b, x.place, x.bakery.ID, mate, "editor"))
+	_, matesPage := madeLink(t, d, d.As(mate), x.place, x.offer.ID, false)
+	invited(t, d.As(mate), x.place, x.y2026.ID, bob, "editor", nil)
+	bobs := signedIn(t, d, smtp, bob)
+	d.SetMembers(t, reka, bence, dora)
+	harness.Eventually(t, "Máté has left", func() bool { return d.As(mate).Get(t, "/api/me").Status == http.StatusForbidden })
+	// Bence makes a link on Ledger.xlsx and invites Carol to 2026: these work.
+	_, bencesPage := madeLink(t, d, b, x.place, x.ledger.ID, false)
+	invited(t, b, x.place, x.y2026.ID, carol, "viewer", nil)
+	carols := signedIn(t, d, smtp, carol)
+
+	for whose, page := range map[string]string{"Dóra's link on 2026": dorasPage, "Máté's link on Offer.pdf": matesPage} {
+		if res := visitor(d).Get(t, page); res.Status != http.StatusNotFound {
+			t.Fatalf("%s, before the move: got %d, want 404", whose, res.Status)
+		}
+	}
+	for whose, cookie := range map[string]*http.Cookie{"Anna": annas, "Bob": bobs} {
+		if signedInAs(t, d, cookie) != "" {
+			t.Fatalf("%s is still signed in, with nothing that lets them in", whose)
+		}
+	}
+
+	// Sharing outside the project is switched off: Bence's link and invitation are stopped by that alone.
+	ok(t, "switching sharing outside off", switchOutside(t, d.As(reka), false))
+	res := b.Get(t, previewPath(x.place, x.bakery.ID, team.ID, 0))
+	var p struct {
+		Inside []struct {
+			Item  folderJSON   `json:"item"`
+			Path  []folderJSON `json:"path"`
+			Link  string       `json:"link"`
+			Guest string       `json:"guest"`
+			Role  string       `json:"role"`
+		} `json:"inside"`
+	}
+	res.JSON(t, &p)
+	if res.Status != http.StatusOK || len(p.Inside) != 2 ||
+		p.Inside[0].Item.Name != "Ledger.xlsx" || p.Inside[0].Link != "view" || !slices.Equal(pathNames(p.Inside[0].Path), []string{"2026"}) ||
+		p.Inside[1].Item.Name != "2026" || p.Inside[1].Guest != carol || p.Inside[1].Role != "viewer" || len(p.Inside[1].Path) != 0 {
+		t.Fatalf("what is shared outside inside Bakery, before the move: %d %s", res.Status, res.Body)
+	}
+	for _, gone := range []string{anna, bob} {
+		if strings.Contains(string(res.Body), gone) {
+			t.Fatalf("the preview names %s, whose invitation does not work: %s", gone, res.Body)
+		}
+	}
+
+	if res := moveInto(t, b, x.place, x.bakery.ID, team.ID, 0); res.Status != http.StatusOK {
+		t.Fatalf("moving Bakery into Team: %d %s", res.Status, res.Body)
+	}
+	ok(t, "switching sharing outside on", switchOutside(t, d.As(reka), true))
+
+	// What worked, works: Bence's link, and Carol's invitation.
+	if res := visitor(d).Get(t, bencesPage); res.Status != http.StatusOK {
+		t.Fatalf("Bence's link on Ledger.xlsx after the move: got %d, want 200", res.Status)
+	}
+	if items, _ := guestShared(t, withCookie(d, carols)); len(items) != 1 || items[0].Name != "2026" {
+		t.Fatalf("Carol's Shared with me after the move: %+v", items)
+	}
+	// What did not, does not, and is gone: asked for anew, no code goes to Anna or Bob.
+	for whose, page := range map[string]string{"Dóra's link on 2026": dorasPage, "Máté's link on Offer.pdf": matesPage} {
+		if res := visitor(d).Get(t, page); res.Status != http.StatusNotFound {
+			t.Fatalf("%s, after the move: got %d, want 404", whose, res.Status)
+		}
+	}
+	n := len(smtp.Messages())
+	askForCode(t, browser(d), anna)
+	askForCode(t, browser(d), bob)
+	quietly(t, smtp, n)
+	for name, item := range map[string]int64{"2026": x.y2026.ID, "Ledger.xlsx": x.ledger.ID, "Offer.pdf": x.offer.ID} {
+		lines := accessOf(t, b, itemAccessPath(team.ID, item))
+		if guestLine(lines, anna) != nil || guestLine(lines, bob) != nil {
+			t.Fatalf("who can see %s in Team names a guest whose invitation was left behind: %q", name, accessLines(lines))
+		}
+		if name != "Ledger.xlsx" && slices.ContainsFunc(lines, func(a accessJSON) bool { return a.Link }) {
+			t.Fatalf("who can see %s in Team names a link that was left behind: %q", name, accessLines(lines))
 		}
 	}
 }

@@ -20,27 +20,45 @@ import (
 // counting meanwhile (sharing outside the project switched off, its maker no longer able to share the folder, the folder
 // in the trash) stores nothing.
 //
-// An upload-only link takes in at most LinkLimit bytes in all, until whoever may manage it resets it. Each file's
-// length is kept for it before any of its bytes are read, so files on their way at once never take in more than the
-// limit together, whatever they say about themselves: a file is exactly as long as it said (the request's length), or
-// it is cut off and stores nothing.
+// An upload-only link takes in at most LinkLimit bytes and LinkFiles files in all, until whoever may manage it resets
+// it: bytes alone would let empty files in without end. Each file's length, and its place among the files, is kept for
+// it before any of its bytes are read, so files on their way at once never take in more than the limits together,
+// whatever they say about themselves: a file is exactly as long as it said (the request's length), or it is cut off and
+// stores nothing. And a folder that already holds as many entries as the Drive keeps in step with (MaxFolderEntries)
+// takes no file through a link, however often the link is reset.
 
 // DefaultLinkLimit is how much an upload-only link takes in, in bytes, before it stops until it is reset: 10 GB, as
 // storage is sold (1 GB is 10^9 bytes).
 const DefaultLinkLimit = 10_000_000_000
 
+// ErrFolderFull: the folder an upload-only link is on holds as many entries as the Drive keeps in step with. It is an
+// ErrLinkFull that no reset of the link lifts.
+var ErrFolderFull = fmt.Errorf("%w: its folder holds as many entries as it may", ErrLinkFull)
+
+// DefaultLinkFiles is how many files an upload-only link takes in before it stops until it is reset.
+const DefaultLinkFiles = 1000
+
 // ErrLinkFull: the upload-only link has taken in all it may until it is reset (or this file would take it past that).
 var ErrLinkFull = errors.New("the link has taken in all it may until it is reset")
 
-// intake keeps, per upload-only link, the bytes of the files on their way through it, which count against its limit
-// until they are stored (and then count in the index) or not.
+// intake keeps, per upload-only link, the bytes of the files on their way through it, and how many they are, which
+// count against its limits until they are stored (and then count in the index) or not.
 type intake struct {
 	mu       sync.Mutex
 	reserved map[int64]int64
+	files    map[int64]int64
 }
 
 // LinkLimit is how much an upload-only link takes in, in bytes, before it stops until it is reset.
 func (d *Drive) LinkLimit() int64 { return d.linkLimit }
+
+// LinkFiles is how many files an upload-only link takes in before it stops until it is reset.
+func (d *Drive) LinkFiles() int64 { return d.linkFiles }
+
+// LinkFull says whether an upload-only link has taken in all it may, in bytes or in files, until it is reset.
+func (d *Drive) LinkFull(l index.Link) bool {
+	return l.TakenIn >= d.linkLimit || l.TakenFiles >= d.linkFiles
+}
 
 // CheckSentName says whether name can be the name of a file a visitor sends through a link: as CheckName says for any
 // name, and without the characters that turn the direction of text (U+202A to U+202E, U+2066 to U+2069). A stranger's
@@ -60,8 +78,8 @@ func turnsText(r rune) bool {
 	return (r >= '\u202A' && r <= '\u202E') || (r >= '\u2066' && r <= '\u2069')
 }
 
-// keepFor keeps n bytes of what the link with id link may take in, for one file on its way: ErrLinkFull when what the
-// link has taken in, what is on its way and n would pass its limit. settle gives them back, counting them as taken in
+// keepFor keeps n bytes, and one file, of what the link with id link may take in, for one file on its way: ErrLinkFull
+// when what the link has taken in, what is on its way and this file would pass either limit. settle gives them back, counting them as taken in
 // when stored is true; once, however often it is called.
 func (d *Drive) keepFor(ctx context.Context, link, n int64) (settle func(stored bool) error, err error) {
 	d.intake.mu.Lock()
@@ -71,13 +89,14 @@ func (d *Drive) keepFor(ctx context.Context, link, n int64) (settle func(stored 
 		return nil, err
 	}
 	// Written so that no sum can overflow, whatever n a request says. Once full, not even an empty file.
-	if n < 0 || n > d.linkLimit-l.TakenIn-d.intake.reserved[link] || l.TakenIn >= d.linkLimit {
+	if n < 0 || n > d.linkLimit-l.TakenIn-d.intake.reserved[link] || d.LinkFull(l) || l.TakenFiles+d.intake.files[link] >= d.linkFiles {
 		return nil, ErrLinkFull
 	}
 	if d.intake.reserved == nil {
-		d.intake.reserved = map[int64]int64{}
+		d.intake.reserved, d.intake.files = map[int64]int64{}, map[int64]int64{}
 	}
 	d.intake.reserved[link] += n
+	d.intake.files[link]++
 	var once sync.Once
 	return func(stored bool) (err error) {
 		once.Do(func() {
@@ -91,6 +110,9 @@ func (d *Drive) keepFor(ctx context.Context, link, n int64) (settle func(stored 
 			}
 			if d.intake.reserved[link] -= n; d.intake.reserved[link] <= 0 {
 				delete(d.intake.reserved, link)
+			}
+			if d.intake.files[link]--; d.intake.files[link] <= 0 {
+				delete(d.intake.files, link)
 			}
 		})
 		return err
@@ -165,6 +187,13 @@ func (d *Drive) sentInPlace(ctx context.Context, p index.Place, link int64, name
 	dir, ok := folderPath(p, &folder)
 	if !ok {
 		return index.Item{}, ErrGone
+	}
+	// A folder with as many entries as a look reads is no longer kept in step with the storage, and cannot be zipped:
+	// strangers never fill one further, whatever the link's own counts say.
+	if n, err := d.index.EntriesIn(ctx, p.ID, folder.ID, MaxFolderEntries); err != nil {
+		return index.Item{}, err
+	} else if n >= MaxFolderEntries {
+		return index.Item{}, ErrFolderFull
 	}
 	// The move never replaces anything: something put on the storage directly, which the index does not know yet, makes
 	// it fail, and the next free name is tried, a few times at most.

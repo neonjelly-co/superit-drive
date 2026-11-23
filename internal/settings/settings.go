@@ -132,6 +132,15 @@ var Variables = []Variable{
 // MinSecretLength is the shortest header secret the Drive accepts.
 const MinSecretLength = 32
 
+// PublishedExampleSecret is the header secret the worked example (examples/compose) once came with. Whoever knows the
+// secret and reaches the Drive's port is whoever they say they are, and everyone can read this one: the Drive does not
+// start with it.
+const PublishedExampleSecret = "example-only-header-secret-0123456789abcdef"
+
+// DevelopmentSecret is the header secret of the repository's own development settings (dev/drive.env), as public as
+// the example's. The Drive runs with it, for development on one's own computer, and says so loudly as it starts.
+const DevelopmentSecret = "dev-secret-dev-secret-dev-secret-0000"
+
 // FromEnv reads the settings. getenv is os.Getenv outside tests. Every problem is reported at once, so a person
 // fixing their setup sees the whole list and not one complaint per restart.
 func FromEnv(getenv func(string) string) (Settings, error) {
@@ -161,6 +170,9 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	}
 	if s.HeaderSecret != "" && len(s.HeaderSecret) < MinSecretLength {
 		r.problem(fmt.Sprintf("DRIVE_HEADER_SECRET must be at least %d characters", MinSecretLength))
+	}
+	if s.HeaderSecret == PublishedExampleSecret {
+		r.problem("DRIVE_HEADER_SECRET is the example's, which everyone can read: make one of your own (openssl rand -hex 32)")
 	}
 	if strings.ContainsFunc(s.HeaderSecret, func(r rune) bool { return r > unicode.MaxASCII || !unicode.IsPrint(r) }) {
 		r.problem("DRIVE_HEADER_SECRET must be printable ASCII, so it can travel in a header")

@@ -34,9 +34,17 @@ const FileName = "index.sqlite"
 //go:embed migrations/*.sql
 var migrations embed.FS
 
+// connections is how many connections to the index are open at once, at most: every read and write of the Drive takes
+// one for as long as it lasts, and waits for one when all are taken.
+const connections = 4
+
 // Index is the open index.
 type Index struct {
 	db *sql.DB
+	// searching holds the turns of the searches under way (search.go), and searchWait and searchMost are how long one
+	// waits for its turn and how long it may then take.
+	searching              chan struct{}
+	searchWait, searchMost time.Duration
 }
 
 // Open opens the index in dataDir, making it if needed, and brings its schema up to date.
@@ -57,12 +65,12 @@ func Open(ctx context.Context, dataDir string) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening the index %s: %w", file, err)
 	}
-	db.SetMaxOpenConns(4)
+	db.SetMaxOpenConns(connections)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("opening the index %s: %w", file, err)
 	}
-	x := &Index{db: db}
+	x := &Index{db: db, searching: make(chan struct{}, SearchesAtOnce), searchWait: SearchWait, searchMost: SearchMost}
 	if err := x.migrate(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("updating the index %s: %w", file, err)
@@ -85,8 +93,22 @@ func (x *Index) migrate(ctx context.Context) (err error) {
 		return err
 	}
 	defer conn.Close()
+	// An index a newer Drive made is not opened: this Drive would skip every migration it does not know, and work on
+	// tables whose rules it does not keep (a restriction a newer version added would quietly stop holding).
+	var version int
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if version > Version() {
+		return fmt.Errorf("%w (its schema is version %d, this Drive's %d)", ErrNewer, version, Version())
+	}
 	return migrateConn(ctx, conn, Version())
 }
+
+// ErrNewer: the index in the data folder was made by a Drive whose schema is newer than this one's migrations make, as
+// after the image was put back to an older version without the data folder. The Drive does not start on it; a copy
+// made by a newer Drive is refused the same way (ErrCopyNewer).
+var ErrNewer = errors.New("the index was made by a newer version of the Drive")
 
 // Version is the schema version this Drive's migrations bring an index to: the number of the last one.
 func Version() int {

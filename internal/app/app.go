@@ -29,6 +29,12 @@ import (
 // grow.
 const MemoryLimit = 24 << 20
 
+// MaxHeaderBytes is the most a request's first line and headers may take together, well below the megabyte Go allows
+// when nothing is set: a request with more is answered 431 before any of it is looked at, so that nobody makes the
+// Drive read, keep or log a megabyte for each request. An address the Drive answers and the headers a browser and the
+// reverse proxy send with it (identity, cookies, an Origin) take a few kilobytes.
+const MaxHeaderBytes = 32 << 10
+
 // Run runs the Drive until ctx ends. getenv is os.Getenv; version is logged at start.
 func Run(ctx context.Context, getenv func(string) string, version string, log *slog.Logger) error {
 	s, err := settings.FromEnv(getenv)
@@ -51,13 +57,22 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	if err := drive.Adopt(ctx, s.DataDir, store, log, clock.Now); err != nil {
 		return err
 	}
+	if s.HeaderSecret == settings.DevelopmentSecret {
+		log.Warn("DRIVE_HEADER_SECRET is the repository's development secret, which everyone can read: whoever reaches the " +
+			"Drive's port is whoever they say they are. Only for development on your own computer; make one of your own otherwise")
+	}
 	x, err := index.Open(ctx, s.DataDir)
 	if err != nil {
 		return err
 	}
 	defer x.Close()
+	if most, ok := clock.SearchMost(); ok {
+		x.EndSearchesAfter(most)
+		log.Warn("this is a test build: a search is ended after the time the test sets", "after", most.String())
+	}
 	linkLimit, _ := clock.LinkLimit()
-	d := drive.New(x, store, drive.Options{Now: clock.Now, Log: log, StopAt: clock.StopAt, LinkLimit: linkLimit})
+	linkFiles, _ := clock.LinkFiles()
+	d := drive.New(x, store, drive.Options{Now: clock.Now, Log: log, StopAt: clock.StopAt, LinkLimit: linkLimit, LinkFiles: linkFiles})
 	defer d.Stop() // the looks at folders under way in the background end, before the index closes
 
 	// A hand-over or deletion of a removed member's files that a stop cut short holds what it changes on the storage, before
@@ -108,7 +123,7 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	// A guest whose address is in the member list is a member: what was given to them is theirs as a member, by user id.
 	// Now, and whenever the list changes.
 	admit := func(l *members.List) {
-		if _, err := d.AdmitMembers(ctx, l); err != nil && ctx.Err() == nil {
+		if _, err := d.AdmitMembers(ctx, l, srv.WorkingInvitations); err != nil && ctx.Err() == nil {
 			log.Error("guests who joined the project could not be made members; it is tried again when the member list changes", "error", err)
 		}
 	}
@@ -193,6 +208,7 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	httpServer := &http.Server{
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    MaxHeaderBytes,
 		IdleTimeout:       2 * time.Minute,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}

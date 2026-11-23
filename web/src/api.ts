@@ -268,7 +268,21 @@ export type Found = Item & {
  * becomesProjects: it would leave the person's My files for a shared folder, and become the project's. outside: whether
  * sharing outside the project is on there (where it is off, its public link and guests stop there).
  */
-export type MovePreview = { becomesProjects: boolean; access: Access[]; seenBy: SeenBy; outside: Outside };
+export type MovePreview = { becomesProjects: boolean; access: Access[]; seenBy: SeenBy; outside: Outside; inside: SharedInside[] };
+
+/**
+ * A public link or a guest's invitation that works, on something inside an item that would move: the item it is on, the
+ * folders from the moved one down to it, and the link's kind or the guest's address with their role and end. Those that
+ * do not work are not listed: a move to another place leaves them behind.
+ */
+export type SharedInside = {
+	item: FolderRef;
+	path: FolderRef[];
+	link?: "view" | "upload-only";
+	guest?: string;
+	role?: "viewer" | "editor";
+	until?: string;
+};
 
 /**
  * What a public link lets its visitors do: open and download what it is on ("view"), or, on a folder only, send files
@@ -287,6 +301,9 @@ export type PublicLink = {
 	kind: LinkKind;
 	takenIn?: number;
 	limit?: number;
+	/** How many files it has taken in since it was made or reset, and the most it takes. */
+	files?: number;
+	filesLimit?: number;
 	full?: boolean;
 	made: string;
 	madeBy?: Person;
@@ -424,7 +441,7 @@ export type Session = {
 /** Larger files are uploaded resumably, in parts; smaller ones in one request. */
 export const RESUMABLE_FROM = 32 * 1024 * 1024;
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
 	let res: Response;
 	try {
 		res = await fetch(path, {
@@ -434,6 +451,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 					? { Accept: "application/json", "Accept-Language": lang }
 					: { Accept: "application/json", "Accept-Language": lang, "Content-Type": "application/json" },
 			body: body === undefined ? undefined : JSON.stringify(body),
+			signal,
 		});
 	} catch {
 		throw new ApiError(0, t.connection.unreachable);
@@ -632,7 +650,8 @@ export const api = {
 	 * Files and folders whose names match, across everything the person can see: the best 50 first, and `more` when a
 	 * longer search would find others.
 	 */
-	search: (q: string) => call<{ items: Found[]; more: boolean }>("GET", `${base}/search?${new URLSearchParams({ q })}`),
+	search: (q: string, signal?: AbortSignal) =>
+		call<{ items: Found[]; more: boolean }>("GET", `${base}/search?${new URLSearchParams({ q })}`, undefined, signal),
 	/** What others shared with the person that they reach only through it, the most recently shared first. */
 	sharedWithMe: () => call<{ items: SharedItem[] }>("GET", `${base}/shared-with-me`).then((r) => r.items),
 	/** Moves an item into the place's trash. */
@@ -711,9 +730,13 @@ export type GuestShared = GuestItem & { place: number; role: "viewer" | "editor"
 export const guestApi = {
 	/** Who is signed in; an ApiError with `signIn` when nobody is. */
 	me: () => call<{ address: string; project: string }>("GET", `${base}/me`),
-	/** Asks for a code mailed to the address: the answer is the same whatever the address. */
-	askForCode: (address: string) => call<{ message: string }>("POST", `${base}/code`, { address }),
-	/** Signs in with the code: the Drive keeps the guest signed in on this browser for 30 days. */
+	/**
+	 * Asks for a sign-in link mailed to the address, leading to where the guest was going (an item, if any): the answer is
+	 * the same whatever the address.
+	 */
+	askForCode: (address: string, to: { place?: number; item?: number } = {}) =>
+		call<{ message: string }>("POST", `${base}/code`, { address, ...to }),
+	/** Signs in with the code of a sign-in link: the Drive keeps the guest signed in on this browser for 30 days. */
 	signIn: (address: string, code: string) => call<{ address: string }>("POST", `${base}/sign-in`, { address, code }),
 	signOut: () => call<null>("POST", `${base}/sign-out`),
 	/**

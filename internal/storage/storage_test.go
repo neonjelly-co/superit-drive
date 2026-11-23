@@ -534,6 +534,39 @@ func TestAnUnknownAnswerSaysWhatItWas(t *testing.T) {
 	}
 }
 
+// A storage that will not do something at a path, whoever asks (403 Forbidden, as Apache answers for ".htaccess"), is
+// told apart from one that fails: whatever was asked of it.
+func TestARefusalIsToldApartFromAFailure(t *testing.T) {
+	status := http.StatusForbidden
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+	defer srv.Close()
+	base, _ := url.Parse(srv.URL)
+	c := New(base, "u", "p", "/")
+	ctx := context.Background()
+	asked := func() map[string]error {
+		_, stat := c.Stat(ctx, ".htaccess")
+		return map[string]error{
+			"Stat":         stat,
+			"Put":          c.Put(ctx, ".htaccess", strings.NewReader("x"), 1),
+			"Move":         c.Move(ctx, "a.txt", ".htaccess"),
+			"MoveFolder":   c.MoveFolder(ctx, "a", ".htaccess"),
+			"CreateFolder": c.CreateFolder(ctx, ".htaccess"),
+		}
+	}
+	for what, err := range asked() {
+		var answer *StatusError
+		if !errors.Is(err, ErrRefused) || !errors.As(err, &answer) || answer.Status != "403 Forbidden" {
+			t.Errorf("%s answered 403: got %v, want ErrRefused with the answer", what, err)
+		}
+	}
+	status = http.StatusInternalServerError
+	for what, err := range asked() {
+		if err == nil || errors.Is(err, ErrRefused) {
+			t.Errorf("%s answered 500: got %v, want an error that is no refusal", what, err)
+		}
+	}
+}
+
 // errOther stands for an error of the method's own, none of the ones a caller tells apart.
 var errOther = errors.New("an error of its own")
 

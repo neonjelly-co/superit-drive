@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -34,11 +33,14 @@ type linkJSON struct {
 	// Works says whether it lets visitors in now. It does not while its maker can no longer share the item in a My
 	// files (it works again if they can again), nor where sharing outside the project is off.
 	Works bool `json:"works"`
-	// For an upload-only link: TakenIn is how many bytes of files it has taken in since it was made or last reset, Limit
-	// the most it takes in before it stops, and Full whether it has: then it takes no file until it is reset.
-	TakenIn *int64 `json:"takenIn,omitempty"`
-	Limit   *int64 `json:"limit,omitempty"`
-	Full    bool   `json:"full,omitempty"`
+	// For an upload-only link: TakenIn is how many bytes of files it has taken in since it was made or last reset, and
+	// Files how many files; Limit and FilesLimit the most it takes in before it stops, and Full whether it has reached
+	// either: then it takes no file until it is reset.
+	TakenIn    *int64 `json:"takenIn,omitempty"`
+	Limit      *int64 `json:"limit,omitempty"`
+	Files      *int64 `json:"files,omitempty"`
+	FilesLimit *int64 `json:"filesLimit,omitempty"`
+	Full       bool   `json:"full,omitempty"`
 	// Address is the link's address: only in the answer that made it. The Drive keeps only a hash of its token, and can
 	// never show it again.
 	Address string `json:"address,omitempty"`
@@ -48,8 +50,8 @@ func (s *Server) linkJSONOf(l index.Link, where *access.Place, address string) l
 	list := s.members.Current()
 	j := linkJSON{Kind: l.Kind, Made: l.Made, Uses: l.Uses, Address: address, Works: linkWorks(l, where, list)}
 	if l.Kind == index.UploadLink {
-		taken, limit := l.TakenIn, s.drive.LinkLimit()
-		j.TakenIn, j.Limit, j.Full = &taken, &limit, taken >= limit
+		taken, limit, files, filesLimit := l.TakenIn, s.drive.LinkLimit(), l.TakenFiles, s.drive.LinkFiles()
+		j.TakenIn, j.Limit, j.Files, j.FilesLimit, j.Full = &taken, &limit, &files, &filesLimit, s.drive.LinkFull(l)
 	}
 	if m, ok := list.Lookup(l.MadeBy); ok {
 		j.MadeBy = personJSONOf(m)
@@ -113,7 +115,7 @@ func (s *Server) makeLink(w http.ResponseWriter, r *http.Request, c call) {
 		Replace bool   `json:"replace"`
 		Kind    string `json:"kind"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+	if err := readSmall(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
 		s.refuse(w, r, http.StatusBadRequest, unreadable)
 		return
 	}

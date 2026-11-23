@@ -392,7 +392,7 @@ const (
 	// link's own item only. (Not the members' Upload, which can replace a file, and so delete one.)
 	UploadThroughLink Action = "upload-through-link"
 
-	// SignInAsGuest is asking for a code mailed to an address, signing in with it, and loading the guests' pages: anyone
+	// SignInAsGuest is asking for a sign-in link mailed to an address, signing in with it, and loading the guests' pages: anyone
 	// who is not a member, under the guests' part of the public prefix. It concerns no place.
 	SignInAsGuest Action = "sign-in-as-guest"
 	// EnterAsGuest is, for a signed-in guest, using their pages at all: who they are, their "Shared with me", signing
@@ -448,7 +448,7 @@ func Decide(person Person, action Action, place *Place) bool {
 		return asGuest(*person.Guest, action, place)
 	}
 	if action == SignInAsGuest {
-		// Asking for a code is for anyone outside the project; a member signs in through the reverse proxy.
+		// Asking for a sign-in link is for anyone outside the project; a member signs in through the reverse proxy.
 		return place == nil && !person.isMember()
 	}
 	if !person.isMember() {

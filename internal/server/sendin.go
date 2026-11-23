@@ -41,7 +41,7 @@ var (
 // send them. It says that what is in the folder cannot be seen, and shows none of it. Once the link has taken in all it
 // may, it says so instead of offering to send, and has no script.
 func (s *Server) sendInPage(w http.ResponseWriter, r *http.Request, c call) {
-	full := c.link.TakenIn >= s.drive.LinkLimit()
+	full := s.drive.LinkFull(*c.link)
 	s.renderVisitor(w, r, http.StatusOK, visitorView{Name: c.item.Name, By: s.sharer(*c.link, text.Of(r)), Folder: true, Send: true, Full: full})
 	s.used(r, c)
 }
@@ -60,7 +60,8 @@ func (s *Server) sendInPage(w http.ResponseWriter, r *http.Request, c call) {
 //	201 {"size": n}
 //	400 {"error"}                                 a name the Drive does not store, or the file stopped before its end
 //	411 {"error"}                                 no Content-Length
-//	413 {"error", "full": true | false}           it would take the link past its limit (full: it has reached it)
+//	413 {"error", "full": true | false}           it would take the link past a limit (full: it has reached one, in
+//	                                              bytes or in files, or its folder holds all the entries it may)
 //	503 {"error", "busy": true}, Retry-After      not its turn: send it again then, with the same turn
 //	404, 403                                      the pages for a link that does not work, or is not available now
 //
@@ -96,6 +97,7 @@ func (s *Server) sendIn(w http.ResponseWriter, r *http.Request, c call) {
 			s.fail(w, r, ferr)
 			return
 		}
+		full = full || errors.Is(err, drive.ErrFolderFull)
 		message := linkTooSmall
 		if full {
 			message = linkFull
@@ -172,7 +174,7 @@ func (s *Server) linkIsFull(ctx context.Context, id int64) (bool, error) {
 	if errors.Is(err, index.ErrNoLink) {
 		return true, nil
 	}
-	return l.TakenIn >= s.drive.LinkLimit(), err
+	return s.drive.LinkFull(l), err
 }
 
 // sendPolicyFor is the Content-Security-Policy of an upload-only link's page, for a Drive whose own address has the

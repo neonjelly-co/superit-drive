@@ -164,7 +164,8 @@ export function App() {
 	const query = where.view === "search" ? where.query : "";
 	const found = useQuery({
 		queryKey: ["search", query],
-		queryFn: () => api.search(query),
+		// A search no longer wanted (the next letter was typed) is given up, so the Drive stops working on it.
+		queryFn: ({ signal }) => api.search(query, signal),
 		enabled: where.view === "search",
 		retry: (n, e) => !(e instanceof ApiError && e.status === 400) && n < 1,
 	});

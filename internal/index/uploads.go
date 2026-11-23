@@ -1,9 +1,11 @@
 package index
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"time"
 )
 
@@ -28,6 +30,9 @@ type Upload struct {
 // ErrNoUpload is returned when an upload in progress does not exist where it was looked for.
 var ErrNoUpload = errors.New("no such upload")
 
+// ErrTooManyUploads is returned when a person who starts an upload already has as many in progress as they may.
+var ErrTooManyUploads = errors.New("too many uploads in progress")
+
 const uploadColumns = "id, place_id, IFNULL(folder_id, 0), member, IFNULL(guest_id, 0), name, size, started_at, touched_at"
 
 func scanUpload(row interface{ Scan(...any) error }) (Upload, error) {
@@ -41,13 +46,30 @@ func scanUpload(row interface{ Scan(...any) error }) (Upload, error) {
 	return u, err
 }
 
-// AddUpload records an upload that has just started.
-func (x *Index) AddUpload(ctx context.Context, u Upload) error {
-	_, err := x.db.ExecContext(ctx, `
+// AddUpload records an upload that has just started, unless the person who starts it (u.Member, or u.Guest) already
+// has most uploads in progress, in every place together: then it is ErrTooManyUploads, and nothing is recorded. Counting
+// and recording are one statement, so uploads started at once never pass the limit together.
+func (x *Index) AddUpload(ctx context.Context, u Upload, most int) error {
+	res, err := x.db.ExecContext(ctx, `
 		INSERT INTO uploads (id, place_id, folder_id, member, guest_id, name, size, started_at, touched_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		u.ID, u.PlaceID, parent(u.FolderID), u.Member, parent(u.Guest), u.Name, u.Size, u.Started.UnixMilli(), u.Touched.UnixMilli())
-	return err
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE (SELECT COUNT(*) FROM uploads WHERE member = ? AND IFNULL(guest_id, 0) = ?) < ?`,
+		u.ID, u.PlaceID, parent(u.FolderID), u.Member, parent(u.Guest), u.Name, u.Size, u.Started.UnixMilli(), u.Touched.UnixMilli(),
+		u.Member, u.Guest, most)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return cmp.Or(err, ErrTooManyUploads)
+	}
+	return nil
+}
+
+// UploadsBy is how many uploads in progress member (a member's user id) or guest (a guest's id, with member "") has,
+// in every place together.
+func (x *Index) UploadsBy(ctx context.Context, member string, guest int64) (n int, err error) {
+	err = x.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM uploads WHERE member = ? AND IFNULL(guest_id, 0) = ?", member, guest).Scan(&n)
+	return n, err
 }
 
 // UploadOf finds the upload with id in the place, if member (a member's user id) or guest (a guest's id, with member
@@ -72,9 +94,16 @@ func (x *Index) RemoveUpload(ctx context.Context, id string) error {
 	return err
 }
 
-// UploadsTouchedBefore returns the uploads no part of which arrived since the time given, the oldest first.
-func (x *Index) UploadsTouchedBefore(ctx context.Context, before time.Time) ([]Upload, error) {
-	rows, err := x.db.QueryContext(ctx, "SELECT "+uploadColumns+" FROM uploads WHERE touched_at < ? ORDER BY touched_at", before.UnixMilli())
+// UploadsTouchedBefore returns uploads no part of which arrived since the time given, the oldest first: at most limit
+// of them, after the upload after (nil: from the first). Whoever works through them all asks a page at a time, each
+// after the last of the one before, and so never holds more than a page, however many there are.
+func (x *Index) UploadsTouchedBefore(ctx context.Context, before time.Time, after *Upload, limit int) ([]Upload, error) {
+	from, fromID := int64(math.MinInt64), ""
+	if after != nil {
+		from, fromID = after.Touched.UnixMilli(), after.ID
+	}
+	rows, err := x.db.QueryContext(ctx, "SELECT "+uploadColumns+` FROM uploads
+		WHERE touched_at < ? AND (touched_at, id) > (?, ?) ORDER BY touched_at, id LIMIT ?`, before.UnixMilli(), from, fromID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -90,20 +119,8 @@ func (x *Index) UploadsTouchedBefore(ctx context.Context, before time.Time) ([]U
 	return out, rows.Err()
 }
 
-// UploadIDs says which uploads the index knows, by id.
-func (x *Index) UploadIDs(ctx context.Context) (map[string]bool, error) {
-	rows, err := x.db.QueryContext(ctx, "SELECT id FROM uploads")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	known := map[string]bool{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		known[id] = true
-	}
-	return known, rows.Err()
+// UploadKnown says whether the index knows an upload in progress with id.
+func (x *Index) UploadKnown(ctx context.Context, id string) (known bool, err error) {
+	err = x.db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM uploads WHERE id = ?)", id).Scan(&known)
+	return known, err
 }

@@ -159,6 +159,9 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 								<dt className="text-muted-foreground">{t.link.takenIn}</dt>
 								<dd>
 									<TakenIn takenIn={current.takenIn} limit={current.limit} />
+									{current.files !== undefined && current.filesLimit !== undefined && (
+										<span className="mt-1 block">{t.link.filesOf(current.files, current.filesLimit)}</span>
+									)}
 								</dd>
 							</>
 						)}
@@ -170,7 +173,7 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 						<p className="mt-2 text-sm text-attention">{t.link.notWorking}</p>
 					)}
 					<div className="mt-3 flex flex-wrap gap-2">
-						{canMake && current.kind === "upload-only" && (current.takenIn ?? 0) > 0 && (
+						{canMake && current.kind === "upload-only" && ((current.takenIn ?? 0) > 0 || (current.files ?? 0) > 0) && (
 							<Button disabled={busy} onClick={() => setAsking("reset")}>
 								{t.link.makeRoom}
 							</Button>
@@ -195,7 +198,7 @@ export function PublicLinkSection({ placeId, itemId, what, canMake, onChanged }:
 				<Dialog
 					title={questions()[asking].title}
 					description={
-						asking === "reset" && current.limit !== undefined ? t.link.resetNote(formatCapacity(current.limit)) : questions()[asking].description
+						asking === "reset" && current.limit !== undefined ? t.link.resetNote(formatCapacity(current.limit), current.filesLimit ?? 0) : questions()[asking].description
 					}
 					onClose={() => setAsking(undefined)}
 					onSubmit={() => {

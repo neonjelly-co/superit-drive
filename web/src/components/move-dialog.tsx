@@ -2,7 +2,17 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Folder, FolderOpen, Link2, User, Users } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { roleOf, whoCanSee, whoOf, whyOf } from "../access";
-import { type Access, type Action, api, type FolderRef, type Item, type Member, type Outside, type SeenBy } from "../api";
+import {
+	type Access,
+	type Action,
+	api,
+	type FolderRef,
+	type Item,
+	type Member,
+	type Outside,
+	type SeenBy,
+	type SharedInside,
+} from "../api";
 import { t } from "../i18n";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
@@ -51,6 +61,8 @@ type Warning = {
 	kept: { name: string; access: Access[] }[];
 	/** Whether sharing outside the project is on there: off, public links and guests stop there. */
 	outside: Outside;
+	/** The public links and invitations that work inside what is moved, at any depth, each with the moved item it is in. */
+	inside: { top: string; shared: SharedInside }[];
 };
 
 /** The warning for moving items, from what the Drive says about each (GET …/move). */
@@ -59,7 +71,8 @@ async function warningFor(placeId: number, items: Item[], dest: Destination): Pr
 	const becomesProjects = previews.some((p) => p.becomesProjects);
 	const [first] = previews;
 	const outside = first?.outside ?? "on";
-	if (first && previews.length === 1) return { access: first.access, seenBy: first.seenBy, becomesProjects, kept: [], outside };
+	const inside = previews.flatMap((p, i) => (p.inside ?? []).map((shared) => ({ top: items[i]?.name ?? "", shared })));
+	if (first && previews.length === 1) return { access: first.access, seenBy: first.seenBy, becomesProjects, kept: [], outside, inside };
 	// What every item gets there is what was given there; what was given on each item it keeps, and is said apart.
 	const access = (first?.access ?? []).filter((a) => !a.given);
 	const everyone = access.some((a) => a.everyone);
@@ -68,7 +81,7 @@ async function warningFor(placeId: number, items: Item[], dest: Destination): Pr
 	const kept = previews
 		.map((p, i) => ({ name: items[i]?.name ?? "", access: p.access.filter((a) => a.given) }))
 		.filter((k) => k.access.length > 0);
-	return { becomesProjects, access, seenBy: { everyone, members: everyone ? [] : members, link }, kept, outside };
+	return { becomesProjects, access, seenBy: { everyone, members: everyone ? [] : members, link }, kept, outside, inside };
 }
 
 /**
@@ -180,7 +193,19 @@ export function MoveDialog({ place, root, items, path, otherPlaces, me, members,
 						</ul>
 					</>
 				)}
-				<p className="mt-3 text-sm text-muted-foreground">{one ? t.move.keepsOne : t.move.keepsMany}</p>
+				{warning.inside.length > 0 && (
+					<>
+						<p className="mt-3 text-sm font-semibold">{t.move.insideTitle}</p>
+						<ul aria-label={t.move.insideLabel} className="mt-2 max-h-56 overflow-auto rounded-lg border border-border px-3 text-sm">
+							{warning.inside.map(({ top, shared }, i) => (
+								<InsideLine key={i} top={top} shared={shared} />
+							))}
+						</ul>
+					</>
+				)}
+				<p className="mt-3 text-sm text-muted-foreground">
+					{one ? t.move.keepsOne : t.move.keepsMany} {t.move.leavesDead}
+				</p>
 				{warning.outside !== "on" && (
 					<p className="mt-3 text-sm text-attention">
 						{warning.outside === "project" ? t.move.offForProject : t.move.offForFolder(dest.place.name)}
@@ -352,6 +377,26 @@ function AccessLine({ a, me, given }: { a: Access; me?: string; given: string })
 			</span>
 			<span className="shrink-0 text-muted-foreground">
 				{[roleOf(a), why].filter(Boolean).join(" · ")}
+			</span>
+		</li>
+	);
+}
+
+/** One public link or invitation that works inside what is moved: where it is, and what it is. */
+function InsideLine({ top, shared }: { top: string; shared: SharedInside }) {
+	const Icon = shared.link ? Link2 : User;
+	const where = [top, ...shared.path.map((f) => f.name), shared.item.name].join(" › ");
+	const what = shared.link
+		? [t.move.insideLink, shared.link === "view" ? t.link.viewName : t.link.uploadName]
+		: [t.move.insideGuest, shared.guest, shared.role === "editor" ? t.common.editor : t.common.viewer];
+	return (
+		<li className="flex items-center gap-2.5 border-b border-border py-2 last:border-0">
+			<Icon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+			<span className="min-w-0 flex-1 truncate" title={where}>
+				{where}
+			</span>
+			<span className="max-w-[55%] shrink-0 truncate text-muted-foreground" title={shared.guest}>
+				{what.filter(Boolean).join(" · ")}
 			</span>
 		</li>
 	);
