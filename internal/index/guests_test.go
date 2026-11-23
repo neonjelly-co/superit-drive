@@ -351,7 +351,7 @@ func TestAGuestsUploadIsTheirs(t *testing.T) {
 	clients := put(t, x, bence, 0, "Clients", true, 0)
 	anna, _, _ := x.Invite(ctx, bence.ID, clients.ID, "anna@client.example", "editor", time.Time{}, now, "u-bence")
 	id := "0123456789abcdef0123456789abcdef"
-	if err := x.AddUpload(ctx, Upload{ID: id, PlaceID: bence.ID, FolderID: clients.ID, Guest: anna.ID, Name: "a", Size: 1, Started: now, Touched: now}); err != nil {
+	if err := x.AddUpload(ctx, Upload{ID: id, PlaceID: bence.ID, FolderID: clients.ID, Guest: anna.ID, Name: "a", Size: 1, Started: now, Touched: now}, 10); err != nil {
 		t.Fatal(err)
 	}
 	if u, err := x.UploadOf(ctx, bence.ID, id, "", anna.ID); err != nil || u.Guest != anna.ID || u.Member != "" {

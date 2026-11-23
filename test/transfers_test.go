@@ -41,7 +41,9 @@ func uploadsPath(placeID, folderID int64) string {
 	return fmt.Sprintf("/api/places/%d/items/%d/uploads", placeID, folderID)
 }
 
-func sessionPath(placeID int64, id string) string { return fmt.Sprintf("/api/places/%d/uploads/%s", placeID, id) }
+func sessionPath(placeID int64, id string) string {
+	return fmt.Sprintf("/api/places/%d/uploads/%s", placeID, id)
+}
 
 func startUpload(t *testing.T, c *harness.Client, placeID, folderID int64, name string, size int, existing string) harness.Response {
 	t.Helper()
@@ -297,7 +299,9 @@ func TestAnUploadInProgressIsItsUploadersAlone(t *testing.T) {
 			"seeing where it stands": func(c *harness.Client) harness.Response { return c.Get(t, sessionPath(x.place, id)) },
 			"sending a part":         func(c *harness.Client) harness.Response { return sendPart(t, c, x.place, id, 1<<20, []byte("planted")) },
 			"finishing it":           func(c *harness.Client) harness.Response { return finishUpload(t, c, x.place, id, "replace") },
-			"cancelling it":          func(c *harness.Client) harness.Response { return c.Do(t, http.MethodDelete, sessionPath(x.place, id), nil) },
+			"cancelling it": func(c *harness.Client) harness.Response {
+				return c.Do(t, http.MethodDelete, sessionPath(x.place, id), nil)
+			},
 		}
 	}
 	for _, c := range []struct {

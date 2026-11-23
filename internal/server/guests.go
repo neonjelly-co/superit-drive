@@ -75,7 +75,7 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 		s.refuse(w, r, http.StatusForbidden, refusedOrigin)
 		return
 	}
-	var c call
+	c := call{action: rt.action}
 	guest, stale, err := s.guestSession(r)
 	if err != nil {
 		s.fail(w, r, err)

@@ -202,7 +202,7 @@ func TestNothingIsWrittenIntoASharedFolderOnItsWayToTheTrash(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	leave, err := d.inPlace(ctx, p) // an upload under way
+	leave, err := d.inPlace(ctx, p) // a change under way
 	if err != nil {
 		t.Fatal(err)
 	}

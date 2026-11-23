@@ -178,6 +178,16 @@ the file that is there into the trash and the upload into its place (the file co
 keeps its place, its id and so its sharing; **keep both** stores the upload as `Name (2).ext`, `Name (3).ext` and so
 on. A file never replaces a folder. The name is looked at again when the upload is moved into place.
 
+An upload in one request holds nothing in its place while its bytes arrive, however slowly they come: neither the
+place's lock nor its name. So the folder it goes into, and those above it, can be renamed, moved or deleted meanwhile,
+and the shared folder deleted or the held My files handed over. Once the file is whole, the Drive holds the place,
+decides again whether the person may upload into the folder (on everything read again, as a file sent through an
+upload-only link is decided again), and only then claims the name and moves the file in, where the folder is now.
+Someone who lost the right to upload there while their file arrived (a member's access taken away, a guest's
+invitation taken away or ended, sharing outside the project switched off, the folder or the place gone) stores nothing
+and is answered as they would be now. Of two uploads of one name at once, the first to be whole is stored, and the
+other finds the name taken (409 with `exists`, as for any taken name).
+
 **The trash.** Deleting moves the item, with everything in it, into the place's trash on the storage; restoring
 moves it back to the folder it came from (or the place's top folder when that folder is gone), adding ` (2)` to its
 name if the name is taken there. Items keep their ids throughout. The Drive removes an item for good 30 days after it
@@ -194,7 +204,10 @@ dropped from the index; uploads in progress count once they are in their folder.
 
 An upload nothing has arrived for in a day is removed, with its file, when the Drive starts and every hour; so is a
 file in the uploads folder the index does not know (left by an upload the Drive did not finish) once the storage says
-it has not changed for a day. The copies of the index have a hidden folder of their own, `index/` (see [The copy of the
+it has not changed for a day. The Drive works through the abandoned uploads 100 at a time, so removing them costs the
+same little memory however many there are. A person (a member, or a guest) has at most 50 resumable uploads in
+progress at once, in every place together: one more is refused (429, with a message that says so) until one of
+theirs is finished, cancelled, or removed after its day. The copies of the index have a hidden folder of their own, `index/` (see [The copy of the
 index](#the-copy-of-the-index)); the looks and the walk never read `.superit-drive/`, and no route reaches it.
 
 ### Keeping in step with the storage
@@ -758,7 +771,9 @@ has an admin). Access shared on items in it stays with them while it is in the t
 Each place has a lock in memory: every change inside it (giving or taking access included, and a look at the storage
 as it writes what it found into the index) holds it shared, and moving the whole shared folder into the trash or out
 of it holds it alone, waiting up to ten seconds for the changes under way. A change that starts after the shared folder
-went to the trash finds it gone.
+went to the trash finds it gone. An upload in one request holds the lock only while its whole file is put into its
+folder, never while its bytes arrive: one that trickles keeps no shared folder from being deleted, and one whole after
+its shared folder went to the trash is not stored.
 
 ### Moving into a shared folder
 
@@ -820,7 +835,9 @@ view link, in the list's sentence) that anyone with the link can.
   how often it was used, and offers "Make a new link" (in its place: the old address stops working) and "Remove link".
 - **Removed is dead for good**: its address answers exactly as one that never existed, or a malformed one (the same
   status, page and headers, after the same work: the token is hashed and looked up either way). A new link gets a new
-  address. Neither the address nor the token is ever written to the log.
+  address. Neither the address nor the token is ever written to the log. A download or zip that was waiting for its
+  turn when the link was removed sends nothing, and a zip on its way is cut short before the next thing it would add
+  (see [Large transfers](#large-transfers-and-the-memory-figure)).
 - **It follows its item**, by the item's id: through rename, move (out of a My files into a shared folder too), and
   replacing a file with an upload. It covers what is in the item where it is now. While the item is in the trash, or in
   a shared folder in the trash, the link opens nothing; restored, it works again at the same address. While the item is
@@ -1109,7 +1126,10 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   next is refused (429, with `Retry-After`), says so, and makes no invitation. Changing an invitation that is there,
   taking one away and sharing with a member's address are not counted. The count is kept in memory: a restart forgets
   it, and the hour starts again.
-- **Their transfers** take turns with visitors': outsiders hold at most 8 of the 32 slots, in a line of their own.
+- **Their transfers** take turns with visitors': outsiders hold at most 8 of the 32 slots, in a line of their own. A
+  download or zip of theirs that waited is decided again when its turn comes, a zip as it goes on, and an upload in one
+  request once its file is whole (see [Large transfers](#large-transfers-and-the-memory-figure)): an invitation taken
+  away or ended meanwhile sends and stores nothing more. A guest has at most 50 resumable uploads in progress.
 
 ```
 GET    /s/guest/                                      the guests' page (and /s/guest/assets/…, /s/guest/favicon.svg)
@@ -1516,7 +1536,7 @@ upload-only link too), or one part of a resumable upload. Three rules hold the f
   gets it before an outsider. Outsiders wait in a line of their own, at most 64 of them, and at most 64 outsiders' turns
   keep a place in it (an upload's, below); more are told at once that the Drive is busy. A
   download waits its turn in line (holding only its idle connection),
-  for up to ten minutes, then gets 503. An upload is answered at once with 503, `{"busy": true}` and `Retry-After`,
+  for up to ten minutes, then gets 503; when its turn comes, it is decided again (below). An upload is answered at once with 503, `{"busy": true}` and `Retry-After`,
   before any of its bytes are read, and keeps its place in line: a resumable upload by its id, an upload in one request
   by the `turn` it names (any word the interface makes up for it, counted only for that person). When its turn comes, a
   slot is kept for it for 30 seconds; a place not asked about again for a minute is lost. The interface shows such an
@@ -1559,6 +1579,14 @@ at most 10,000 files and folders (each costs a little memory until the zip's end
 400, and is downloaded a folder inside it at a time. It has no length, and a zip cut short ends the connection, so the
 browser shows the download as failed.
 
+**Decided again.** A download, a file opened or a zip that waited for its turn is decided again when its turn comes,
+on everything read again: through a link removed meanwhile, by a guest whose invitation was taken away or ended, where
+sharing outside the project was switched off, or by a member whose access was taken away, it is refused as it would
+be if asked for then, and sends nothing. A zip is decided again as it goes on too: before each file and folder it
+adds, and every 15 seconds while it sends one large file. Once the person may no longer download the folder, the zip
+is cut short there, and nothing put into the folder after that is ever in it; a reader who takes a zip slowly keeps
+it no longer than that. (A file's own download, once its bytes are on their way, goes on to its end.)
+
 ```
 GET    /api/places/{place}/zip[?item=12&item=15]                  the top folder, or those items of it, as one zip
 GET    /api/places/{place}/items/{folder}/zip[?item=…]            a folder, or those items of it
@@ -1571,6 +1599,7 @@ POST   /api/places/{place}/uploads?name=…&size=…[&existing=replace|keep-both
 POST   /api/places/{place}/items/{folder}/uploads?name=…&size=…[&existing=…]           start (into a folder)
        201 {"id", "name", "size", "offset": 0, "resumable", "partSize", "waiting"}
        409 {"error", "exists": "file"|"folder", "name"}  the name is taken: ask, then start again with existing
+       429 {"error"}                                     the person has 50 uploads in progress: no more until one ends
 GET    /api/places/{place}/uploads/{upload}                       where it stands: the same as the start's answer
 PUT    /api/places/{place}/uploads/{upload}?offset=<n>            one part, from n, with its Content-Length
        200 {"offset", "size"}                                     where what has arrived ends now
@@ -1869,6 +1898,7 @@ internal/server/       HTTP: routes.go lists every route; server.go's guard runs
                        link; under /s/guest, the guest's session) → own page (for changes; through a link, only
                        reading) → place → item in it, or in its trash, or the person's upload in progress into it →
                        the access given there → access.Decide; transfers.go has downloads, zips and uploads,
+                       again.go a transfer decided again (when its turn comes, as a zip goes on, once an upload is whole),
                        opening.go what opens in the browser and how, search.go the search by name, links.go making,
                        changing and removing public links, visitors.go the public prefix and the visitor's pages,
                        sendin.go an upload-only link's page and the files sent through it,

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -21,13 +22,17 @@ import (
 // transfers), so that at most transfers.Slots are in flight:
 //
 //   - a download (of a file or a zip) waits in line for its turn, up to turnWait, holding nothing but its connection
-//     meanwhile;
+//     meanwhile, and is decided again when its turn comes (again.go);
 //   - an upload, or a part of a resumable one, is answered at once with 503 and Retry-After when it is not its turn,
 //     before any of its bytes are read (they would fill the connection's buffers while it waited), and its place in
 //     line is kept for it: a resumable upload's by its id, an upload in one request by the `turn` it names. The
 //     interface shows it as waiting, and sends it again.
 //
 // A transfer that moves no bytes for stall is ended, so a paused download or a stopped upload does not keep a slot.
+//
+// An upload in one request holds nothing in its place while its bytes arrive, however slowly they come: neither the
+// place's lock nor its name. It takes them once its file is whole in the uploads folder, to put it into its folder, and
+// is decided again then (again.go).
 
 const (
 	// turnWait is how long a download waits in line for its turn before the Drive says it is busy.
@@ -160,9 +165,10 @@ func (s *Server) open(w http.ResponseWriter, r *http.Request, c call) {
 }
 
 // sendFile sends the file c.item, to be shown in the browser when inline is true and its kind opens there, and as an
-// attachment otherwise. It waits its turn for a transfer slot, as every download does.
+// attachment otherwise. It waits its turn for a transfer slot, as every download does, and is decided again when its
+// turn has come: the file is sent as it is then.
 func (s *Server) sendFile(w http.ResponseWriter, r *http.Request, c call, inline bool) {
-	release, ok := s.waitTurn(w, r, c)
+	c, release, ok := s.inTurn(w, r, c)
 	if !ok {
 		return
 	}
@@ -285,6 +291,11 @@ func disposition(kind, name string) string {
 //
 // An item that is not directly in the folder is answered as one that does not exist. A folder with more than
 // drive.MaxZipEntries files and folders is refused (400): download the folders inside it instead.
+//
+// The zip is decided again when its turn for a slot has come, and then as it goes on: before each file and folder it
+// adds, and every againEvery while it sends one. Once the person may no longer download the folder (their link removed,
+// their invitation taken away, sharing outside the project switched off, the folder deleted or moved out of what they
+// were given), it is cut short there, and holds nothing added after.
 func (s *Server) zip(w http.ResponseWriter, r *http.Request, c call) {
 	folder, ok := s.folder(w, r, c, onlyFoldersZip)
 	if !ok {
@@ -321,16 +332,24 @@ func (s *Server) zip(w http.ResponseWriter, r *http.Request, c call) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	release, ok := s.waitTurn(w, r, c)
+	c, release, ok := s.inTurn(w, r, c)
 	if !ok {
 		return
 	}
 	defer release()
+	folder = c.item
 
 	started := false
-	out, done := sending(w)
+	sent, done := sending(w)
 	defer done()
-	err := s.drive.Zip(r.Context(), *c.place, folder, name, only, func() io.Writer {
+	out := whileStill(r.Context(), sent, func(ctx context.Context) error {
+		now, err := s.again(ctx, r, c)
+		if err == nil && now.place.ID != c.place.ID {
+			return errNoLongerMay // its folder went into another place: the zip is of where it was
+		}
+		return err
+	})
+	err := s.drive.Zip(r.Context(), *c.place, folder, name, only, out.again, func() io.Writer {
 		headers()
 		w.WriteHeader(http.StatusOK)
 		started = true
@@ -342,6 +361,9 @@ func (s *Server) zip(w http.ResponseWriter, r *http.Request, c call) {
 	case started:
 		// The zip is cut short: end the connection, so the browser shows the download as failed rather than keeping a
 		// zip that looks whole.
+		if errors.Is(err, errNoLongerMay) || errors.Is(err, errSwitchedOffNow) {
+			err = errors.New("the person may no longer download the folder")
+		}
 		s.log.Info("a zip ended before its end", "error", err)
 		panic(http.ErrAbortHandler)
 	case errors.Is(err, index.ErrNoItem):
@@ -380,6 +402,13 @@ type uploadJSON struct {
 //
 // When it is not its turn for a transfer slot, the answer is 503 with "busy" and Retry-After, before any of the body is
 // read: send it again with the same turn, which keeps its place in line.
+//
+// While its bytes arrive the upload holds nothing in the place: the folder can be renamed, moved or deleted meanwhile,
+// and so can the place. Once the file is whole it is decided again, on everything read again, holding the place: a
+// person who may no longer upload into the folder (their access or invitation taken away or ended, sharing outside
+// the project switched off, the folder or the place gone) stores nothing, and is answered as they would be now; a
+// folder renamed or moved meanwhile takes the file where it is now. Of two uploads of one name at once, the first to
+// be whole is stored, and the other finds the name taken.
 func (s *Server) upload(w http.ResponseWriter, r *http.Request, c call) {
 	folder, ok := s.folder(w, r, c, onlyIntoFolders)
 	if !ok {
@@ -401,11 +430,20 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, c call) {
 	defer release()
 	body, done := receiving(w, r)
 	defer done()
-	up, err := s.drive.Upload(r.Context(), *c.place, folder, name, body, r.ContentLength, existing, c.by())
+	up, err := s.drive.Upload(r.Context(), *c.place, folder, name, body, r.ContentLength, existing, c.by(),
+		func(ctx context.Context) (index.Place, *index.Item, error) {
+			now, err := s.again(ctx, r, c)
+			if err != nil {
+				return index.Place{}, nil, err
+			}
+			return *now.place, now.item, nil
+		})
 	switch {
 	case err == nil:
 		s.used(r, c)
 		writeJSON(w, http.StatusCreated, uploadJSON{itemJSON: itemOf(up.Item), Replaced: up.Replaced != nil})
+	case errors.Is(err, errNoLongerMay) || errors.Is(err, errSwitchedOffNow):
+		s.noLonger(w, r, c, err)
 	case errors.Is(err, drive.ErrCutOff) || r.Context().Err() != nil:
 		// The person's connection ended (or they cancelled); nothing was stored. Not the Drive's failure.
 		s.log.Info("an upload ended before the whole file arrived; nothing was stored", "error", err)
@@ -485,6 +523,10 @@ func (s *Server) sessionOf(u index.Upload, offset int64, resumable bool) session
 //
 // The name is looked at now, so that a person is asked before the file travels: when it is taken and existing does
 // not say what to do, the answer is 409 with "exists", as for an upload in one request.
+//
+// A person (a member, or a guest) has at most drive.MaxUploadsInProgress uploads in progress at once, in every place
+// together: one more is answered 429, with a message that says so, until one of theirs is finished, cancelled, or
+// removed after a day with nothing arriving.
 func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, c call) {
 	folder, ok := s.folder(w, r, c, onlyIntoFolders)
 	if !ok {
@@ -501,6 +543,10 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, c call) {
 		return
 	}
 	u, err := s.drive.StartUpload(r.Context(), *c.place, folder, name, size, existing, c.by())
+	if errors.Is(err, drive.ErrTooManyUploads) {
+		s.refuse(w, r, http.StatusTooManyRequests, tooManyUploads, drive.MaxUploadsInProgress)
+		return
+	}
 	if err != nil {
 		s.uploadFailed(w, r, err, name, existing)
 		return

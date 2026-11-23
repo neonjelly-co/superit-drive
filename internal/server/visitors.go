@@ -150,7 +150,7 @@ func (s *Server) throughLink(w http.ResponseWriter, r *http.Request, rt route) (
 		s.fail(w, r, err)
 		return call{}, false
 	}
-	return call{link: &link, person: visitorOf(link, s.members.Current()), place: &p, item: &it, access: where}, true
+	return call{link: &link, person: visitorOf(link, s.members.Current()), action: rt.action, place: &p, item: &it, access: where}, true
 }
 
 // visitorOf is the visitor who came with link, as the access package decides on them.

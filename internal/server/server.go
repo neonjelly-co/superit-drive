@@ -195,8 +195,9 @@ type call struct {
 	member members.Member
 	link   *index.Link
 	guest  *index.Guest
-	// person is who is asking, as the access package decided on them.
+	// person is who is asking, as the access package decided on them; action what they asked to do, as the route says.
 	person access.Person
+	action access.Action
 	place  *index.Place
 	access *access.Place
 	// grants is what was given on the place's top folder and on the way down to the item, as access saw it.
@@ -302,7 +303,7 @@ func (s *Server) guard(rt route) http.Handler {
 			s.refuse(w, r, http.StatusForbidden, refusedOrigin)
 			return
 		}
-		c := call{member: member, person: personOf(member)}
+		c := call{member: member, person: personOf(member), action: rt.action}
 		if rt.place != "" && !s.findWhere(w, r, rt, &c) {
 			return
 		}

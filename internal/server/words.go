@@ -210,6 +210,10 @@ var (
 		"A feltöltés egy másik része még úton van. Kérdezd le, hol tart, és onnan folytasd.")
 	partCutOff = text.M("The part stopped before it all arrived. Ask where the upload stands, and go on from there.",
 		"A rész megszakadt, mielőtt teljesen megérkezett. Kérdezd le, hol tart a feltöltés, és onnan folytasd.")
+	tooManyUploads = text.M("You have %d uploads in progress, and that is the most there can be at once. Wait until one is done, "+
+		"or try again tomorrow: an upload nothing arrives for in a day is removed.",
+		"Folyamatban lévő feltöltéseid száma: %d, és egyszerre ennél több nem lehet. Várd meg, amíg az egyik befejeződik, "+
+			"vagy próbáld újra holnap: azt a feltöltést, amelyhez egy napig semmi nem érkezik, a Drive eltávolítja.")
 	partNotNext = text.M("This part does not follow on from what has arrived.",
 		"Ez a rész nem ott kezdődik, ahol a már megérkezett vége.")
 	notAllArrived = text.M("Not all of the file has arrived yet.", "A fájl még nem érkezett meg teljesen.")

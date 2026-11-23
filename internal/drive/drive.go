@@ -120,7 +120,7 @@ type Drive struct {
 	// refusedNames is the log's line about a name the storage refused (nameError).
 	refusedNames *seldom.Line
 
-	// writing holds the storage paths being changed (an upload in flight, a rename or move on its way), so two
+	// writing holds the storage paths being changed (an upload being put in place, a rename or move on its way), so two
 	// changes of one name cannot both pass the check that it is free, and a listing leaves the name alone.
 	mu      sync.Mutex
 	writing map[string]bool
@@ -251,9 +251,9 @@ func (l *placeLocks) of(id int64) *sync.RWMutex {
 	return l.m[id]
 }
 
-// inPlace holds the place's lock for a change inside it (an upload, a new folder, a rename or move, deleting or
-// restoring an item, and a listing, which makes a missing top folder again), and checks that the place is still there
-// and not in the trash. Without it, a request that found a shared folder just before it went to the trash could make
+// inPlace holds the place's lock for a change inside it (an upload put in place once it is whole, a new folder, a
+// rename or move, deleting or restoring an item, and a listing, which makes a missing top folder again), and checks
+// that the place is still there and not in the trash. Without it, a request that found a shared folder just before it went to the trash could make
 // its top folder again afterwards, and write into it.
 func (d *Drive) inPlace(ctx context.Context, p index.Place) (release func(), err error) {
 	l := d.locks.of(p.ID)
@@ -291,7 +291,7 @@ func (d *Drive) inPlaces(ctx context.Context, a, b index.Place) (release func(),
 const wholePlaceWait = 10 * time.Second
 
 // wholePlace holds the place's lock alone, once the changes inside it have ended; ErrBusy when they have not within
-// wholePlaceWait. Changes inside the place that start meanwhile go first: a long upload is never held up by this.
+// wholePlaceWait. Changes inside the place that start meanwhile go first: a long move is never held up by this.
 func (d *Drive) wholePlace(ctx context.Context, id int64) (release func(), err error) {
 	l := d.locks.of(id)
 	deadline := time.Now().Add(wholePlaceWait)
@@ -461,7 +461,7 @@ func (d *Drive) claimed(p string) bool {
 	return d.writing[p]
 }
 
-// busyInside says whether a change holds a path inside the folder at dir, such as an upload into it.
+// busyInside says whether a change holds a path inside the folder at dir, such as an upload being put into it.
 func (d *Drive) busyInside(dir string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()

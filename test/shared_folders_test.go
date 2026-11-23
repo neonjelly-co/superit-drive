@@ -837,13 +837,15 @@ func TestASharedFolderInTheTrashIsRemovedForGoodAfter30Days(t *testing.T) {
 	}
 }
 
-// Deleting a shared folder waits for an upload into it to end, and the upload lands in the trash with it: nothing
-// makes the shared folder's top folder again afterwards.
-func TestDeletingASharedFolderWaitsForAnUploadIntoIt(t *testing.T) {
+// Deleting a shared folder does not wait for an upload into it whose bytes are still arriving: the upload holds
+// nothing of the place meanwhile. Whole, it finds no such place: it is not stored, in the trash or anywhere, and
+// nothing makes the shared folder's top folder again afterwards.
+func TestDeletingASharedFolderDoesNotWaitForAnUploadIntoIt(t *testing.T) {
 	t.Parallel()
 	d := harness.Start(t, reka, bence)
 	b := d.As(bence)
 	clients := madeSharedFolder(t, b, "Clients")
+	uploaded(t, b, clients.ID, "Here.txt", []byte("here"))
 
 	body, write := io.Pipe()
 	uploadDone := slowUpload(d, bence, clients.ID, "Big.bin", body, 6)
@@ -855,16 +857,16 @@ func TestDeletingASharedFolderWaitsForAnUploadIntoIt(t *testing.T) {
 	go func() { deleteDone <- deleteSharedFolder(t, b, clients.ID) }()
 	select {
 	case res := <-deleteDone:
-		t.Fatalf("the shared folder was deleted while an upload into it was under way: %d %s", res.Status, res.Body)
-	case <-time.After(time.Second):
+		if res.Status != http.StatusOK {
+			t.Fatalf("deleting the shared folder while an upload into it was arriving: got %d %s", res.Status, res.Body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("deleting the shared folder waited for an upload into it that was still arriving")
 	}
 	_, _ = write.Write([]byte("def"))
 	_ = write.Close()
-	if status := <-uploadDone; status != http.StatusCreated {
-		t.Fatalf("the upload: got %d", status)
-	}
-	if res := <-deleteDone; res.Status != http.StatusOK {
-		t.Fatalf("deleting after the upload: got %d %s", res.Status, res.Body)
+	if status := <-uploadDone; status != http.StatusNotFound {
+		t.Fatalf("the upload, whole after its shared folder was deleted: got %d, want 404", status)
 	}
 	if _, ok := d.Storage.List(t, "Shared folders/Clients"); ok {
 		t.Fatal("the shared folder's top folder is on the storage after it was deleted")
@@ -873,9 +875,10 @@ func TestDeletingASharedFolderWaitsForAnUploadIntoIt(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("the shared folder's trash holds %q", entries)
 	}
-	if got, _ := d.Storage.Get(t, ".superit-drive/trash/Shared folders/Clients/"+entries[0]+"Clients/Big.bin"); string(got) != "abcdef" {
-		t.Fatalf("the upload in the trash holds %q", got)
+	if got := onStorage(t, d, ".superit-drive/trash/Shared folders/Clients/"+entries[0]+"Clients"); !slices.Equal(got, []string{"Here.txt"}) {
+		t.Fatalf("the shared folder in the trash holds %q", got)
 	}
+	harness.Eventually(t, "the uploads folder is empty", func() bool { return len(inUploads(t, d.Storage)) == 0 })
 	// An upload that starts now finds no such place, and makes nothing.
 	if res := upload(t, b, clients.ID, "Late.txt", []byte("late")); res.Status != http.StatusNotFound {
 		t.Fatalf("an upload into the deleted shared folder: got %d %s", res.Status, res.Body)
