@@ -3,6 +3,7 @@ package transfers
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 )
@@ -49,6 +50,7 @@ type Gate struct {
 	outsiders, share int
 	// lines are those waiting for a slot, one line per class, in the order they came. The members' line is empty
 	// whenever a slot is free; the outsiders' line whenever a slot is free and outsiders hold fewer than their share.
+	// A request that gives up is taken out of its line at once (leave): a line never holds more than those waiting now.
 	lines [2][]*waiter
 	// waitingOutsiders counts the outsiders waiting in line themselves (Wait).
 	waitingOutsiders int
@@ -75,7 +77,6 @@ type waiter struct {
 	key   string        // "" for a request waiting itself
 	ready chan struct{} // closed when a request waiting itself gets its slot
 	given bool          // the slot is the waiter's
-	left  bool          // a request waiting itself gave up its place
 	tried time.Time     // when the key was last tried
 	keep  *time.Timer   // gives back a slot kept for a key that does not come for it
 }
@@ -121,12 +122,26 @@ func (g *Gate) Wait(ctx context.Context, c Class, max time.Duration) (release fu
 		g.giveBack(c)
 		g.handOn()
 	} else {
-		w.left = true
+		g.leave(w)
 		if c == Outsiders {
 			g.waitingOutsiders--
 		}
 	}
 	return nil, err
+}
+
+// leave takes w, which gave up before its turn came, out of its line. It must not stay there until a slot is handed
+// on: while outsiders hold their whole share none is handed to their line, and whoever came and left meanwhile would
+// be kept, without bound. g.mu must be held.
+func (g *Gate) leave(w *waiter) {
+	line := g.lines[w.class]
+	i := slices.Index(line, w)
+	if i < 0 {
+		return
+	}
+	copy(line[i:], line[i+1:])
+	line[len(line)-1] = nil // let go of it
+	g.lines[w.class] = line[:len(line)-1]
 }
 
 // Try takes a slot for a transfer of class c if one is free for it, or if one is kept for key. Otherwise ok is false,
@@ -234,8 +249,8 @@ func (g *Gate) releaser(c Class) func() {
 }
 
 // handOn gives free slots to those first in line, members before outsiders, and outsiders only while they hold fewer
-// than their share: a request waiting itself gets it at once, a key has it kept for it. Those who left, and keys
-// forgotten, lose their place. g.mu must be held.
+// than their share: a request waiting itself gets it at once, a key has it kept for it. Keys forgotten lose their
+// place (requests that gave up have left the line already). g.mu must be held.
 func (g *Gate) handOn() {
 	for g.free > 0 {
 		c := Members
@@ -249,7 +264,6 @@ func (g *Gate) handOn() {
 		g.lines[c][0] = nil
 		g.lines[c] = g.lines[c][1:]
 		switch {
-		case w.left:
 		case w.key == "":
 			g.take(c)
 			w.given = true
