@@ -321,6 +321,12 @@ on with them; a walk that could not, the next one, six hours later, begins with 
   deleted does not start again by itself. It can be shared again; the notice says so.
 - **Sharing is never put back, and nothing is given from the storage**: access taken away since, and a link removed
   since, stay away; nothing that was removed comes back.
+- **Sharing made after the snapshot applies to the files as they were then.** The index keeps today's links, shares and
+  invitations, and the storage holds the snapshot's files, so a link or a share made on a folder after the snapshot
+  reaches what the folder held at the snapshot: a file deleted from it before the link was made is in it again (as a
+  new item, with the access of its folder), and is served through that link; a file replaced before it was shared
+  serves its older bytes. Visitors and guests see no notice. After a rollback, whoever shared a folder outside the
+  project since the snapshot should look at what is in it now; "Sharing and space" lists what is shared outside.
 - **A shared folder deleted since** has its top folder back at its own path, while the index holds it in the trash. Its
   entry in the trash no longer holds it, so it is out of the trash again, as if a manager had restored it: with its
   managers, the roles given on it, what was given inside it and its links, as the index kept them. (A manager restoring
@@ -567,6 +573,19 @@ storage, made by the newer version (see [Starting from a copy](#starting-from-a-
 |---|---|---|---|
 | Newer (a migration the older version lacks) | The data folder's copy: the snapshot, the index as the older version left it when it stopped for the upgrade. The log says `THE COPY OF THE INDEX ON THE STORAGE IS LEFT ALONE` (`level=ERROR`). | Everything in the index from before the upgrade, guests' sessions included. The files on the storage as the newer version left them, taken in by the walk as after any start from a copy: a file added under it has the access of its folder, and one deleted under it is in the trash as itself. | What changed in the index under the newer version: shares, links, guests' invitations and sessions, shared folders and their managers, switches, acts on held My files. A file moved or renamed under it loses what was given on it: it is a new item at its new place, with the access of its folder. All of it but guests' sessions is in the newer copy, which the Drive moves aside on the storage, as `newer-version-<when>-copy-<number>.sqlite`, and keeps. |
 | The same | The newer version's last copy on the storage, numbered after the snapshot's. The log says the Drive made its index from the copy on the storage. | What changed in the index under the newer version, up to its last copy (the copy it makes as it stops holds every change, unless it was killed). The files on the storage, as above. | Guests' sessions (a copy on the storage holds none: guests sign in again, with a new code), and, when the newer version was killed rather than stopped, what changed after its last copy. |
+
+**Access removed under the newer version is back.** In the first row, "what changed in the index under the newer
+version" is lost both ways: what was given under it is gone, and what was *taken away* under it works again. A public
+link removed then opens again at its old address; a share or an invitation taken away then lets its member or guest in
+again; a guest signed out then (their sessions are in the snapshot) is signed in again. The Drive does not take the
+removals over from the newer copy: it does not know that copy's schema, and cannot tell a removal that was meant from
+the rest of what changed. It compares instead, as it starts, the sharing its index holds with the newer copy's, and
+logs `REMOVED UNDER THE NEWER VERSION, AND BACK` (`level=ERROR`) with how many public links, shares and invitations are
+back, and a line for each link (`a public link removed under the newer version works again`, with its place, item and
+name; the first hundred). When nothing is back it says so, and when the newer copy's sharing cannot be read (a later
+version changed those tables) it says that it cannot tell. After an upgrade that was undone, read those lines, and
+remove again what should not be back: the links they name, and for shares and invitations whatever "Sharing and space"
+and each shared folder's access show that should no longer be there.
 
 With the same schema the later copy wins, not the snapshot's, because the files on the storage were not put back
 either: the later copy's sharing is on the files as they are.
@@ -1674,7 +1693,8 @@ Pushing a tag `v<major>.<minor>.<patch>`, such as `v1.2.0`, runs `.github/workfl
 builds the image for x86 and arm64 (the Dockerfile cross-compiles, so neither needs emulation) and publishes it as
 `ghcr.io/neonjelly-co/superit-drive:1.2.0`, with the version built into the binary. Nothing else is published, never
 a moving tag such as `latest`. A tag that is not such a version publishes nothing, and a version the registry already
-has is refused, not replaced. A published image does not reach Superit's customers by itself: that happens only when
+has is refused, not replaced: the workflow publishes only when the registry itself answers that the version is not
+there, and fails on any other answer (the registry down, a timeout, a login refused), to be run again. A published image does not reach Superit's customers by itself: that happens only when
 the daemon's version catalogue lists the version with a tested upgrade path.
 
 Before the first tag, on GitHub:

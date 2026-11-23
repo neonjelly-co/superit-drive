@@ -249,6 +249,68 @@ func CopyState(ctx context.Context, file, key string) (string, error) {
 	return value.String, err
 }
 
+// SharingIn is the sharing a file of the index holds: its public links, by the hash of each one's token (in hex), and
+// its grants and invitations, each as one line of what was given, on what, to whom.
+type SharingIn struct {
+	Links               map[string]LinkIn
+	Grants, Invitations map[string]bool
+}
+
+// LinkIn is a public link as SharingOf reads it: the item it is on, with its place and name.
+type LinkIn struct {
+	Place, Item int64
+	Name        string
+}
+
+// SharingOf reads the sharing a file of the index holds, without checking or changing the file. It is also for a copy
+// made by a newer Drive, whose schema this Drive does not know: it reads only columns the tables have had from the
+// start, and is an error when they are no longer there.
+func SharingOf(ctx context.Context, file string) (SharingIn, error) {
+	db, err := openCopy(file, true)
+	if err != nil {
+		return SharingIn{}, err
+	}
+	defer db.Close()
+	in := SharingIn{Links: map[string]LinkIn{}, Grants: map[string]bool{}, Invitations: map[string]bool{}}
+	rows, err := db.QueryContext(ctx, `
+		SELECT hex(links.token_hash), items.place_id, links.item_id, items.name FROM links JOIN items ON items.id = links.item_id`)
+	if err != nil {
+		return SharingIn{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var hash string
+		var l LinkIn
+		if err := rows.Scan(&hash, &l.Place, &l.Item, &l.Name); err != nil {
+			return SharingIn{}, err
+		}
+		in.Links[hash] = l
+	}
+	if err := rows.Err(); err != nil {
+		return SharingIn{}, err
+	}
+	given, err := db.QueryContext(ctx, `
+		SELECT place_id || '/' || IFNULL(item_id, 0) || ' ' || grantee || ' ' || IFNULL(member, '') || ' ' || IFNULL(guest_id, 0) || ' ' || role,
+			guest_id IS NOT NULL FROM grants`)
+	if err != nil {
+		return SharingIn{}, err
+	}
+	defer given.Close()
+	for given.Next() {
+		var line string
+		var invitation bool
+		if err := given.Scan(&line, &invitation); err != nil {
+			return SharingIn{}, err
+		}
+		if invitation {
+			in.Invitations[line] = true
+		} else {
+			in.Grants[line] = true
+		}
+	}
+	return in, given.Err()
+}
+
 // A CopySummary counts what a copy holds, for the log line that says a copy became the index.
 type CopySummary struct {
 	Places, SharedFolders, Items, Grants, Managers, Links, Guests, Acts int64
