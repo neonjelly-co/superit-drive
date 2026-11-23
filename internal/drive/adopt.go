@@ -219,6 +219,9 @@ func Adopt(ctx context.Context, dataDir string, s *storage.Client, log *slog.Log
 type broughtBack struct {
 	links               []index.LinkIn
 	grants, invitations int
+	// switches are the places where sharing outside the project was switched off under the newer version, and is on
+	// again (0: the whole project).
+	switches []int64
 }
 
 // mostLinksNamed is how many links that came back the log names one by one; it counts the rest.
@@ -249,6 +252,12 @@ func whatCameBack(ctx context.Context, file string, newer *newerCopy) *broughtBa
 			back.invitations++
 		}
 	}
+	for place := range newer.sharing.SwitchedOff {
+		if !ours.SwitchedOff[place] {
+			back.switches = append(back.switches, place)
+		}
+	}
+	slices.Sort(back.switches)
 	return back
 }
 
@@ -262,9 +271,22 @@ func (b *broughtBack) log(log *slog.Logger) {
 			"again. Look through who can see what (Sharing and space, and each shared folder)")
 		return
 	}
+	for _, place := range b.switches {
+		if place == 0 {
+			log.Error("SWITCHED OFF UNDER THE NEWER VERSION, AND ON AGAIN: sharing outside the project was switched off for the " +
+				"whole project under the newer version, and the index does not hold that. Public links and guests' invitations " +
+				"work again. Switch it off again if it should be")
+			continue
+		}
+		log.Error("SWITCHED OFF UNDER THE NEWER VERSION, AND ON AGAIN: sharing outside the project was switched off for a shared "+
+			"folder under the newer version, and the index does not hold that. Public links and guests' invitations in it work "+
+			"again. Switch it off again if it should be", "place", place)
+	}
 	if len(b.links)+b.grants+b.invitations == 0 {
-		log.Info("nothing that was removed under the newer version is back: every public link, share and invitation in the " +
-			"index is in the newer copy too")
+		if len(b.switches) == 0 {
+			log.Info("nothing that was removed under the newer version is back: every public link, share and invitation in the " +
+				"index is in the newer copy too, and sharing outside the project is switched off wherever it was there")
+		}
 		return
 	}
 	log.Error("REMOVED UNDER THE NEWER VERSION, AND BACK: the index holds public links, shares or invitations that were "+

@@ -24,7 +24,7 @@ import (
 //
 // Because a code cannot be guessed, nothing a stranger does at the sign-in page takes a guest's sign-in away: wrong
 // tries are not counted (there is nothing to protect by counting them), asking again leaves the codes already sent
-// working, and the only bound a stranger can reach for one address is how often it is mailed (CodeEvery), which is
+// working, and the only bound a stranger can reach for one address is how often it is mailed (CodeEvery, CodesPerHour), which is
 // shorter than a code works for (CodeValidFor), so that the guest always has a link that works in their mail.
 
 // The rules of guests' codes and sessions.
@@ -33,6 +33,9 @@ const (
 	CodeValidFor = 30 * time.Minute
 	// CodeEvery is how long after a code was sent to an address the next one may be.
 	CodeEvery = 5 * time.Minute
+	// CodesPerHour is how many codes one address is sent in an hour, used or not: as many as CodeEvery lets through when
+	// none is used. A guest who uses each link as it comes is sent no more than that either.
+	CodesPerHour = 12
 	// CodesPerHourOverall is how many codes all addresses together are sent in an hour: a bound on the mail the
 	// sign-in page can make the Drive send. It takes more than eighty guests' addresses, asked for as often as they are
 	// answered, to reach it.
@@ -43,7 +46,7 @@ const (
 	SessionsKept = 10
 )
 
-var codeLimits = index.CodeLimits{ValidFor: CodeValidFor, Every: CodeEvery, Overall: CodesPerHourOverall, Window: time.Hour}
+var codeLimits = index.CodeLimits{ValidFor: CodeValidFor, Every: CodeEvery, PerGuest: CodesPerHour, Overall: CodesPerHourOverall, Window: time.Hour}
 
 // Errors about guests.
 var (
@@ -113,7 +116,7 @@ func (d *Drive) AdmitMembers(ctx context.Context, list *members.List, working fu
 		if err != nil {
 			return n, fmt.Errorf("what guest %d, joining the project as %s, was given: %w", g.ID, m.UserID, err)
 		}
-		if err := d.index.BecomeMember(ctx, g.ID, m.UserID, keep); err != nil {
+		if err := d.index.BecomeMember(ctx, g.ID, m.UserID, keep, d.now()); err != nil {
 			return n, fmt.Errorf("guest %d joining the project as %s: %w", g.ID, m.UserID, err)
 		}
 		d.log.Info("a guest joined the project: what was given to them and still worked is theirs as a member now",

@@ -254,6 +254,8 @@ func CopyState(ctx context.Context, file, key string) (string, error) {
 type SharingIn struct {
 	Links               map[string]LinkIn
 	Grants, Invitations map[string]bool
+	// SwitchedOff holds the places where sharing outside the project is switched off (0: the whole project).
+	SwitchedOff map[int64]bool
 }
 
 // LinkIn is a public link as SharingOf reads it: the item it is on, with its place and name.
@@ -271,7 +273,7 @@ func SharingOf(ctx context.Context, file string) (SharingIn, error) {
 		return SharingIn{}, err
 	}
 	defer db.Close()
-	in := SharingIn{Links: map[string]LinkIn{}, Grants: map[string]bool{}, Invitations: map[string]bool{}}
+	in := SharingIn{Links: map[string]LinkIn{}, Grants: map[string]bool{}, Invitations: map[string]bool{}, SwitchedOff: map[int64]bool{}}
 	rows, err := db.QueryContext(ctx, `
 		SELECT hex(links.token_hash), items.place_id, links.item_id, items.name FROM links JOIN items ON items.id = links.item_id`)
 	if err != nil {
@@ -308,7 +310,27 @@ func SharingOf(ctx context.Context, file string) (SharingIn, error) {
 			in.Grants[line] = true
 		}
 	}
-	return in, given.Err()
+	if err := given.Err(); err != nil {
+		return SharingIn{}, err
+	}
+	// The switches came with a later version of the index than links and grants did: a file from before has none.
+	var has bool
+	if err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outside_off')").Scan(&has); err != nil || !has {
+		return in, err
+	}
+	off, err := db.QueryContext(ctx, "SELECT IFNULL(place_id, 0) FROM outside_off")
+	if err != nil {
+		return SharingIn{}, err
+	}
+	defer off.Close()
+	for off.Next() {
+		var place int64
+		if err := off.Scan(&place); err != nil {
+			return SharingIn{}, err
+		}
+		in.SwitchedOff[place] = true
+	}
+	return in, off.Err()
 }
 
 // A CopySummary counts what a copy holds, for the log line that says a copy became the index.

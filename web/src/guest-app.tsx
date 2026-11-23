@@ -59,19 +59,16 @@ function fromLink(): { address: string; code: string } {
 	return { address: after.get("as") ?? "", code: after.get("code") ?? "" };
 }
 
-/** The code of the sign-in link the page was opened with, to be used once: taking it removes it from the address. */
-let linkCode: string | undefined;
-function takeLinkCode(): string {
-	if (linkCode === undefined) {
-		const { address, code } = fromLink();
-		linkCode = code;
-		// The code works once: it leaves the address bar and the history, the address stays to be confirmed.
-		if (code) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#as=${encodeURIComponent(address)}`);
-	}
-	const code = linkCode;
-	linkCode = "";
+/**
+ * The code of the sign-in link the page was opened with. It leaves the address bar and the history as the page loads,
+ * whoever is signed in in this browser (the address stays, to be confirmed): an address copied from the bar afterwards
+ * signs nobody in.
+ */
+const linkCode = (() => {
+	const { address, code } = fromLink();
+	if (code) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#as=${encodeURIComponent(address)}`);
 	return code;
-}
+})();
 
 /** Where the guest was going, for the sign-in link to lead back there: the item the address names, if any. */
 function goingTo(): { place?: number; item?: number } {
@@ -152,30 +149,32 @@ const field =
 
 /**
  * Signing in: the guest confirms their address (filled in from the invitation's link) and is mailed a link that signs
- * them in. Opened with such a link, the page signs in with it at once. The Drive says the same whatever the address,
- * so the page does too.
+ * them in. Opened with such a link, the page asks once more ("Sign in as …") and signs in on that click: never by
+ * itself, so that a program that opens the links in a mail (a scanner, a preview) signs nobody in and uses no link up,
+ * and nobody is signed in as someone else by following a link. The Drive says the same whatever the address, so the
+ * page does too.
  */
 function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
 	const [address, setAddress] = useState(() => fromLink().address);
+	// The sign-in link's code, until it was tried: it works once.
+	const [code, setCode] = useState(linkCode);
 	const [sent, setSent] = useState<string>();
 	const [problem, setProblem] = useState<string>();
 	const [busy, setBusy] = useState(false);
 	const addressId = useId();
 
-	// A sign-in link: its code is used once, as the page opens.
-	useEffect(() => {
-		const code = takeLinkCode();
-		if (!code) return;
+	const signIn = async () => {
 		setBusy(true);
-		guestApi
-			.signIn(fromLink().address, code)
-			.then(onSignedIn)
-			.catch((err) => {
-				setProblem(err instanceof Error ? err.message : String(err));
-				setBusy(false);
-			});
-		// Once, with what the page was opened with.
-	}, []);
+		setProblem(undefined);
+		try {
+			await guestApi.signIn(address, code);
+			onSignedIn();
+		} catch (err) {
+			setProblem(err instanceof Error ? err.message : String(err));
+			setCode(""); // back to asking for a link, with the address filled in
+			setBusy(false);
+		}
+	};
 
 	const ask = async (e?: FormEvent) => {
 		e?.preventDefault();
@@ -194,7 +193,13 @@ function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
 		<Page>
 			<h1 className="text-2xl font-bold">{t.guest.signInTitle}</h1>
 			<p className="mt-2 text-muted-foreground">{t.guest.signInNote}</p>
-			{sent === undefined ? (
+			{code ? (
+				<div className="mt-6 max-w-md">
+					<Button variant="primary" onClick={() => void signIn()} disabled={busy} className="max-w-full">
+						<span className="min-w-0 truncate">{fill(t.guest.signInAs, { address: <span className="font-mono">{address}</span> })}</span>
+					</Button>
+				</div>
+			) : sent === undefined ? (
 				<form onSubmit={ask} className="mt-6 max-w-md">
 					<label htmlFor={addressId} className="text-sm font-medium">
 						{t.guest.yourAddress}

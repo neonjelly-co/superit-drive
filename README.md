@@ -606,10 +606,13 @@ removals over from the newer copy: it does not know that copy's schema, and cann
 the rest of what changed. It compares instead, as it starts, the sharing its index holds with the newer copy's, and
 logs `REMOVED UNDER THE NEWER VERSION, AND BACK` (`level=ERROR`) with how many public links, shares and invitations are
 back, and a line for each link (`a public link removed under the newer version works again`, with its place, item and
-name; the first hundred). When nothing is back it says so, and when the newer copy's sharing cannot be read (a later
-version changed those tables) it says that it cannot tell. After an upgrade that was undone, read those lines, and
-remove again what should not be back: the links they name, and for shares and invitations whatever "Sharing and space"
-and each shared folder's access show that should no longer be there.
+name; the first hundred). Sharing outside the project that was switched off under the newer version is on again too,
+for the whole project or for a shared folder: the Drive logs `SWITCHED OFF UNDER THE NEWER VERSION, AND ON AGAIN`
+(`level=ERROR`) for each, with the shared folder's place. (An end date brought forward under the newer version is back
+where it was, and is not named.) When nothing is back it says so, and when the newer copy's sharing cannot be read (a
+later version changed those tables) it says that it cannot tell. After an upgrade that was undone, read those lines,
+and remove again what should not be back: the links they name, the switches, and for shares and invitations whatever
+"Sharing and space" and each shared folder's access show that should no longer be there.
 
 With the same schema the later copy wins, not the snapshot's, because the files on the storage were not put back
 either: the later copy's sharing is on the files as they are.
@@ -1070,18 +1073,23 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   again, in the same session, when it is switched back on.
 - **Signing in.** The guests' page asks for their address and mails it a sign-in link: the guests' page, with the
   address and a code after the `#` (which no browser sends by itself, so it reaches no log and no other site). Opened,
-  the page sends the code with the address, as a change from the Drive's own page, and the guest is signed in in that
-  browser; a program that only fetches the links in a mail signs nobody in and uses nothing up. The code is 32 bytes
+  the page takes the code out of the address bar and the history and offers "Sign in as (the address)"; on that click
+  it sends the code with the address, as a change from the Drive's own page, and the guest is signed in in that
+  browser. Nothing signs in by itself: a program that fetches the links in a mail, or opens them and runs the page (a
+  mail scanner, a preview), signs nobody in and uses nothing up, and nobody is signed in as someone else by following a
+  link. The code is 32 bytes
   from `crypto/rand` (43 characters), far too long to guess, and works once, for 30 minutes. So nothing a stranger does
   at the sign-in page takes a guest's sign-in away:
   - wrong codes are not counted, for one address or for all: no number of them stops a right link from working;
   - asking again leaves the links already mailed working; while one mailed in the last 5 minutes is not used yet, no
-    other is sent to that address (the answer says so to everyone), so that address gets one mail in 5 minutes at most,
-    and always has a link that works; once a link is used, another can be asked for at once;
+    other is sent to that address (the answer says so to everyone), so a stranger makes that address get one mail in
+    5 minutes at most, and it always has a link that works; once a link is used, another can be asked for at once, up
+    to 12 links to one address within an hour, used or not;
   - an address waits once to be sent a link, however often it is asked for; 64 addresses wait at most, and the rest are
     dropped, answered the same;
   - all addresses together are sent 1,000 links an hour at most, a bound on the mail the page can make the Drive send
-    that takes more than eighty guests' addresses, asked for without pause, to reach.
+    that takes more than eighty guests' addresses, asked for without pause, to reach (one address is sent 12 an hour
+    at most).
 
   Reaching any of these is logged, once a minute at most, without any address. A link is sent only to a guest's address
   with something shared with it that lets them in now (or will once sharing outside the project is switched back on

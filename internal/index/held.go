@@ -192,12 +192,19 @@ func (x *Index) NameUsed(ctx context.Context, placeID, folderID int64, name stri
 
 // EntriesIn is how many items the index holds directly in a folder of a place (folderID 0: its top folder), those
 // missing from the storage included, those in the trash not: counted up to limit.
+//
+// Those there and those missing are counted apart, each through the index that holds only them (items_in_list_order,
+// items_missing): asked for one count of both, SQLite reads every item of the Drive, and a visitor asks this with
+// every file they send in.
 func (x *Index) EntriesIn(ctx context.Context, placeID, folderID int64, limit int) (int, error) {
 	var n int
-	err := x.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (
-		SELECT 1 FROM items WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL LIMIT ?)`,
+	err := x.db.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM (SELECT 1 FROM items
+			WHERE place_id = ?1 AND IFNULL(parent_id, 0) = ?2 AND trashed_at IS NULL AND missing_at IS NULL LIMIT ?3)) +
+		(SELECT COUNT(*) FROM (SELECT 1 FROM items
+			WHERE place_id = ?1 AND IFNULL(parent_id, 0) = ?2 AND trashed_at IS NULL AND missing_at IS NOT NULL LIMIT ?3))`,
 		placeID, folderID, limit).Scan(&n)
-	return n, err
+	return min(n, limit), err
 }
 
 // RenameAct gives a hand-over under way another folder name in the receiver's top folder: the one it had was taken on

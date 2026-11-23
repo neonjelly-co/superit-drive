@@ -152,9 +152,10 @@ func (x *Index) HasLiveInvitation(ctx context.Context, guest int64, now time.Tim
 //
 // It never gives more than was given. An invitation the member gave themselves is dropped (nobody shares with
 // themselves). Where the member was given something on the item already, the invitation takes its place only when it
-// is no less on both counts (its role no lower, its end no earlier); otherwise the member's grant stays as it is: never
-// the role of one with the end of the other.
-func (x *Index) BecomeMember(ctx context.Context, guest int64, userID string, keep []Granted) error {
+// is no less on both counts (its role no lower, its end no earlier), or when what the member was given has ended by
+// now (it gives nothing any more, and must not stand in the way of an invitation that works); otherwise the member's
+// grant stays as it is: never the role of one with the end of the other.
+func (x *Index) BecomeMember(ctx context.Context, guest int64, userID string, keep []Granted, now time.Time) error {
 	if userID == "" {
 		return errors.New("a guest becomes a member with a user id")
 	}
@@ -166,9 +167,10 @@ func (x *Index) BecomeMember(ctx context.Context, guest int64, userID string, ke
 				WHERE guest_id = ?2 AND place_id = ?3 AND item_id = ?4 AND IFNULL(given_by, '') <> ?1
 				ON CONFLICT (place_id, IFNULL(item_id, 0), grantee, IFNULL(member, ''), IFNULL(guest_id, 0)) DO UPDATE
 				SET role = excluded.role, ends_at = excluded.ends_at, given_at = excluded.given_at, given_by = excluded.given_by
-				WHERE (excluded.role = 'editor' OR grants.role = 'viewer')
-					AND (excluded.ends_at IS NULL OR (grants.ends_at IS NOT NULL AND excluded.ends_at >= grants.ends_at))`,
-				userID, guest, k.Place, k.Item); err != nil {
+				WHERE (grants.ends_at IS NOT NULL AND grants.ends_at <= ?5)
+					OR ((excluded.role = 'editor' OR grants.role = 'viewer')
+						AND (excluded.ends_at IS NULL OR (grants.ends_at IS NOT NULL AND excluded.ends_at >= grants.ends_at)))`,
+				userID, guest, k.Place, k.Item, now.UnixMilli()); err != nil {
 				return err
 			}
 		}
@@ -183,8 +185,11 @@ type CodeLimits struct {
 	ValidFor time.Duration
 	// Every is how long after a code was sent to a guest, and not used yet, the next one may be: asked for sooner, none
 	// is sent, and the one sent then still works (ValidFor must be longer, so that the guest always has a code that
-	// works within reach). Once they have used it, they may be sent another at once.
+	// works within reach). Once they have used it, they may be sent another at once, up to PerGuest.
 	Every time.Duration
+	// PerGuest is how many codes one guest may be sent within Window, used or not: without it, a guest who uses each
+	// link as it comes could be sent the next at once, without end, and take all of Overall for themselves.
+	PerGuest int
 	// Overall is how many codes all guests together may be sent within Window: a bound on the mail the sign-in page can
 	// make the Drive send, set well above what a few addresses reach.
 	Overall int
@@ -197,14 +202,16 @@ type IssueResult int
 const (
 	// Issued: the code was recorded, and may be sent.
 	Issued IssueResult = iota
-	// TooSoon: a code was sent to the guest within limits.Every and is not used yet; it works, and no other is sent.
+	// TooSoon: a code was sent to the guest within limits.Every and is not used yet (it works), or limits.PerGuest were
+	// sent to them within limits.Window; no other is sent.
 	TooSoon
 	// TooMany: limits.Overall codes were sent to everyone within limits.Window; none is sent now.
 	TooMany
 )
 
 // IssueCode records a code about to be mailed to the guest, whose hash (an HMAC) is given, at the time given, unless
-// one was sent to them within limits.Every and not used (TooSoon), or limits.Overall to everyone within limits.Window (TooMany):
+// one was sent to them within limits.Every and not used, or limits.PerGuest to them within limits.Window (TooSoon), or
+// limits.Overall to everyone within limits.Window (TooMany):
 // then nothing changes, and the code must not be sent. A guest's earlier codes go on working until they end or one of
 // them is used: whoever asks in a guest's name makes none of theirs useless.
 func (x *Index) IssueCode(ctx context.Context, guest int64, hash []byte, at time.Time, limits CodeLimits) (result IssueResult, err error) {
@@ -216,6 +223,14 @@ func (x *Index) IssueCode(ctx context.Context, guest int64, hash []byte, at time
 			return err
 		}
 		if mine > 0 {
+			result = TooSoon
+			return nil
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM guest_codes WHERE guest_id = ? AND sent_at > ?`,
+			guest, at.Add(-limits.Window).UnixMilli()).Scan(&mine); err != nil {
+			return err
+		}
+		if mine >= limits.PerGuest {
 			result = TooSoon
 			return nil
 		}

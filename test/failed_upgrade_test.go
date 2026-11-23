@@ -3,6 +3,7 @@ package test
 import (
 	"bytes"
 	"database/sql"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -387,5 +388,32 @@ func TestAfterAFailedUpgradeOfTheSameSchemaTheLaterCopyOnTheStorageWins(t *testi
 	}
 	if got := logLines(d, leftAlone); len(got) != 0 {
 		t.Fatalf("a copy of the same schema was left alone: %q", got)
+	}
+}
+
+// Sharing outside the project switched off under the newer version is on again after the upgrade is undone (the
+// snapshot is from before it): the Drive says so, loudly, and does not say that nothing is back.
+func TestADriveRolledBackSaysThatSharingOutsideIsOnAgain(t *testing.T) {
+	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora}, Env: copiesSoon("300ms", "2s")})
+	x, _, notesPage := sharedBeforeTheCopy(t, d)
+	u := upgradeFailed(t, d, x, true, func(b *harness.Client) {
+		if res := switchOutside(t, d.As(reka), false); res.Status/100 != 2 {
+			t.Fatalf("switching sharing outside off under the newer version: %d %s", res.Status, res.Body)
+		}
+		if res := visitor(d).Get(t, notesPage); res.Status == http.StatusOK {
+			t.Fatal("the link opened with sharing outside the project switched off")
+		}
+	})
+	putBack(t, d, u.snapshot)
+	d.Restart(t, nil)
+	adopted(t, d, "data folder")
+	if res := visitor(d).Get(t, notesPage); res.Status != http.StatusOK {
+		t.Fatalf("the link after the upgrade was undone: got %d, want it open again (the switch is from after the snapshot)", res.Status)
+	}
+	if got := logLines(d, "level=ERROR", "SWITCHED OFF UNDER THE NEWER VERSION, AND ON AGAIN", "whole project"); len(got) != 1 {
+		t.Fatalf("the log says %d times that sharing outside the project is on again, want once:\n%s", len(got), d.Logs())
+	}
+	if got := logLines(d, "nothing that was removed under the newer version is back"); len(got) != 0 {
+		t.Fatalf("the log says nothing is back, with the switch on again: %q", got)
 	}
 }

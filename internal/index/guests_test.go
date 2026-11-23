@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-var limits = CodeLimits{ValidFor: 30 * time.Minute, Every: 5 * time.Minute, Overall: 100, Window: time.Hour}
+var limits = CodeLimits{ValidFor: 30 * time.Minute, Every: 5 * time.Minute, PerGuest: 12, Overall: 100, Window: time.Hour}
 
 func code(c string) []byte { return bytes.Repeat([]byte(c[:1]), 32) }
 
@@ -238,7 +238,7 @@ func TestAGuestBecomesAMember(t *testing.T) {
 	if err := x.StartSession(ctx, anna.ID, code("s"), now, now.Add(time.Hour), 10); err != nil {
 		t.Fatal(err)
 	}
-	if err := x.BecomeMember(ctx, anna.ID, "u-anna", []Granted{{bence.ID, clients.ID}, {bence.ID, notes.ID}}); err != nil {
+	if err := x.BecomeMember(ctx, anna.ID, "u-anna", []Granted{{bence.ID, clients.ID}, {bence.ID, notes.ID}}, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := x.GuestByAddress(ctx, anna.Address); !errors.Is(err, ErrNoGuest) {
@@ -276,6 +276,7 @@ func TestAGuestBecomingAMemberGetsNoMoreThanWasGiven(t *testing.T) {
 	now := time.Now()
 	friday := now.Add(24 * time.Hour).Truncate(time.Millisecond)
 	later := friday.Add(24 * time.Hour)
+	yesterday := now.Add(-24 * time.Hour).Truncate(time.Millisecond)
 	for name, c := range map[string]struct {
 		role     string // the invitation's
 		ends     time.Time
@@ -294,6 +295,9 @@ func TestAGuestBecomingAMemberGetsNoMoreThanWasGiven(t *testing.T) {
 		"viewer until Friday, and viewer until Friday":  {"viewer", friday, "viewer", friday, "viewer", friday},
 		"editor until Friday, and viewer until Friday":  {"editor", friday, "viewer", friday, "editor", friday},
 		"editor until Friday, and nothing given before": {"editor", friday, "", time.Time{}, "editor", friday},
+		// What ended gives nothing any more: it does not stand in the way of an invitation that works.
+		"viewer for good, and editor until yesterday":     {"viewer", time.Time{}, "editor", yesterday, "viewer", time.Time{}},
+		"viewer until Friday, and editor until yesterday": {"viewer", friday, "editor", yesterday, "viewer", friday},
 	} {
 		x := open(t)
 		bence := place(t, x, "u-bence")
@@ -312,7 +316,7 @@ func TestAGuestBecomingAMemberGetsNoMoreThanWasGiven(t *testing.T) {
 				}
 			}
 		}
-		if err := x.BecomeMember(ctx, anna.ID, "u-anna", []Granted{{bence.ID, clients.ID}}); err != nil {
+		if err := x.BecomeMember(ctx, anna.ID, "u-anna", []Granted{{bence.ID, clients.ID}}, now); err != nil {
 			t.Fatal(err)
 		}
 		got, _ := x.GrantsOn(ctx, bence.ID, []int64{clients.ID})
@@ -333,7 +337,7 @@ func TestAGuestBecomingAMemberGetsNoMoreThanWasGiven(t *testing.T) {
 		}
 	}
 	// Clients no longer works, the caller says; Own.txt she gave her own address herself.
-	if err := x.BecomeMember(ctx, anna.ID, "u-anna", []Granted{{bence.ID, notes.ID}, {bence.ID, own.ID}}); err != nil {
+	if err := x.BecomeMember(ctx, anna.ID, "u-anna", []Granted{{bence.ID, notes.ID}, {bence.ID, own.ID}}, now); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := x.GrantsOn(ctx, bence.ID, []int64{clients.ID, notes.ID, own.ID})
@@ -364,5 +368,35 @@ func TestAGuestsUploadIsTheirs(t *testing.T) {
 		if _, err := x.UploadOf(ctx, bence.ID, id, who.member, who.guest); !errors.Is(err, ErrNoUpload) {
 			t.Errorf("Anna's upload for %+v: %v", who, err)
 		}
+	}
+}
+
+// A guest who uses each link as it comes is sent the next at once, but no more than PerGuest within the window: they
+// cannot take all the links the Drive sends in an hour for themselves.
+func TestAGuestIsSentOnlySoManyCodesAnHourHoweverFastTheyUseThem(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	bence := place(t, x, "u-bence")
+	notes := put(t, x, bence, 0, "Notes.txt", false, 5)
+	now := time.Now()
+	anna, _, err := x.Invite(ctx, bence.ID, notes.ID, "anna@client.example", "viewer", time.Time{}, now, "u-bence")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range limits.PerGuest {
+		at := now.Add(time.Duration(i) * time.Second)
+		hash := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		if r, err := x.IssueCode(ctx, anna.ID, hash, at, limits); err != nil || r != Issued {
+			t.Fatalf("code %d: %v %v", i+1, r, err)
+		}
+		if _, ok, err := x.UseCode(ctx, "anna@client.example", hash, at, limits); err != nil || !ok {
+			t.Fatalf("using code %d: %v %v", i+1, ok, err)
+		}
+	}
+	if r, err := x.IssueCode(ctx, anna.ID, bytes.Repeat([]byte{0xA1}, 32), now.Add(time.Minute), limits); err != nil || r != TooSoon {
+		t.Fatalf("one more than a guest is sent in an hour: %v %v, want TooSoon", r, err)
+	}
+	if r, err := x.IssueCode(ctx, anna.ID, bytes.Repeat([]byte{0xA2}, 32), now.Add(limits.Window+time.Minute), limits); err != nil || r != Issued {
+		t.Fatalf("after the hour: %v %v, want Issued", r, err)
 	}
 }

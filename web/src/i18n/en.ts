@@ -518,6 +518,7 @@ export const en = {
 			"Someone in this project shared files with your email address. Confirm it, and we mail you a link that signs you in. You need no account and no password.",
 		yourAddress: "Your email address",
 		sendLink: "Send me a sign-in link",
+		signInAs: "Sign in as {address}",
 		sentTo: "Sent to {address}. Check your spam folder too.",
 		openItHere: "Open the link in this browser: it signs in the browser it is opened in. You can close this tab.",
 		anotherAddress: "Use another address",

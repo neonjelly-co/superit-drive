@@ -525,6 +525,7 @@ export const hu: Messages = {
 			"Valaki ebből a projektből fájlokat osztott meg az e-mail-címeddel. Erősítsd meg, és küldünk rá egy linket, amellyel beléphetsz. Nem kell hozzá fiók és jelszó.",
 		yourAddress: "Az e-mail-címed",
 		sendLink: "Kérek egy belépési linket",
+		signInAs: "Belépés ezzel a címmel: {address}",
 		sentTo: "Elküldve ide: {address}. Nézd meg a levélszemét mappát is.",
 		openItHere: "Ebben a böngészőben nyisd meg a linket: azt a böngészőt lépteti be, amelyikben megnyitod. Ezt a lapot bezárhatod.",
 		anotherAddress: "Másik cím",

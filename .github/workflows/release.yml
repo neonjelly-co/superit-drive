@@ -87,7 +87,9 @@ jobs:
             echo "::error::$IMAGE:$VERSION is already published. A version is never replaced: tag a new one."
             exit 1
           fi
-          if ! grep -qiE '(^|[^a-z])(not found|manifest unknown)([^a-z]|$)' <<<"$found"; then
+          # That answer is one whole line, naming the version. "not found" anywhere else (a 404 from the sign-in on the
+          # way, a command that is not there) is not it.
+          if ! grep -qxF "ERROR: $IMAGE:$VERSION: not found" <<<"$found"; then
             echo "::error::The registry did not say whether $IMAGE:$VERSION is published, so nothing is published: $found"
             exit 1
           fi

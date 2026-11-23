@@ -236,7 +236,7 @@ func TestAClearedCopyHoldsNoTraceOfWhatWasCleared(t *testing.T) {
 		t.Fatal(err)
 	}
 	code := bytes.Repeat([]byte{0xc0}, 32)
-	if r, err := x.IssueCode(ctx, guest.ID, code, now, CodeLimits{ValidFor: 30 * time.Minute, Every: 5 * time.Minute, Overall: 100, Window: time.Hour}); err != nil || r != Issued {
+	if r, err := x.IssueCode(ctx, guest.ID, code, now, CodeLimits{ValidFor: 30 * time.Minute, Every: 5 * time.Minute, PerGuest: 12, Overall: 100, Window: time.Hour}); err != nil || r != Issued {
 		t.Fatalf("issuing a code: %v %v", r, err)
 	}
 	link := bytes.Repeat([]byte{0x11}, 32)
