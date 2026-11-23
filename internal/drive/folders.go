@@ -63,7 +63,7 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 	case errors.Is(err, storage.ErrFull):
 		return index.Item{}, ErrFull
 	case err != nil:
-		return index.Item{}, storageError(err)
+		return index.Item{}, d.nameError(err, name)
 	}
 	d.changed(folderKey{p.ID, folderID(in)})
 	it, err := d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()}, d.now(), by.added())
@@ -84,7 +84,7 @@ func (d *Drive) free(ctx context.Context, p, name string) error {
 	case errors.Is(err, storage.ErrNotFound):
 		return nil
 	}
-	return storageError(err)
+	return d.nameError(err, name)
 }
 
 // Rename gives a live item of the place a new name, in the folder it is in, by by (whose name it must be allowed to
@@ -285,7 +285,7 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 		}
 		return index.Item{}, ErrGone
 	case err != nil:
-		return index.Item{}, storageError(err)
+		return index.Item{}, d.nameError(err, name)
 	}
 	d.changed(folderKey{p.ID, it.ParentID}, folderKey{p.ID, folderID(to)})
 	moved, err := d.index.Relocate(ctx, p.ID, it.ID, folderID(to), name)

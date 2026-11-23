@@ -34,9 +34,17 @@ const FileName = "index.sqlite"
 //go:embed migrations/*.sql
 var migrations embed.FS
 
+// connections is how many connections to the index are open at once, at most: every read and write of the Drive takes
+// one for as long as it lasts, and waits for one when all are taken.
+const connections = 4
+
 // Index is the open index.
 type Index struct {
 	db *sql.DB
+	// searching holds the turns of the searches under way (search.go), and searchWait and searchMost are how long one
+	// waits for its turn and how long it may then take.
+	searching              chan struct{}
+	searchWait, searchMost time.Duration
 }
 
 // Open opens the index in dataDir, making it if needed, and brings its schema up to date.
@@ -57,12 +65,12 @@ func Open(ctx context.Context, dataDir string) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening the index %s: %w", file, err)
 	}
-	db.SetMaxOpenConns(4)
+	db.SetMaxOpenConns(connections)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("opening the index %s: %w", file, err)
 	}
-	x := &Index{db: db}
+	x := &Index{db: db, searching: make(chan struct{}, SearchesAtOnce), searchWait: SearchWait, searchMost: SearchMost}
 	if err := x.migrate(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("updating the index %s: %w", file, err)

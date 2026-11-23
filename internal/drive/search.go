@@ -8,7 +8,8 @@ import (
 
 // Search finds live items whose names match what is searched for, in scope only (index.Search): the best matches
 // first, at most limit. It reads the index alone, not the storage: what a listing has not seen yet is not found. It
-// holds no place's lock.
+// holds no place's lock. index.ErrSearchBusy when too many searches are under way, index.ErrSearchTooLong when this one
+// was ended.
 func (d *Drive) Search(ctx context.Context, scope index.Scope, search string, limit int) ([]index.Item, error) {
 	return d.index.Search(ctx, scope, search, limit)
 }

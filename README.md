@@ -84,8 +84,10 @@ any request outside `/s/` without the secret.
 also sends when a page on another site makes it call the Drive; so does the Drive's own cookie for guests. So every
 request other than `GET` and `HEAD`, a member's or a guest's (signing in included), must carry an `Origin` header equal
 to `DRIVE_ADDRESS` (browsers add it themselves); any other origin, `null`, or none is refused with 403, and the Drive
-logs both values. The reverse proxy must pass `Origin` through unchanged, and `DRIVE_ADDRESS` must be the address in the
-browser's address bar. The one change that needs no `Origin` is a file sent through an upload-only link: it carries no
+logs both values. Anyone can send such a request under `/s/guest`, so the line is written at most once a minute, with
+the address and the `Origin` cut to 200 bytes and a count of the refusals it left out (`leftOut`; see [What anyone can
+ask for is bounded](#what-anyone-can-ask-for-is-bounded)). The reverse proxy must pass `Origin` through unchanged, and
+`DRIVE_ADDRESS` must be the address in the browser's address bar. The one change that needs no `Origin` is a file sent through an upload-only link: it carries no
 cookie and says nothing about who sends it, so another site's page can do through it only what anyone with the
 address can (and the link's own page sends `Origin: null`, under its `no-referrer` policy).
 
@@ -155,6 +157,15 @@ Files and folders keep their real names, up to 255 bytes, exactly as given; the 
 composed form (NFC), so a name from Safari on macOS matches the same name from another browser. Making a folder,
 renaming and moving are each one change on the storage (`MKCOL`, or `MOVE` with `Overwrite: F`), after a look that
 the name is free, and nothing ever replaces what is there.
+
+**Names the storage refuses.** A storage can have names of its own that it will not hold: Apache, and so a Storage
+Box, answers 403 to anything about a name that starts with `.ht` (`.htaccess`, `.htpasswd`). When the storage answers
+403 where the Drive looks for, or puts, something under a name a person chose (an upload, a new folder, a rename, a
+new shared folder, a file sent through an upload-only link), the person is told that the storage does not take this
+name and to choose another (400, as for any name that cannot be used), not that the storage failed (502). The storage
+does not say why it refused, so a storage that refuses every change (its folder made read-only, say) is told to people
+the same way: the log says `the storage refused a name`, with what it answered, at most once a minute (`level=WARN`,
+with a count of those left out), and never as an error for each.
 
 **Uploads** stream straight through the Drive to a file of their own in the hidden uploads folder, never onto the
 server's disk, and are moved into their folder (`MOVE` with `Overwrite: F`) only when whole: a half-finished file
@@ -904,6 +915,20 @@ taken hold 8 MiB together at most; one more is told 503), and the small body of 
 turn is taken; a member's too) must arrive within 15 seconds. Trying tokens costs a hash and one look in the index, with no lock and no log
 line. A zip is bounded as for members (10,000 entries).
 
+#### What anyone can ask for is bounded
+
+- **Headers.** A request's first line and headers may take 32 KiB together (`app.MaxHeaderBytes`; Go's own slack of
+  4 KiB on top): a longer one is answered 431 before anything about it is looked at, a visitor's, a guest's or a
+  member's. An address the Drive answers and what a browser and the reverse proxy send with it take a few kilobytes.
+- **The log.** The lines someone outside the project can cause as often as they ask are written at most once a minute
+  each, with what they quote of the request cut to 200 bytes, and the next one says how many were left out (`leftOut`;
+  package `seldom`): `refused a change that did not come from the Drive's own pages` (anyone, under `/s/guest`; a
+  member's browser, made to by another site's page), the three lines about asks for a sign-in link (some were
+  dropped, one came too soon after a link was sent, too many links were sent; anyone, the last two with a guest's
+  address; see [Guests](#guests)), and `the storage refused a name` (a visitor through an upload-only link, a
+  guest, a member; see [Layout on the storage](#layout-on-the-storage)). The counts are in memory: a restart forgets them, and
+  the next line of each kind is written at once.
+
 #### Upload-only links
 
 A folder's link can be upload-only: anyone with its address sends files into that folder, and sees nothing of what is in
@@ -1078,6 +1103,12 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   cannot reach, cannot reach as `DRIVE_SMTP_TLS` says, or that refuses its login, inviting is refused (409, `"mail":
   false`) and says why, and `GET /api/me` says so before anyone types (`"guests": {"invite", "why"}`). Sharing with a
   member's address, and public links, still work.
+- **At most 30 invitations an hour from one member.** Every new invitation is a mail from the Drive to an address the
+  member typed, with names they chose (their own, and the file's or folder's), and inviting an address, taking the
+  invitation away and inviting it again mails it each time. So a member has 30 invitations mailed within any hour; the
+  next is refused (429, with `Retry-After`), says so, and makes no invitation. Changing an invitation that is there,
+  taking one away and sharing with a member's address are not counted. The count is kept in memory: a restart forgets
+  it, and the hour starts again.
 - **Their transfers** take turns with visitors': outsiders hold at most 8 of the 32 slots, in a line of their own.
 
 ```
@@ -1316,6 +1347,7 @@ GET    /api/search?q=<part of a name>
                        "path", "fromTop"}],                   where it is, as far as the person can open the folders above it
             "more": false}
        400 nothing to search for, or more than 255 bytes
+       503 too many searches are under way (Retry-After), or this one took too long and was ended
 ```
 
 It finds files and folders by name (never by what is in them) across everything the person can see, and nothing else:
@@ -1339,6 +1371,13 @@ It finds files and folders by name (never by what is in them) across everything 
   directly is found once its folder was opened or the walk passed it (within a walk's interval and length, see
   [Keeping in step with the storage](#keeping-in-step-with-the-storage)); what went from it is not found from the first
   look that missed it.
+- **A few at once, each for a bounded time.** A search reads every name in its scope, on one of the index's four
+  connections, which everything else the Drive does needs too (measured at the index before there was a bound: eight
+  searches at once over 50,000 items made an unrelated lookup take up to 2.8 seconds, from 0.3 ms). So two searches
+  run at once (`index.SearchesAtOnce`), whoever asked; the rest wait their turn, for at most 5 seconds, then are told
+  the Drive is busy searching (503, `Retry-After`); and one that has run for 5 seconds is ended in the middle of its
+  reading and says so (503), its connection free again. The bound is for everyone together: one member's many searches
+  make another's wait, but never longer than that.
 
 ### Selecting several
 
@@ -1775,7 +1814,9 @@ walk through the storage start that soon, run that often and rest that long afte
 `SUPERIT_DRIVE_TEST_COPY_QUIET`, `SUPERIT_DRIVE_TEST_COPY_LATEST` and `SUPERIT_DRIVE_TEST_COPY_RETRY` (Go durations) make
 the copy of the index follow access changes that soon (see [The copy of the index](#the-copy-of-the-index)); and
 `SUPERIT_DRIVE_TEST_LINK_LIMIT` (bytes) and `SUPERIT_DRIVE_TEST_LINK_FILES` (files) are how much an upload-only link
-takes in before it is full, so a test need not send 10 GB or a thousand files (see [Upload-only links](#upload-only-links)). A Drive
+takes in before it is full, so a test need not send 10 GB or a thousand files (see [Upload-only links](#upload-only-links)); and
+`SUPERIT_DRIVE_TEST_SEARCH_MOST` (a Go duration) is how long a search may take before it is ended, so a test need not
+fill the index (see [Search](#search)). A Drive
 built without the tag reads no such variable. Tests change the storage directly with the harness's own WebDAV client
 (`Drive.Storage`), including a `MOVE` that keeps a file's time (a storage that answered wrong for a while), `Fill`,
 which puts thousands of files straight onto the stand-in storage's disk, and `Snapshot` and `RollBack`, which copy the
@@ -1846,6 +1887,7 @@ internal/index/        the SQLite index (search.go: names as a search compares t
                        off (SQLite's recipe for rebuilding a table) and checked with foreign_key_check before each
                        commits
 internal/clock/        the Drive's clock, which test builds can move forward
+internal/seldom/       the log's lines that anyone can cause: written at most once in a while, and cut short
 internal/transfers/    what holds the memory figure: capped network buffers, and the 32 transfer slots
 internal/storage/      the WebDAV client
 internal/storagecheck/ `superit-drive check-storage`: can a WebDAV server hold the Drive's files?

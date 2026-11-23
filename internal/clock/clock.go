@@ -11,7 +11,8 @@
 // test can see what the Drive does when it starts again; and SUPERIT_DRIVE_TEST_COPY_QUIET, SUPERIT_DRIVE_TEST_COPY_LATEST
 // and SUPERIT_DRIVE_TEST_COPY_RETRY (Go durations) make the copy of the index follow access changes that soon; and
 // SUPERIT_DRIVE_TEST_LINK_LIMIT (bytes) and SUPERIT_DRIVE_TEST_LINK_FILES (a number of files) are how much an upload-only
-// link takes in before it stops, so a test need not send 10 GB or a thousand files. A Drive built any other way, such as the released image, reads no such variable.
+// link takes in before it stops, so a test need not send 10 GB or a thousand files; and SUPERIT_DRIVE_TEST_SEARCH_MOST
+// (a Go duration) is how long a search may take before it is ended, so a test need not fill the index. A Drive built any other way, such as the released image, reads no such variable.
 package clock
 
 import "time"
@@ -38,6 +39,10 @@ func LinkLimit() (bytes int64, ok bool) { return 0, false }
 // LinkFiles is how many files an upload-only link takes in that a test build sets (SUPERIT_DRIVE_TEST_LINK_FILES): ok is
 // always false here, and the Drive's own limit holds.
 func LinkFiles() (files int64, ok bool) { return 0, false }
+
+// SearchMost is how long a search may take that a test build sets (SUPERIT_DRIVE_TEST_SEARCH_MOST): ok is always false
+// here, and the index's own limit holds.
+func SearchMost() (most time.Duration, ok bool) { return 0, false }
 
 // StopAt is a point in the Drive's work where a test build may stop (SUPERIT_DRIVE_TEST_STOP_AT): here it does nothing.
 func StopAt(point string) {}

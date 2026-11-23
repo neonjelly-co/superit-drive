@@ -31,12 +31,14 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/access"
 	"github.com/neonjelly-co/superit-drive/internal/drive"
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/mail"
 	"github.com/neonjelly-co/superit-drive/internal/members"
+	"github.com/neonjelly-co/superit-drive/internal/seldom"
 	"github.com/neonjelly-co/superit-drive/internal/text"
 	"github.com/neonjelly-co/superit-drive/internal/transfers"
 )
@@ -82,15 +84,18 @@ type Server struct {
 	// codeKey keys the HMAC of the codes mailed to guests (guests.go): derived from the header secret, which the index
 	// never holds.
 	codeKey []byte
-	// codes are the addresses that asked for a sign-in link, waiting for SendCodes (guests.go), each once (asking); the
-	// three times are when the log last said that asks were dropped, that an address was asked for too soon, and that
-	// too many links were sent: each is said once a minute at most.
-	codes                                    chan codeAsk
-	askingMu                                 sync.Mutex
-	asking                                   map[string]bool
-	codesDropped, codesTooSoon, codesTooMany atomic.Int64
+	// codes are the addresses that asked for a sign-in link, waiting for SendCodes (guests.go), each once (asking).
+	codes    chan codeAsk
+	askingMu sync.Mutex
+	asking   map[string]bool
 	// sendPolicy is the Content-Security-Policy of an upload-only link's page (sendin.go).
 	sendPolicy string
+	// The log's lines that anyone can cause, each written at most once in seldom.Each: a change refused for its Origin
+	// (logRefusedChange); and, of the asks for a sign-in link, that some were dropped (askForCode), that one came too
+	// soon after a link was sent to its guest, and that too many links were sent to everyone (sendCode).
+	refusedChanges, codesDropped, codesTooSoon, codesTooMany *seldom.Line
+	// invitationMails counts the invitations each member had mailed lately (invitations.go).
+	invitationMails *mailCount
 }
 
 // New makes a server.
@@ -103,7 +108,10 @@ func New(c Config) *Server {
 		visitors: newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
 		guests:   newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
 		codeKey:  key.Sum(nil),
-		codes:    make(chan codeAsk, codesWaiting), asking: map[string]bool{}}
+		codes:    make(chan codeAsk, codesWaiting), asking: map[string]bool{},
+		refusedChanges: seldom.Every(seldom.Each), codesDropped: seldom.Every(seldom.Each),
+		codesTooSoon: seldom.Every(seldom.Each), codesTooMany: seldom.Every(seldom.Each),
+		invitationMails: newMailCount(invitationMailsPerHour, time.Hour)}
 	if c.Address != nil {
 		s.origin = originOf(c.Address)
 	}
@@ -290,9 +298,7 @@ func (s *Server) guard(rt route) http.Handler {
 			return
 		}
 		if !s.fromOwnPage(r) {
-			// Most often DRIVE_ADDRESS is not the address people use; the log says both, so it can be put right.
-			s.log.Warn("refused a change that did not come from the Drive's own pages",
-				"method", r.Method, "path", r.URL.Path, "origin", r.Header.Get("Origin"), "address", s.origin)
+			s.logRefusedChange(r)
 			s.refuse(w, r, http.StatusForbidden, refusedOrigin)
 			return
 		}
@@ -450,6 +456,15 @@ func (s *Server) fromOwnPage(r *http.Request) bool {
 		return false // no Origin, "null" (a sandboxed or privacy-stripped page), or not an origin at all
 	}
 	return originOf(o) == s.origin
+}
+
+// logRefusedChange logs a change refused because it did not come from the Drive's own pages. Most often DRIVE_ADDRESS
+// is not the address people use; the log says both, so it can be put right. Under the guests' prefix anyone can cause
+// the line, before any session is looked at, and a page on another site can make a member's browser cause it: it is
+// written at most once in seldom.Each, with the method, the path and the Origin cut short.
+func (s *Server) logRefusedChange(r *http.Request) {
+	s.refusedChanges.Log(s.log, slog.LevelWarn, "refused a change that did not come from the Drive's own pages",
+		"method", seldom.Cut(r.Method), "path", seldom.Cut(r.URL.Path), "origin", seldom.Cut(r.Header.Get("Origin")), "address", s.origin)
 }
 
 // originOf is the origin of an address as a browser writes it in Origin: scheme and host in lower case, and the port

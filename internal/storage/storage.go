@@ -51,6 +51,9 @@ var (
 	ErrNoRanges = errors.New("the storage sent the whole file instead of part of it")
 	// ErrTooMany is returned by List when a folder holds more than the most it was asked to read.
 	ErrTooMany = errors.New("the folder holds more than the Drive reads at once")
+	// ErrRefused is what a *StatusError is when the storage answered 403 Forbidden: it will not do this at this path,
+	// whoever asks. Apache answers so for every name that starts with ".ht", such as ".htaccess".
+	ErrRefused = errors.New("the storage refused it")
 )
 
 // A StatusError is an answer from the storage that has no meaning of its own here, such as 403 Forbidden.
@@ -59,7 +62,12 @@ type StatusError struct {
 	Path     string // the path, relative to the Drive's folder; MakeFolder gives a folder's whole path on the server
 	Status   string // the answer's status, such as "403 Forbidden"
 	Location string // where the answer pointed, for a redirect
+	// Refused is true when the answer was 403 Forbidden: the error is then ErrRefused too.
+	Refused bool
 }
+
+// Is says that a refusal (403 Forbidden) is ErrRefused.
+func (e *StatusError) Is(target error) bool { return target == ErrRefused && e.Refused }
 
 func (e *StatusError) Error() string {
 	s := fmt.Sprintf("%s %q on the storage: it answered %s", e.Doing, e.Path, e.Status)
@@ -826,7 +834,7 @@ func statusError(doing, name string, res *http.Response) error {
 	case http.StatusNotFound:
 		return fmt.Errorf("%s %q: %w", doing, name, ErrNotFound)
 	}
-	e := &StatusError{Doing: doing, Path: name, Status: res.Status}
+	e := &StatusError{Doing: doing, Path: name, Status: res.Status, Refused: res.StatusCode == http.StatusForbidden}
 	if isRedirect(res.StatusCode) {
 		e.Location = res.Header.Get("Location")
 	}

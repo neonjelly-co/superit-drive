@@ -61,7 +61,10 @@ var (
 	nameControl = text.M("A name cannot contain line breaks, tabs or other control characters. Choose another name.",
 		"A név nem tartalmazhat sortörést, tabulátort vagy más vezérlőkaraktert. Válassz másik nevet.")
 	nameUnusable = text.M("This name cannot be used. Choose another name.", "Ez a név nem használható. Válassz másik nevet.")
-	nameTurns    = text.M("This name holds characters that change the direction of text. Rename the file and send it again.",
+	// nameRefused is for a name the storage refused (nameError).
+	nameRefused = text.M("The Drive storage does not take this name. Choose another name.",
+		"A Drive-tárhely nem fogadja el ezt a nevet. Válassz másik nevet.")
+	nameTurns = text.M("This name holds characters that change the direction of text. Rename the file and send it again.",
 		"Ebben a névben olyan karakterek vannak, amelyek megfordítják a szöveg irányát. Nevezd át a fájlt, és küldd el újra.")
 )
 
@@ -196,7 +199,7 @@ func (d *Drive) freeName(ctx context.Context, dir, name string, folder bool) (fr
 			return candidate, release, nil
 		case err != nil:
 			release()
-			return "", nil, storageError(err)
+			return "", nil, d.nameError(err, candidate)
 		}
 		release()
 	}

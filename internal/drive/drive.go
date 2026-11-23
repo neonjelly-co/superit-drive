@@ -49,6 +49,7 @@ import (
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/members"
+	"github.com/neonjelly-co/superit-drive/internal/seldom"
 	"github.com/neonjelly-co/superit-drive/internal/storage"
 )
 
@@ -71,6 +72,26 @@ func storageError(err error) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %w", ErrStorage, err)
+}
+
+// nameError is storageError for a step that looks for, or puts, something on the storage under a name a person chose:
+// when the storage refuses it there (storage.ErrRefused: Apache does for ".htaccess" and every other name that starts
+// with ".ht"), the name is one the Drive cannot store, a *BadName the person is told about, not a failure of the
+// storage. The storage does not say why it refused, so one that refuses every change (its folder set read-only, say)
+// reads the same: the log says what it answered, at most once in seldom.Each, since anyone who may choose a name can
+// cause the line.
+func (d *Drive) nameError(err error, name string) error {
+	if !errors.Is(err, storage.ErrRefused) {
+		return storageError(err)
+	}
+	answer := ""
+	var status *storage.StatusError
+	if errors.As(err, &status) {
+		answer = status.Doing + ": " + status.Status
+	}
+	d.refusedNames.Log(d.log, slog.LevelWarn, "the storage refused a name; the person was told to choose another",
+		"name", seldom.Cut(name), "storage", answer)
+	return &BadName{nameRefused}
 }
 
 // Options are what a Drive needs besides its index and storage.
@@ -96,6 +117,8 @@ type Drive struct {
 	storage *storage.Client
 	now     func() time.Time
 	log     *slog.Logger
+	// refusedNames is the log's line about a name the storage refused (nameError).
+	refusedNames *seldom.Line
 
 	// writing holds the storage paths being changed (an upload in flight, a rename or move on its way), so two
 	// changes of one name cannot both pass the check that it is free, and a listing leaves the name alone.
@@ -168,7 +191,8 @@ func (d *Drive) Now() time.Time { return d.now() }
 
 // New makes a Drive.
 func New(x *index.Index, s *storage.Client, o Options) *Drive {
-	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}, stopAt: o.StopAt, linkLimit: o.LinkLimit, linkFiles: o.LinkFiles}
+	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}, stopAt: o.StopAt, linkLimit: o.LinkLimit, linkFiles: o.LinkFiles,
+		refusedNames: seldom.Every(seldom.Each)}
 	if d.linkFiles <= 0 {
 		d.linkFiles = DefaultLinkFiles
 	}

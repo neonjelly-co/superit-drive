@@ -2,8 +2,10 @@ package index
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -186,5 +188,112 @@ func TestAPageOfAListIsReadInOrder(t *testing.T) {
 		if strings.Contains(joined, "TEMP B-TREE") || !strings.Contains(joined, "items_in_list_order") {
 			t.Errorf("a page of a list (from the start: %v) is not read through its index in order:\n%s", first, joined)
 		}
+	}
+}
+
+// manyItems puts n files into the top folder of the place, in one write.
+func manyItems(t *testing.T, x *Index, p Place, n int) {
+	t.Helper()
+	_, err := x.db.ExecContext(context.Background(), `
+		WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+		INSERT INTO items (place_id, parent_id, name, is_folder, size, changed_at, added_by_guest, added_through_link)
+		SELECT ?, NULL, 'Árvíztűrő report ' || i || '.pdf', 0, 1, 0, NULL, 0 FROM n`, n, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A search that takes too long is ended, in the middle of its reading, and says so: it does not go on holding a
+// connection of the index until it has read everything.
+func TestASearchThatTakesTooLongIsEnded(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	reka := place(t, x, "u-reka")
+	manyItems(t, x, reka, 60000)
+	scope := Scope{Places: []int64{reka.ID}}
+
+	start := time.Now()
+	found, err := x.Search(ctx, scope, "nothing called this", 10)
+	whole := time.Since(start)
+	if err != nil || len(found) != 0 {
+		t.Fatalf("a search with all the time it needs: %d found, %v", len(found), err)
+	}
+
+	x.EndSearchesAfter(whole / 20)
+	start = time.Now()
+	_, err = x.Search(ctx, scope, "nothing called this", 10)
+	if took := time.Since(start); !errors.Is(err, ErrSearchTooLong) || took > whole/2 {
+		t.Fatalf("a search that takes %v, with %v to do it in: got %v after %v, want it ended as taking too long", whole, whole/20, err, took)
+	}
+	// Its turn and its connection are free again: the next one runs.
+	x.EndSearchesAfter(SearchMost)
+	if _, err := x.Search(ctx, scope, "report 7.pdf", 10); err != nil {
+		t.Fatalf("a search after one that was ended: %v", err)
+	}
+	// A person who went away is not a search that took too long.
+	gone, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := x.Search(gone, scope, "report", 10); !errors.Is(err, context.Canceled) || errors.Is(err, ErrSearchTooLong) {
+		t.Fatalf("a search by someone who has gone: %v, want only that they have gone", err)
+	}
+}
+
+// Only a few searches run at once, so that the rest of the index's connections are left to everything else; the others
+// wait their turn, and are refused when none comes free in time.
+func TestOnlyAFewSearchesRunAtOnce(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	if SearchesAtOnce >= connections {
+		t.Fatalf("%d searches at once would take all %d connections of the index", SearchesAtOnce, connections)
+	}
+	reka := place(t, x, "u-reka")
+	put(t, x, reka, 0, "Report.pdf", false, 1)
+	scope := Scope{Places: []int64{reka.ID}}
+
+	// Every turn is taken, as by searches under way.
+	var leave []func()
+	for range SearchesAtOnce {
+		l, err := x.searchTurn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		leave = append(leave, l)
+	}
+	// One more waits, and is refused when its wait is over; everything else in the index is answered meanwhile.
+	x.searchWait = 100 * time.Millisecond
+	start := time.Now()
+	if _, err := x.Search(ctx, scope, "report", 10); !errors.Is(err, ErrSearchBusy) || time.Since(start) < x.searchWait {
+		t.Fatalf("a search with every turn taken: %v after %v, want it refused as busy after waiting %v", err, time.Since(start), x.searchWait)
+	}
+	if _, err := x.PlaceByID(ctx, reka.ID); err != nil {
+		t.Fatalf("a lookup while every search's turn is taken: %v", err)
+	}
+	// Those that wait run when a turn comes free.
+	x.searchWait = 10 * time.Second
+	var wg sync.WaitGroup
+	results := make(chan error, 4)
+	for range 4 {
+		wg.Go(func() {
+			found, err := x.Search(ctx, scope, "report", 10)
+			if err == nil && len(found) != 1 {
+				err = errors.New("the search found nothing")
+			}
+			results <- err
+		})
+	}
+	time.Sleep(50 * time.Millisecond)
+	if len(results) != 0 {
+		t.Fatal("a search ran with every turn taken")
+	}
+	leave[0]()
+	wg.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Errorf("a search that waited its turn: %v", err)
+		}
+	}
+	for _, l := range leave[1:] {
+		l()
 	}
 }

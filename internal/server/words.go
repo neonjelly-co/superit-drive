@@ -73,6 +73,10 @@ var (
 	searchTooLong = text.M("This is longer than any name can be. Search for a part of the name.",
 		"Ez hosszabb, mint amilyen egy név lehet. Keress a név egy részére.")
 	searchNothing = text.M("Type a part of a name to search for.", "Írd be egy név egy részét, hogy rákeress.")
+	searchBusy    = text.M("The Drive is busy with other searches. Try again in a moment.",
+		"A Drive most más keresésekkel van elfoglalva. Próbáld újra egy kis idő múlva.")
+	searchTookTooLong = text.M("This search took too long, so the Drive ended it. Try again in a moment.",
+		"Ez a keresés túl sokáig tartott, ezért a Drive leállította. Próbáld újra egy kis idő múlva.")
 )
 
 // Shared folders.
@@ -115,6 +119,11 @@ var (
 		"%s Make a public link instead.",
 		"Vendéget most nem lehet meghívni: a Drive minden vendégnek e-mailben küldi a meghívót és a belépési linkeket. "+
 			"%s Készíts helyette nyilvános linket.")
+	// tooManyInvitations is for a member who had as many invitations mailed in an hour as one may (%d).
+	tooManyInvitations = text.M("You have invited guests %d times within the last hour, and the Drive mails each invitation. "+
+		"That is as many as it sends for one person in an hour. Try again later.",
+		"Az elmúlt egy órában %d alkalommal hívtál meg vendéget, és a Drive minden meghívót e-mailben küld el. "+
+			"Egy embernek óránként ennyit küld. Próbáld újra később.")
 )
 
 // Public links (links.go), and sharing outside the project switched off (oversight.go).

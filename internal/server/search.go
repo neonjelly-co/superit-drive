@@ -57,6 +57,10 @@ type foundJSON struct {
 //	                "place", "placeKind", "placeName", "owner", "role", "path", "fromTop"}],   where it is, as they may see it
 //	     "more": false}
 //	400 an empty search, or one longer than any name can be
+//	503 too many searches are under way and none ended in time (Retry-After), or this one took too long and was ended
+//
+// A search reads everything in its scope, so the index runs only a few at once and ends one that takes too long
+// (index.SearchesAtOnce, index.SearchWait, index.SearchMost).
 func (s *Server) search(w http.ResponseWriter, r *http.Request, c call) {
 	ctx := r.Context()
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -76,7 +80,15 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, c call) {
 	// More than will be answered, so that one result the index still had but access no longer finds (it went to the
 	// trash meanwhile, say) does not hide one that is there.
 	found, err := s.drive.Search(ctx, scope, q, 2*searchLimit+1)
-	if err != nil {
+	switch {
+	case errors.Is(err, index.ErrSearchBusy):
+		w.Header().Set("Retry-After", "5")
+		s.refuse(w, r, http.StatusServiceUnavailable, searchBusy)
+		return
+	case errors.Is(err, index.ErrSearchTooLong):
+		s.refuse(w, r, http.StatusServiceUnavailable, searchTookTooLong)
+		return
+	case err != nil:
 		s.fail(w, r, err)
 		return
 	}

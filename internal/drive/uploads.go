@@ -236,7 +236,7 @@ func (d *Drive) askFirst(ctx context.Context, file, name string, existing Existi
 	case errors.Is(err, storage.ErrNotFound):
 		return nil
 	case err != nil:
-		return storageError(err)
+		return d.nameError(err, name)
 	case existing == Replace && !there.Folder:
 		return nil
 	}
@@ -463,7 +463,7 @@ func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, d
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
 	case err != nil:
-		return Upload{}, storageError(err)
+		return Upload{}, d.nameError(err, name)
 	case existing == Replace && !there.Folder:
 		replacing = true
 	case existing == KeepBoth:
@@ -525,7 +525,7 @@ func (d *Drive) putInPlace(ctx context.Context, p index.Place, folder *index.Ite
 	case errors.Is(err, storage.ErrFull):
 		return index.Item{}, ErrFull
 	case err != nil:
-		return index.Item{}, storageError(err)
+		return index.Item{}, d.nameError(err, name)
 	}
 
 	// Size and time as the storage records them. If it cannot say right now, the file is there all the same: use what

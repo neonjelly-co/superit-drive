@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/access"
@@ -71,8 +71,7 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 	w = held
 	defer func() { leave(); s.sendHeld(r, held) }()
 	if !s.fromOwnPage(r) {
-		s.log.Warn("refused a change that did not come from the Drive's own pages",
-			"method", r.Method, "path", r.URL.Path, "origin", r.Header.Get("Origin"), "address", s.origin)
+		s.logRefusedChange(r)
 		s.refuse(w, r, http.StatusForbidden, refusedOrigin)
 		return
 	}
@@ -310,20 +309,11 @@ func (s *Server) askForCode(w http.ResponseWriter, r *http.Request, _ call) {
 		case s.codes <- codeAsk{address: address, lang: text.Of(r), place: body.Place, item: body.Item}:
 			s.asking[address] = true
 		default:
-			if aMinuteSince(&s.codesDropped) {
-				s.log.Warn("asks for a sign-in link were dropped: too many addresses are waiting", "waiting", codesWaiting)
-			}
+			s.codesDropped.Log(s.log, slog.LevelWarn, "asks for a sign-in link were dropped: too many addresses are waiting", "waiting", codesWaiting)
 		}
 	}
 	s.askingMu.Unlock()
 	writeJSON(w, http.StatusAccepted, map[string]string{"message": codeAsked.In(text.Of(r))})
-}
-
-// aMinuteSince says whether a minute has passed since it last said so for last, which it then sets to now: for a line
-// of the log that anyone can cause, written once a minute at most.
-func aMinuteSince(last *atomic.Int64) bool {
-	now, was := time.Now().Unix(), last.Load()
-	return was <= now-60 && last.CompareAndSwap(was, now)
 }
 
 // signIn signs a guest in with the code of a sign-in link mailed to their address, and keeps them signed in on this
@@ -643,18 +633,15 @@ func (s *Server) sendCode(ctx context.Context, ask codeAsk) error {
 	if err != nil {
 		return err
 	}
+	// Anyone who knows a guest's address causes these lines by asking again: each is written at most once in seldom.Each.
 	switch result {
 	case index.TooSoon:
-		if aMinuteSince(&s.codesTooSoon) {
-			s.log.Info("a sign-in link was asked for a guest who was sent one lately: none is sent, and the one sent still works",
-				"guest", g.ID, "every", drive.CodeEvery.String())
-		}
+		s.codesTooSoon.Log(s.log, slog.LevelInfo, "a sign-in link was asked for a guest who was sent one lately: none is sent, and the one sent still works",
+			"guest", g.ID, "every", drive.CodeEvery.String())
 		return nil
 	case index.TooMany:
-		if aMinuteSince(&s.codesTooMany) {
-			s.log.Warn("no sign-in link is sent now: as many were sent in the last hour as the Drive sends to all guests together",
-				"most", drive.CodesPerHourOverall)
-		}
+		s.codesTooMany.Log(s.log, slog.LevelWarn, "no sign-in link is sent now: as many were sent in the last hour as the Drive sends to all guests together",
+			"most", drive.CodesPerHourOverall)
 		return nil
 	}
 	_ = s.mail.Deliver(ctx, mail.Message{
