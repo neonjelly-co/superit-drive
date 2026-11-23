@@ -1003,9 +1003,14 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   longer share it), sharing outside the project switched off aside; and when their address appears in the member list.
   Signed out, they sign in again with a new code.
 - **A guest who joins the project** (their address appears in the member list) keeps their access as a member: within a
-  second of the list changing (and when the Drive starts), every invitation to them becomes a grant to that member by
-  user id, with its end date (the higher role, and the later end or none, where they had one already), and the guest
-  is removed. From then on it follows their user id, also when their address changes. A member who leaves never
+  second of the list changing (and when the Drive starts), every invitation to them that works at that moment becomes
+  a grant to that member by user id, with its end date, and the guest is removed. An invitation that does not work then
+  is dropped with the guest, so that nothing taken away comes back: one that has ended, one whose giver may no longer
+  share its item or has left the project, one on something in the trash, and one the new member gave their own address.
+  (One stopped only by sharing outside the project being switched off comes along.) Where the member was given
+  something on the same item already, the two are never mixed: the invitation takes that grant's place only when it is
+  no less on both counts (its role no lower, its end no earlier), and otherwise the member's grant stays as it is.
+  From then on it follows their user id, also when their address changes. A member who leaves never
   becomes a guest; their address invited again is a new guest.
 - **Labels and uses.** A file or folder a guest added (uploaded or made) is labelled with their address, for members
   (`"addedBy": {"guest": …}` in listings, "From a guest" under its name and "Added by" in the details), as a file sent

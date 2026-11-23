@@ -96,10 +96,12 @@ func (d *Drive) HasLiveInvitation(ctx context.Context, guest int64) (bool, error
 	return d.index.HasLiveInvitation(ctx, guest, d.now())
 }
 
-// AdmitMembers makes every guest whose address is in the member list a member: what was given to them as a guest is
-// given to that member, by user id, and the guest is gone (their sessions end). A member who leaves never becomes a
-// guest. It returns how many it made members.
-func (d *Drive) AdmitMembers(ctx context.Context, list *members.List) (int, error) {
+// AdmitMembers makes every guest whose address is in the member list a member: what was given to them as a guest and
+// still works is given to that member, by user id, and the guest is gone (their sessions end). working says which
+// invitations to a guest those are, as the access package judges them: the rest are dropped with the guest, so that
+// nothing that was taken away comes back. A member who leaves never becomes a guest. It returns how many it made
+// members.
+func (d *Drive) AdmitMembers(ctx context.Context, list *members.List, working func(context.Context, index.Guest) ([]index.Granted, error)) (int, error) {
 	guests, err := d.index.Guests(ctx)
 	if err != nil {
 		return 0, err
@@ -110,10 +112,15 @@ func (d *Drive) AdmitMembers(ctx context.Context, list *members.List) (int, erro
 		if !ok {
 			continue
 		}
-		if err := d.index.BecomeMember(ctx, g.ID, m.UserID); err != nil {
+		keep, err := working(ctx, g)
+		if err != nil {
+			return n, fmt.Errorf("what guest %d, joining the project as %s, was given: %w", g.ID, m.UserID, err)
+		}
+		if err := d.index.BecomeMember(ctx, g.ID, m.UserID, keep); err != nil {
 			return n, fmt.Errorf("guest %d joining the project as %s: %w", g.ID, m.UserID, err)
 		}
-		d.log.Info("a guest joined the project: what was given to them is theirs as a member now", "guest", g.ID, "member", m.UserID)
+		d.log.Info("a guest joined the project: what was given to them and still worked is theirs as a member now",
+			"guest", g.ID, "member", m.UserID, "kept", len(keep))
 		n++
 	}
 	return n, nil

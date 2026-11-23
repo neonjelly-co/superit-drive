@@ -804,6 +804,68 @@ func TestAGuestWhoJoinsTheProjectKeepsTheirAccessAsAMember(t *testing.T) {
 	}
 }
 
+// Only what still works comes along when a guest joins the project. An invitation whose giver may no longer share its
+// item, or has left the project, and one that has ended, are dropped with the guest: what was taken away does not come
+// back to the member. One stopped only by sharing outside the project being switched off comes along.
+func TestAGuestWhoJoinsTheProjectKeepsOnlyWhatStillWorked(t *testing.T) {
+	t.Parallel()
+	smtp := mailtest.Start(t, mailtest.Options{})
+	d := harness.StartWith(t, harness.Options{Members: []harness.Member{reka, bence, dora, mate}, Env: mailSettings(smtp)})
+	b := d.As(bence)
+	x := bencesFiles(t, d)
+	// Dóra, an editor of Clients, invites Anna to Bakery, and Bence takes Dóra's access away.
+	ok(t, "sharing Clients with Dóra", share(t, b, x.place, x.clients.ID, dora, "editor"))
+	invited(t, d.As(dora), x.place, x.bakery.ID, anna, "editor", nil)
+	ok(t, "taking Clients from Dóra", unshare(t, b, x.place, x.clients.ID, dora))
+	// Máté, an editor of Private, invites her to Secret.txt, and leaves the project.
+	ok(t, "sharing Private with Máté", share(t, b, x.place, x.private.ID, mate, "editor"))
+	invited(t, d.As(mate), x.place, x.secret.ID, anna, "viewer", nil)
+	// Bence invites her to Notes.txt for two hours, and to 2026 (inside Bakery) for good.
+	ends := time.Now().Add(2 * time.Hour).Truncate(time.Millisecond)
+	invited(t, b, x.place, x.notes.ID, anna, "viewer", &ends)
+	invited(t, b, x.place, x.y2026.ID, anna, "viewer", nil)
+	// Sharing outside the project is switched off: 2026 is stopped by that alone.
+	ok(t, "switching sharing outside off", switchOutside(t, d.As(reka), false))
+
+	// Four hours on, without Máté, Anna is in the member list.
+	member := harness.Member{UserID: "u-anna", Email: anna, DisplayName: "Anna Kiss", Role: "member"}
+	d.Restart(t, map[string]string{harness.TestClockShift: "4h"})
+	d.SetMembers(t, reka, bence, dora, member)
+	a := d.As(member)
+	b = d.As(bence) // at the Drive's new address
+	harness.Eventually(t, "Anna, a member, opens 2026", func() bool {
+		return a.Get(t, listPath(x.place, x.y2026.ID)).Status == http.StatusOK
+	})
+	if l := list(t, a, x.place, x.y2026.ID); l.Role != "viewer" {
+		t.Fatalf("Anna, a member, in 2026: %+v", l)
+	}
+	for what, path := range map[string]string{
+		"Bakery, whose giver lost her access":       listPath(x.place, x.bakery.ID),
+		"Secret.txt, whose giver left the project":  downloadPath(x.place, x.secret.ID),
+		"Notes.txt, given until two hours ago":      downloadPath(x.place, x.notes.ID),
+		"Clients, above everything she was given":   listPath(x.place, x.clients.ID),
+		"Private, above something she was given to": listPath(x.place, x.private.ID),
+	} {
+		if res := a.Get(t, path); res.Status != http.StatusNotFound {
+			t.Errorf("Anna, a member, at %s: got %d, want 404", what, res.Status)
+		}
+	}
+	if names := sharedNames(t, a); !slices.Equal(names, []string{entry("2026", x.place)}) {
+		t.Fatalf("Anna's Shared with me as a member: %q", names)
+	}
+	for what, item := range map[string]int64{"Bakery": x.bakery.ID, "Secret.txt": x.secret.ID, "Notes.txt": x.notes.ID} {
+		lines := accessOf(t, b, itemAccessPath(x.place, item))
+		if slices.ContainsFunc(lines, func(l accessJSON) bool { return l.UserID == "u-anna" }) || guestLine(lines, anna) != nil {
+			t.Errorf("who can see %s still names Anna: %q", what, accessLines(lines))
+		}
+	}
+	// Giving Dóra her access back brings nothing back to Anna.
+	ok(t, "sharing Clients with Dóra again", share(t, b, x.place, x.clients.ID, dora, "editor"))
+	if res := a.Get(t, listPath(x.place, x.bakery.ID)); res.Status != http.StatusNotFound {
+		t.Fatalf("Anna at Bakery once Dóra has her access back: got %d, want 404", res.Status)
+	}
+}
+
 // A guest given Bakery, deep in Bence's My files, tries to get out of it: every guest's route with every item they
 // were not given (above it, beside it, elsewhere in the place, in the trash, in another place, or none), uploads in
 // progress that are not theirs, moves out of it, renaming or deleting Bakery itself, the routes members and visitors

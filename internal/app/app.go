@@ -108,7 +108,7 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	// A guest whose address is in the member list is a member: what was given to them is theirs as a member, by user id.
 	// Now, and whenever the list changes.
 	admit := func(l *members.List) {
-		if _, err := d.AdmitMembers(ctx, l); err != nil && ctx.Err() == nil {
+		if _, err := d.AdmitMembers(ctx, l, srv.WorkingInvitations); err != nil && ctx.Err() == nil {
 			log.Error("guests who joined the project could not be made members; it is tried again when the member list changes", "error", err)
 		}
 	}

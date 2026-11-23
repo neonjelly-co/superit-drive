@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -176,6 +177,48 @@ func (s *Server) guestMayOpenAnything(ctx context.Context, g index.Guest) (bool,
 		}
 	}
 	return false, nil
+}
+
+// WorkingInvitations is every item an invitation to the guest is on that works now, each invitation judged alone, as
+// the access package judges it on the whole way down to its item, with sharing outside the project switched off left
+// aside (it works again when that is switched back on): what a guest who joins the project keeps as a member
+// (drive.AdmitMembers). One that has ended, whose giver may no longer share its item or has left the project, or whose
+// item is in the trash or gone, is not among them.
+func (s *Server) WorkingInvitations(ctx context.Context, g index.Guest) ([]index.Granted, error) {
+	granted, err := s.drive.GrantedToGuest(ctx, g.ID)
+	if err != nil {
+		return nil, err
+	}
+	who := access.Person{Guest: &access.Guest{ID: g.ID}}
+	var out []index.Granted
+	for _, at := range granted {
+		p, err := s.drive.Place(ctx, at.Place)
+		if errors.Is(err, index.ErrNoPlace) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		it, err := s.drive.Item(ctx, p, at.Item)
+		if errors.Is(err, index.ErrNoItem) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		path := idsOf(pathTo(it))
+		grants, err := s.drive.GrantsOn(ctx, p, path)
+		if err != nil {
+			return nil, err
+		}
+		// Alone: another invitation to them, on a folder above, says nothing about this one.
+		grants = slices.DeleteFunc(grants, func(o index.Grant) bool { return o.Guest == g.ID && o.Item != at.Item })
+		where := s.accessPlace(p, path, grants)
+		if access.Decide(who, access.ListAsGuest, where) || access.SwitchedOff(who, access.ListAsGuest, where) {
+			out = append(out, at)
+		}
+	}
+	return out, nil
 }
 
 // guestCookie is the name of the guests' session cookie: with the __Secure- prefix where the Drive's address is HTTPS,

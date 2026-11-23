@@ -257,7 +257,7 @@ func TestAGuestBecomesAMember(t *testing.T) {
 	if err := x.StartSession(ctx, anna.ID, code("s"), now, now.Add(time.Hour), 10); err != nil {
 		t.Fatal(err)
 	}
-	if err := x.BecomeMember(ctx, anna.ID, "u-anna"); err != nil {
+	if err := x.BecomeMember(ctx, anna.ID, "u-anna", []Granted{{bence.ID, clients.ID}, {bence.ID, notes.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := x.GuestByAddress(ctx, anna.Address); !errors.Is(err, ErrNoGuest) {
@@ -284,6 +284,80 @@ func TestAGuestBecomesAMember(t *testing.T) {
 	}
 	if got, _ := x.GrantsOn(ctx, bence.ID, []int64{clients.ID}); len(got) != 1 || !got[0].Ends.IsZero() {
 		t.Fatalf("given again: %+v", got)
+	}
+}
+
+// Only the invitations the caller says still work are carried over, never one the new member gave themselves, and
+// where the member was given something on the item already the two are never mixed: the invitation takes the grant's
+// place only when it is no less on both counts.
+func TestAGuestBecomingAMemberGetsNoMoreThanWasGiven(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	friday := now.Add(24 * time.Hour).Truncate(time.Millisecond)
+	later := friday.Add(24 * time.Hour)
+	for name, c := range map[string]struct {
+		role     string // the invitation's
+		ends     time.Time
+		had      string // what the member was given there already
+		hadEnds  time.Time
+		want     string
+		wantEnds time.Time
+	}{
+		"editor until Friday, and viewer for good":      {"editor", friday, "viewer", time.Time{}, "viewer", time.Time{}},
+		"viewer for good, and editor until Friday":      {"viewer", time.Time{}, "editor", friday, "editor", friday},
+		"editor for good, and viewer until Friday":      {"editor", time.Time{}, "viewer", friday, "editor", time.Time{}},
+		"editor until later, and editor until Friday":   {"editor", later, "editor", friday, "editor", later},
+		"viewer until Friday, and editor until later":   {"viewer", friday, "editor", later, "editor", later},
+		"viewer until later, and editor until Friday":   {"viewer", later, "editor", friday, "editor", friday},
+		"editor until Friday, and editor for good":      {"editor", friday, "editor", time.Time{}, "editor", time.Time{}},
+		"viewer until Friday, and viewer until Friday":  {"viewer", friday, "viewer", friday, "viewer", friday},
+		"editor until Friday, and viewer until Friday":  {"editor", friday, "viewer", friday, "editor", friday},
+		"editor until Friday, and nothing given before": {"editor", friday, "", time.Time{}, "editor", friday},
+	} {
+		x := open(t)
+		bence := place(t, x, "u-bence")
+		clients := put(t, x, bence, 0, "Clients", true, 0)
+		anna, _, err := x.Invite(ctx, bence.ID, clients.ID, "anna@client.example", c.role, c.ends, now, "u-bence")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.had != "" {
+			if _, err := x.Give(ctx, bence.ID, clients.ID, Grantee{Member: "u-anna"}, c.had, now, "u-bence", nil); err != nil {
+				t.Fatal(err)
+			}
+			if !c.hadEnds.IsZero() { // a member's grant has an end only from an invitation they had as a guest before
+				if _, err := x.db.ExecContext(ctx, `UPDATE grants SET ends_at = ? WHERE member = 'u-anna'`, c.hadEnds.UnixMilli()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if err := x.BecomeMember(ctx, anna.ID, "u-anna", []Granted{{bence.ID, clients.ID}}); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := x.GrantsOn(ctx, bence.ID, []int64{clients.ID})
+		if len(got) != 1 || got[0].Member != "u-anna" || got[0].Role != c.want || !got[0].Ends.Equal(c.wantEnds) {
+			t.Errorf("%s: %+v, want %s until %v", name, got, c.want, c.wantEnds)
+		}
+	}
+
+	x := open(t)
+	bence := place(t, x, "u-bence")
+	clients := put(t, x, bence, 0, "Clients", true, 0)
+	notes := put(t, x, bence, 0, "Notes.txt", false, 5)
+	own := put(t, x, bence, 0, "Own.txt", false, 5)
+	anna, _, _ := x.Invite(ctx, bence.ID, clients.ID, "anna@client.example", "editor", time.Time{}, now, "u-bence")
+	for item, by := range map[int64]string{notes.ID: "u-bence", own.ID: "u-anna"} {
+		if _, _, err := x.Invite(ctx, bence.ID, item, "anna@client.example", "viewer", time.Time{}, now, by); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Clients no longer works, the caller says; Own.txt she gave her own address herself.
+	if err := x.BecomeMember(ctx, anna.ID, "u-anna", []Granted{{bence.ID, notes.ID}, {bence.ID, own.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := x.GrantsOn(ctx, bence.ID, []int64{clients.ID, notes.ID, own.ID})
+	if len(got) != 1 || got[0].Item != notes.ID || got[0].Member != "u-anna" || got[0].Guest != 0 {
+		t.Fatalf("grants after, with one invitation that works: %+v", got)
 	}
 }
 

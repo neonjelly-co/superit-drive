@@ -144,23 +144,33 @@ func (x *Index) HasLiveInvitation(ctx context.Context, guest int64, now time.Tim
 	return n > 0, err
 }
 
-// BecomeMember gives every invitation to the guest to the member userID instead, as a grant to them by name (keeping
-// its end date, and the higher role and the later end, or none, where the member was given something there already),
-// and removes the guest, with their codes, sessions and uploads in progress: a guest who joined the project keeps their
-// access as a member, tied to their user id from then on.
-func (x *Index) BecomeMember(ctx context.Context, guest int64, userID string) error {
+// BecomeMember gives the invitations to the guest on the items of keep to the member userID instead, as grants to them
+// by name (each with its end date), and removes the guest, with every other invitation to them, their codes, sessions
+// and uploads in progress: a guest who joined the project keeps their access as a member, tied to their user id from
+// then on. Which invitations still work is the caller's to say (keep): one that does not is not carried over, or what
+// was taken from the guest would come back to the member.
+//
+// It never gives more than was given. An invitation the member gave themselves is dropped (nobody shares with
+// themselves). Where the member was given something on the item already, the invitation takes its place only when it
+// is no less on both counts (its role no lower, its end no earlier); otherwise the member's grant stays as it is: never
+// the role of one with the end of the other.
+func (x *Index) BecomeMember(ctx context.Context, guest int64, userID string, keep []Granted) error {
 	if userID == "" {
 		return errors.New("a guest becomes a member with a user id")
 	}
 	return x.write(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO grants (place_id, item_id, grantee, member, role, given_at, given_by, ends_at)
-			SELECT place_id, item_id, 'member', ?, role, given_at, given_by, ends_at FROM grants WHERE guest_id = ?
-			ON CONFLICT (place_id, IFNULL(item_id, 0), grantee, IFNULL(member, ''), IFNULL(guest_id, 0)) DO UPDATE
-			SET role = CASE WHEN excluded.role = 'editor' OR grants.role = 'editor' THEN 'editor' ELSE grants.role END,
-				ends_at = CASE WHEN grants.ends_at IS NULL OR excluded.ends_at IS NULL THEN NULL
-					ELSE MAX(grants.ends_at, excluded.ends_at) END`, userID, guest); err != nil {
-			return err
+		for _, k := range keep {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO grants (place_id, item_id, grantee, member, role, given_at, given_by, ends_at)
+				SELECT place_id, item_id, 'member', ?1, role, given_at, given_by, ends_at FROM grants
+				WHERE guest_id = ?2 AND place_id = ?3 AND item_id = ?4 AND IFNULL(given_by, '') <> ?1
+				ON CONFLICT (place_id, IFNULL(item_id, 0), grantee, IFNULL(member, ''), IFNULL(guest_id, 0)) DO UPDATE
+				SET role = excluded.role, ends_at = excluded.ends_at, given_at = excluded.given_at, given_by = excluded.given_by
+				WHERE (excluded.role = 'editor' OR grants.role = 'viewer')
+					AND (excluded.ends_at IS NULL OR (grants.ends_at IS NOT NULL AND excluded.ends_at >= grants.ends_at))`,
+				userID, guest, k.Place, k.Item); err != nil {
+				return err
+			}
 		}
 		_, err := tx.ExecContext(ctx, "DELETE FROM guests WHERE id = ?", guest)
 		return err
