@@ -26,8 +26,9 @@ type Link struct {
 	// Uses is how often it was used, and Used when it last was (zero before its first use), as written so far.
 	Uses int64
 	Used time.Time
-	// TakenIn is, for an upload-only link, how many bytes of files it has taken in since it was made or last reset.
-	TakenIn int64
+	// TakenIn is, for an upload-only link, how many bytes of files it has taken in since it was made or last reset, and
+	// TakenFiles how many files.
+	TakenIn, TakenFiles int64
 }
 
 // The kinds of link: a view link lets visitors see and download what it is on; an upload-only link, on a folder only,
@@ -49,13 +50,13 @@ var ErrLinkKind = errors.New("a link of this kind cannot be on this item")
 
 // linkColumns are read by scanLink, in this order. Every query of links joins the item it is on, for its place.
 const linkColumns = "links.id, links.item_id, items.place_id, items.is_folder, links.kind, links.made_at, links.made_by, links.uses, " +
-	"links.used_at, links.taken_in"
+	"links.used_at, links.taken_in, links.taken_files"
 
 func scanLink(row interface{ Scan(...any) error }, more ...any) (Link, error) {
 	var l Link
 	var made int64
 	var used sql.NullInt64
-	err := row.Scan(append([]any{&l.ID, &l.Item, &l.Place, &l.Folder, &l.Kind, &made, &l.MadeBy, &l.Uses, &used, &l.TakenIn}, more...)...)
+	err := row.Scan(append([]any{&l.ID, &l.Item, &l.Place, &l.Folder, &l.Kind, &made, &l.MadeBy, &l.Uses, &used, &l.TakenIn, &l.TakenFiles}, more...)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Link{}, ErrNoLink
 	}
@@ -192,7 +193,7 @@ func (x *Index) ResetLink(ctx context.Context, placeID, itemID int64) (Link, err
 		if _, err := item(ctx, tx, placeID, itemID); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, "UPDATE links SET taken_in = 0 WHERE item_id = ?", itemID)
+		_, err := tx.ExecContext(ctx, "UPDATE links SET taken_in = 0, taken_files = 0 WHERE item_id = ?", itemID)
 		return err
 	})
 	if err != nil {
@@ -207,14 +208,14 @@ func (x *Index) LinkByID(ctx context.Context, id int64) (Link, error) {
 		FROM links JOIN items ON items.id = links.item_id WHERE links.id = ?`, id))
 }
 
-// TakenIn adds n bytes to what the link with id has taken in. A link removed meanwhile is left out. It is not an access
-// change: the trigger that counts those leaves taken_in out.
+// TakenIn adds one file of n bytes to what the link with id has taken in: an empty file is a file too. A link removed
+// meanwhile is left out. It is not an access change: the trigger that counts those leaves both counts out.
 func (x *Index) TakenIn(ctx context.Context, id, n int64) error {
-	if n <= 0 {
+	if n < 0 {
 		return nil
 	}
 	return x.write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "UPDATE links SET taken_in = taken_in + ? WHERE id = ?", n, id)
+		_, err := tx.ExecContext(ctx, "UPDATE links SET taken_in = taken_in + ?, taken_files = taken_files + 1 WHERE id = ?", n, id)
 		return err
 	})
 }

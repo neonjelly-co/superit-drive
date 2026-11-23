@@ -72,3 +72,12 @@ func StopAt(point string) {
 		os.Exit(3)
 	}
 }
+
+// LinkFiles is how many files an upload-only link takes in, set by SUPERIT_DRIVE_TEST_LINK_FILES; ok is false without it.
+func LinkFiles() (files int64, ok bool) {
+	n, err := strconv.ParseInt(os.Getenv("SUPERIT_DRIVE_TEST_LINK_FILES"), 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}

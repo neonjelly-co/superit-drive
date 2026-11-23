@@ -1237,3 +1237,36 @@ func TestALinksKind(t *testing.T) {
 		t.Fatalf("taken in through a link removed meanwhile: %v", err)
 	}
 }
+
+// What a link took in is counted in bytes and in files, an empty file too, and both start again at a reset; a folder's
+// entries are counted up to a limit, without what is in the trash.
+func TestALinksFilesAndAFoldersEntriesAreCounted(t *testing.T) {
+	ctx := context.Background()
+	x := open(t)
+	now := time.Now()
+	bence := place(t, x, "u-bence")
+	clients := put(t, x, bence, 0, "Clients", true, 0)
+	l, err := x.MakeLink(ctx, bence.ID, clients.ID, make([]byte, 32), UploadLink, "u-bence", now, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int64{0, 5, 0} {
+		if err := x.TakenIn(ctx, l.ID, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := x.LinkByID(ctx, l.ID); got.TakenFiles != 3 || got.TakenIn != 5 {
+		t.Fatalf("after three files, two of them empty: %+v", got)
+	}
+	if got, err := x.ResetLink(ctx, bence.ID, clients.ID); err != nil || got.TakenFiles != 0 || got.TakenIn != 0 {
+		t.Fatalf("after a reset: %+v %v", got, err)
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		put(t, x, bence, clients.ID, name, false, 1)
+	}
+	for limit, want := range map[int]int{10: 3, 2: 2} {
+		if n, err := x.EntriesIn(ctx, bence.ID, clients.ID, limit); err != nil || n != want {
+			t.Fatalf("entries in Clients, counted up to %d: %d %v, want %d", limit, n, err, want)
+		}
+	}
+}

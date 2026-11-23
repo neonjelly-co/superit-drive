@@ -85,6 +85,9 @@ type Options struct {
 	// LinkLimit is how much an upload-only link takes in, in bytes, until it is reset: DefaultLinkLimit when 0. Only a
 	// test build sets another (clock.LinkLimit).
 	LinkLimit int64
+	// LinkFiles is how many files an upload-only link takes in until it is reset: DefaultLinkFiles when 0. Only a test
+	// build sets another (clock.LinkFiles).
+	LinkFiles int64
 }
 
 // Drive is one Drive: its index and its storage.
@@ -133,6 +136,7 @@ type Drive struct {
 	// linkLimit is how much an upload-only link takes in until it is reset; intake keeps what is on its way through each
 	// (sendin.go).
 	linkLimit int64
+	linkFiles int64
 	intake    intake
 }
 
@@ -154,7 +158,10 @@ func (d *Drive) Now() time.Time { return d.now() }
 
 // New makes a Drive.
 func New(x *index.Index, s *storage.Client, o Options) *Drive {
-	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}, stopAt: o.StopAt, linkLimit: o.LinkLimit}
+	d := &Drive{index: x, storage: s, now: o.Now, log: o.Log, writing: map[string]bool{}, stopAt: o.StopAt, linkLimit: o.LinkLimit, linkFiles: o.LinkFiles}
+	if d.linkFiles <= 0 {
+		d.linkFiles = DefaultLinkFiles
+	}
 	if d.linkLimit <= 0 {
 		d.linkLimit = DefaultLinkLimit
 	}

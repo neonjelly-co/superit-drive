@@ -190,6 +190,16 @@ func (x *Index) NameUsed(ctx context.Context, placeID, folderID int64, name stri
 	return n > 0, err
 }
 
+// EntriesIn is how many items the index holds directly in a folder of a place (folderID 0: its top folder), those
+// missing from the storage included, those in the trash not: counted up to limit.
+func (x *Index) EntriesIn(ctx context.Context, placeID, folderID int64, limit int) (int, error) {
+	var n int
+	err := x.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (
+		SELECT 1 FROM items WHERE place_id = ? AND IFNULL(parent_id, 0) = ? AND trashed_at IS NULL LIMIT ?)`,
+		placeID, folderID, limit).Scan(&n)
+	return n, err
+}
+
 // RenameAct gives a hand-over under way another folder name in the receiver's top folder: the one it had was taken on
 // the storage before the files moved there.
 func (x *Index) RenameAct(ctx context.Context, id int64, toName string) error {

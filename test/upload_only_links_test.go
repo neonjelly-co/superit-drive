@@ -677,6 +677,52 @@ func TestAnUploadOnlyLinkStopsAtItsLimitUntilItIsReset(t *testing.T) {
 	}
 }
 
+// An upload-only link stops after a number of files too (a thousand; here three), and an empty file is one of them:
+// bytes alone would let empty files in without end. Its member sees how many it took; a reset lets it take files again.
+func TestAnUploadOnlyLinkStopsAfterANumberOfFiles(t *testing.T) {
+	t.Parallel()
+	d := harness.StartWith(t, harness.Options{Members: []harness.Member{bence}, Env: map[string]string{"SUPERIT_DRIVE_TEST_LINK_FILES": "3"}})
+	b, v := d.As(bence), visitor(d)
+	x := bencesFiles(t, d)
+	link, page := madeUploadOnly(t, d, b, x.place, x.clients.ID, false)
+	if link.Files == nil || *link.Files != 0 || link.FilesLimit == nil || *link.FilesLimit != 3 {
+		t.Fatalf("the link's files and their limit: %+v", link)
+	}
+	sentThrough(t, v, page, "a.bin", nil)
+	sentThrough(t, v, page, "b.bin", nil)
+	if got := linkOn(t, b, x.place, x.clients.ID); *got.Files != 2 || *got.TakenIn != 0 || got.Full {
+		t.Fatalf("the link after two empty files: %+v", got)
+	}
+	// One that is refused (its name) or cut off is not counted.
+	if res := sendThrough(t, v, page, "..", nil); res.Status != http.StatusBadRequest {
+		t.Fatalf("a file called ..: got %d", res.Status)
+	}
+	sentThrough(t, v, page, "c.bin", []byte("c"))
+	if got := linkOn(t, b, x.place, x.clients.ID); *got.Files != 3 || *got.TakenIn != 1 || !got.Full {
+		t.Fatalf("the link after three files: %+v", got)
+	}
+	refusedAsTooLarge(t, "a fourth file, empty", sendThrough(t, v, page, "d.bin", nil), true)
+	refusedAsTooLarge(t, "a fourth file", sendThrough(t, v, page, "e.bin", []byte("e")), true)
+	if p := readSendPage(t, v, page); !p.full || p.drop || p.scripts != 0 {
+		t.Fatalf("the page of the link that took all its files: %+v", p)
+	}
+	if got := clientsOnStorage(t, d); !slices.Equal(got, []string{"Bakery/", "Price list.pdf", "a.bin", "b.bin", "c.bin"}) {
+		t.Fatalf("Clients on the storage: %q", got)
+	}
+
+	reset := changedLink(t, "resetting the link", resetLink(t, b, x.place, x.clients.ID))
+	if *reset.Files != 0 || *reset.TakenIn != 0 || reset.Full {
+		t.Fatalf("the link after a reset: %+v", reset)
+	}
+	if p := readSendPage(t, v, page); p.full || !p.drop {
+		t.Fatalf("the page after a reset: %+v", p)
+	}
+	sentThrough(t, v, page, "d.bin", nil)
+	if got := linkOn(t, b, x.place, x.clients.ID); *got.Files != 1 || got.Full {
+		t.Fatalf("the link after one more file: %+v", got)
+	}
+}
+
 // Files racing through an upload-only link at once never take it past its limit, whatever they say about themselves:
 // each file's length counts from before its first byte is read; one cut off keeps nothing and gives its room back; one
 // that sends more than it said is kept as long as it said; one that does not say is refused; one that says more than

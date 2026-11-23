@@ -301,6 +301,9 @@ export type PublicLink = {
 	kind: LinkKind;
 	takenIn?: number;
 	limit?: number;
+	/** How many files it has taken in since it was made or reset, and the most it takes. */
+	files?: number;
+	filesLimit?: number;
 	full?: boolean;
 	made: string;
 	madeBy?: Person;

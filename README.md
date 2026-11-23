@@ -810,7 +810,7 @@ view link, in the list's sentence) that anyone with the link can.
 ```
 GET    /api/places/{place}/items/{item}/link     200 {"link": {"kind": "view" | "upload-only", "made", "madeBy",
                                                  "former", "uses", "used", "works", and for an upload-only link
-                                                 "takenIn", "limit", "full"} | null}
+                                                 "takenIn", "limit", "files", "filesLimit", "full"} | null}
 POST   /api/places/{place}/items/{item}/link     {"replace": true, "kind": "view" | "upload-only"} (all may be left out:
                                                  a view link, not in place of one)
        201 {"link": {…, "address": "https://files.example.com/s/<token>"}}    the only answer with the address
@@ -940,15 +940,19 @@ POST   /s/{token}/files?name=<its name>[&turn=<word>]    Content-Length: <its si
   answered as the link now answers (404); sharing outside the project switched off meanwhile: 403. Its folder moved into
   another place meanwhile: 409, nothing kept (sent again, it goes there).
 
-**10 GB, then a reset.** An upload-only link takes in at most 10 GB (10^9 bytes each, as storage is sold) until whoever
-may share its folder resets it (`POST …/link/reset`, "Make room for more" in its details); what it took stays in the
+**10 GB or a thousand files, then a reset.** An upload-only link takes in at most 10 GB (10^9 bytes each, as storage
+is sold) and at most 1,000 files, an empty file counting as one (bytes alone would let empty files in without end),
+until whoever may share its folder resets it (`POST …/link/reset`, "Make room for more" in its details); what it took stays in the
 folder. Each file's `Content-Length` is held against the limit from before its first byte is read, under one lock for
 all links, so files on their way at once never pass it together, whatever they say about themselves: one that would is
 refused at once (413), one cut off gives its room back, and what is kept is counted only once it is in its folder. A
-full link refuses every file, an empty one too, and its page says so. Changing its kind keeps the count; making a new
-link in its place, or removing it, ends it. The count (`links.taken_in`) is not an access change (no copy of the index
-is made for it); copies carry it as it was when they were made. A test build reads `SUPERIT_DRIVE_TEST_LINK_LIMIT` for a
-smaller limit.
+full link (in bytes or in files) refuses every file, an empty one too, and its page says so; its member sees both
+counts in its details. Changing its kind keeps the counts; making a new link in its place, or removing it, ends them.
+A folder that already holds 10,000 entries, as many as the Drive keeps in step with the storage and puts in a zip,
+takes no file through a link, however often the link is reset (413, as a full link). The counts (`links.taken_in`,
+`links.taken_files`) are not an access change (no copy of the index is made for them); copies carry them as they were
+when they were made. A test build reads `SUPERIT_DRIVE_TEST_LINK_LIMIT` and `SUPERIT_DRIVE_TEST_LINK_FILES` for smaller
+limits.
 
 **Labelled.** A file sent through a link carries `"addedBy": {"link": true}` in members' listings, search and "Shared
 with me" (as a guest's carries `{"guest": <their address>}`), and the interface shows "Through a link" under its name
@@ -958,7 +962,7 @@ takes the label off. Guests never see labels.
 **What strangers can use up.** A file sent is a transfer in the outsiders' line (8 slots at most, shared with view
 links' downloads and guests): members' 24 are never theirs. A file not let through is answered 503 before any of it is
 read, and its turn keeps its place; at most 64 outsiders' turns are kept at once, so new turns sent as fast as a
-stranger likes cost a fixed amount of memory. Each link takes in at most 10 GB until it is reset. A stranger who sends a
+stranger likes cost a fixed amount of memory. Each link takes in at most 10 GB and 1,000 files until it is reset. A stranger who sends a
 file slowly holds one of the 8 slots, and the room their file says it needs, for as long as bytes keep coming (a
 transfer is ended only after two minutes without any); members are not slowed by it, and whoever may share the folder
 can remove the link. Measured in the [memory test](#large-transfers-and-the-memory-figure).
@@ -1722,8 +1726,8 @@ starts again; and `SUPERIT_DRIVE_TEST_WALK_EVERY` and `SUPERIT_DRIVE_TEST_WALK_P
 walk through the storage start that soon, run that often and rest that long after each folder; and
 `SUPERIT_DRIVE_TEST_COPY_QUIET`, `SUPERIT_DRIVE_TEST_COPY_LATEST` and `SUPERIT_DRIVE_TEST_COPY_RETRY` (Go durations) make
 the copy of the index follow access changes that soon (see [The copy of the index](#the-copy-of-the-index)); and
-`SUPERIT_DRIVE_TEST_LINK_LIMIT` (bytes) is how much an upload-only link takes in before it is full, so a test need not
-send 10 GB (see [Upload-only links](#upload-only-links)). A Drive
+`SUPERIT_DRIVE_TEST_LINK_LIMIT` (bytes) and `SUPERIT_DRIVE_TEST_LINK_FILES` (files) are how much an upload-only link
+takes in before it is full, so a test need not send 10 GB or a thousand files (see [Upload-only links](#upload-only-links)). A Drive
 built without the tag reads no such variable. Tests change the storage directly with the harness's own WebDAV client
 (`Drive.Storage`), including a `MOVE` that keeps a file's time (a storage that answered wrong for a while), `Fill`,
 which puts thousands of files straight onto the stand-in storage's disk, and `Snapshot` and `RollBack`, which copy the

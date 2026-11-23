@@ -278,6 +278,7 @@ export const hu: Messages = {
 		takenIn: "Beküldve",
 		takenInLabel: "A linken beküldött mennyiség",
 		takenInOf: (taken, limit) => `${limit} keretből ${taken}`,
+		filesOf: (n, limit) => `${limit} fájlból ${n}`,
 		nothingYet: "még semmi",
 		full: "Nem fogad több fájlt, amíg nem engeded, hogy fogadjon még. Amit eddig küldtek rajta, a mappában marad.",
 		notWorking:
@@ -299,7 +300,8 @@ export const hu: Messages = {
 			"Ekkor mindenki, akinek megvan a cím, megnyithat és letölthet mindent ebben a mappában, azt is, amit mások küldtek rajta keresztül. A cím ugyanaz marad.",
 		showConfirm: "Láthatják",
 		resetTitle: "Fogadjon még fájlokat a link?",
-		resetNote: (limit) => `Mostantól újra fogad fájlokat, legfeljebb ennyit: ${limit}. Az eddig beküldött fájlok a helyükön maradnak.`,
+		resetNote: (limit, files) =>
+			`Mostantól újra fogad fájlokat, összesen legfeljebb ennyit: ${limit}, legfeljebb ${files} fájlban. Az eddig beküldött fájlok a helyükön maradnak.`,
 		resetConfirm: "Fogadjon még",
 	},
 	move: {

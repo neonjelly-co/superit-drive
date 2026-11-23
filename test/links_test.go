@@ -32,9 +32,11 @@ type linkJSON struct {
 	Works   bool        `json:"works"`
 	Address string      `json:"address"`
 	// An upload-only link's: what it took in, its limit, and whether it is full.
-	TakenIn *int64 `json:"takenIn"`
-	Limit   *int64 `json:"limit"`
-	Full    bool   `json:"full"`
+	TakenIn    *int64 `json:"takenIn"`
+	Limit      *int64 `json:"limit"`
+	Files      *int64 `json:"files"`
+	FilesLimit *int64 `json:"filesLimit"`
+	Full       bool   `json:"full"`
 }
 
 func linkPath(placeID, itemID int64) string {

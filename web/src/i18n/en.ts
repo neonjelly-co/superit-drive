@@ -273,6 +273,7 @@ export const en = {
 		takenIn: "Taken in",
 		takenInLabel: "Taken in through the link",
 		takenInOf: (taken: string, limit: string) => `${taken} of ${limit}`,
+		filesOf: (n: number, limit: number) => `${n} of ${limit} file${s(limit)}`,
 		nothingYet: "Nothing yet",
 		full: "It takes no more files until you make room. What was sent through it stays in the folder.",
 		notWorking:
@@ -294,7 +295,8 @@ export const en = {
 			"Everyone who has the address can then open and download everything in this folder, including what others sent through it. The address stays the same.",
 		showConfirm: "Let them see it",
 		resetTitle: "Make room for more files?",
-		resetNote: (limit: string) => `It takes in up to ${limit} again, counted from now. The files it took in stay where they are.`,
+		resetNote: (limit: string, files: number) =>
+			`It takes in up to ${limit}, in at most ${files} file${s(files)}, again, counted from now. The files it took in stay where they are.`,
 		resetConfirm: "Make room",
 	},
 	move: {
