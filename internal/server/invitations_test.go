@@ -46,3 +46,24 @@ func TestMailsAreCountedPerPersonWithinAWhile(t *testing.T) {
 		t.Fatalf("%d people are kept hours after their last mail, want only the one who just caused one", len(c.sent))
 	}
 }
+
+// A guest's address names a mail domain, never a machine by its number: a mail server that takes those would deliver
+// to whichever machine a member picked.
+func TestAGuestsAddressIsNeverAMachinesNumber(t *testing.T) {
+	for address, want := range map[string]bool{
+		"anna@client.example":           true,
+		" Anna@Client.Example ":         true,
+		"x@[10.0.0.5]":                  false,
+		"x@[IPv6:::1]":                  false,
+		"x@[::ffff:10.0.0.5]":           false,
+		"x@10.0.0.5":                    false,
+		"x@localhost":                   false,
+		"x@client.example.":             false,
+		"a b@client.example":            false,
+		"anna\r\nBcc: x@client.example": false,
+	} {
+		if _, ok := guestAddress(address); ok != want {
+			t.Errorf("%q as a guest's address: %v, want %v", address, ok, want)
+		}
+	}
+}

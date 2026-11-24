@@ -95,15 +95,22 @@ func (x *Index) Invite(ctx context.Context, placeID, itemID int64, address, role
 	return guest, added && err == nil, err
 }
 
-// ChangeInvitation gives the invitation to guest on a live item of the place a new role and end date (zero: none).
-// Whoever gave it stays its giver. ErrNoItem when there is no such invitation there.
-func (x *Index) ChangeInvitation(ctx context.Context, placeID, itemID, guest int64, role string, ends time.Time) error {
+// ChangeInvitation gives the invitation to guest on a live item of the place a new role and end date (zero: none), by
+// the member by. When either changes, by becomes its giver, as when an invitation is given again (Invite): in a My
+// files an invitation counts only while its giver may still share, so what one person made of another's invitation
+// never outlasts their own access under the other's name. ErrNoItem when there is no such invitation there.
+func (x *Index) ChangeInvitation(ctx context.Context, placeID, itemID, guest int64, role string, ends time.Time, by string) error {
+	if by == "" {
+		return errors.New("an invitation is changed by a member")
+	}
 	return x.write(ctx, func(tx *sql.Tx) error {
 		if _, err := item(ctx, tx, placeID, itemID); err != nil {
 			return err
 		}
-		res, err := tx.ExecContext(ctx, `UPDATE grants SET role = ?, ends_at = ? WHERE place_id = ? AND item_id = ? AND guest_id = ?`,
-			role, unixMilli(ends), placeID, itemID, guest)
+		res, err := tx.ExecContext(ctx, `
+			UPDATE grants SET given_by = CASE WHEN role != ?1 OR ends_at IS NOT ?2 THEN ?3 ELSE given_by END, role = ?1, ends_at = ?2
+			WHERE place_id = ?4 AND item_id = ?5 AND guest_id = ?6`,
+			role, unixMilli(ends), by, placeID, itemID, guest)
 		if err != nil {
 			return err
 		}

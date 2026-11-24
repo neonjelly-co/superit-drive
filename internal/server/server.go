@@ -96,6 +96,8 @@ type Server struct {
 	refusedChanges, codesDropped, codesTooSoon, codesTooMany *seldom.Line
 	// invitationMails counts the invitations each member had mailed lately (invitations.go).
 	invitationMails *mailCount
+	// sharedMails counts the "shared with you" mails each member's shares caused lately (tellShared).
+	sharedMails *mailCount
 	// inviting lets one invitation or removal of one be worked on at a time (invitations.go).
 	inviting sync.Mutex
 }
@@ -113,7 +115,8 @@ func New(c Config) *Server {
 		codes:    make(chan codeAsk, codesWaiting), asking: map[string]bool{},
 		refusedChanges: seldom.Every(seldom.Each), codesDropped: seldom.Every(seldom.Each),
 		codesTooSoon: seldom.Every(seldom.Each), codesTooMany: seldom.Every(seldom.Each),
-		invitationMails: newMailCount(invitationMailsPerHour, time.Hour)}
+		invitationMails: newMailCount(invitationMailsPerHour, time.Hour),
+		sharedMails:     newMailCount(sharedMailsPerHour, time.Hour)}
 	if c.Address != nil {
 		s.origin = originOf(c.Address)
 	}

@@ -27,12 +27,14 @@ import (
 	"net"
 	netmail "net/mail"
 	"net/smtp"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	"github.com/neonjelly-co/superit-drive/internal/seldom"
 	"github.com/neonjelly-co/superit-drive/internal/settings"
 	"github.com/neonjelly-co/superit-drive/internal/text"
 )
@@ -67,6 +69,8 @@ type Mailer struct {
 	timeout time.Duration
 	// health is whether the mail server works, as the Drive last found out.
 	health health
+	// dropped is the log's line for a mail not queued because too many wait: members can cause any number of them.
+	dropped *seldom.Line
 }
 
 // health is whether the mail server worked, the last time the Drive sent through it or checked it.
@@ -120,7 +124,7 @@ func New(s settings.Mail, hello string, log *slog.Logger) *Mailer {
 	case ip != nil:
 		hello = "[IPv6:" + ip.String() + "]"
 	}
-	m := &Mailer{s: s, hello: hello, log: log, timeout: Timeout}
+	m := &Mailer{s: s, hello: hello, log: log, timeout: Timeout, dropped: seldom.Every(seldom.Each)}
 	if s.Host != "" {
 		m.queue = make(chan Message, QueueSize)
 	}
@@ -146,7 +150,7 @@ func (m *Mailer) Send(msg Message) {
 	select {
 	case m.queue <- msg:
 	default:
-		m.log.Warn("a mail was not sent: too many are waiting to be sent", msg.About...)
+		m.dropped.Log(m.log, slog.LevelWarn, "a mail was not sent: too many are waiting to be sent", msg.About...)
 	}
 }
 
@@ -266,6 +270,11 @@ func (m *Mailer) deliver(ctx context.Context, msg Message) error {
 			return failed(whyRefused, fmt.Errorf("the mail server refused the sender: %w", err))
 		}
 		if err := c.Rcpt(to); err != nil {
+			// A mail server's refusal usually quotes the address, and no address is ever logged: only its number is kept.
+			var refused *textproto.Error
+			if errors.As(err, &refused) {
+				return fmt.Errorf("the mail server refused the recipient (%d)", refused.Code)
+			}
 			return fmt.Errorf("the mail server refused the recipient: %w", err)
 		}
 		w, err := c.Data()
