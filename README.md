@@ -40,6 +40,9 @@ proxy set up to add the user id, instead of replacing what the browser sent, wou
 
 The person must also be in the member list file (`DRIVE_MEMBERS_FILE`), which the Drive reads and never writes. It
 re-reads the file within a second of it changing; replace it by writing a new file and renaming it over the old one.
+A version it cannot read (not JSON, a role it does not know, one address twice, the file gone) is refused whole, and
+the list before it stays: until a version reads again, nobody removed since loses their access. The log says so
+(`level=ERROR`, `the member list could not be re-read`) when it starts, and again every ten minutes while it lasts.
 The list is the authority for each member's email address, name and role. (Superit's gateway also sends
 `Remote-Email`, `Remote-Name` and `Remote-Role`; the Drive does not need them.)
 
@@ -99,14 +102,14 @@ a test keeps the two equal.)
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `DRIVE_STORAGE_URL` | yes | Address of the WebDAV server that holds the files (http or https). |
+| `DRIVE_STORAGE_URL` | yes | Address of the WebDAV server that holds the files (http or https). Over http the login and every file travel unencrypted: the Drive warns as it starts, unless the host is this computer or a name without a dot (another container beside it). |
 | `DRIVE_STORAGE_USER` | yes | Login name for the WebDAV server. |
 | `DRIVE_STORAGE_PASSWORD` | yes | Password for the WebDAV server. |
 | `DRIVE_STORAGE_FOLDER` | no, `/` | Folder on the WebDAV server that the Drive keeps everything in. Made if missing. |
 | `DRIVE_CAPACITY` | no | Size of the storage, in bytes or with a unit (`500GB`, `1TB`, `1TiB`). Empty when not known. |
 | `DRIVE_ADDRESS` | yes | The Drive's own address as people reach it, such as `https://files.example.com`. Changes are accepted only from pages at this address, and a public link's address starts with it. |
 | `DRIVE_PROJECT_NAME` | yes | Name of the project (the organisation) the Drive belongs to. |
-| `DRIVE_HEADER_SECRET` | yes | Secret the reverse proxy adds as `Drive-Secret`. At least 32 characters, and your own (`openssl rand -hex 32`): whoever knows it and reaches the Drive's port is whoever they say they are. The Drive does not start with the secret the worked example once came with, and warns loudly when it runs with the repository's development secret. The key that keeps guests' codes (see [Guests](#guests)) is made from it, so changing it ends the codes on their way (not the sessions). |
+| `DRIVE_HEADER_SECRET` | yes | Secret the reverse proxy adds as `Drive-Secret`. At least 32 characters, and your own (`openssl rand -hex 32`): whoever knows it and reaches the Drive's port is whoever they say they are. The Drive does not start with the secret the worked example once came with. It takes the repository's development secret only when `DRIVE_LISTEN` is on this computer alone (such as `127.0.0.1:8080`), and warns loudly when it runs with it. The key that keeps guests' codes (see [Guests](#guests)) is made from it, so changing it ends the codes on their way (not the sessions). |
 | `DRIVE_MEMBERS_FILE` | yes | Path of the member list file. |
 | `DRIVE_DATA_DIR` | yes | Folder for the index, and its copy in `backup/` (see [Backing up the Drive](#backing-up-the-drive)). The container image sets it to `/data`. |
 | `DRIVE_LISTEN` | no, `:8080` | Address the web server listens on. |
@@ -149,7 +152,8 @@ Shared folders/
     index/
         1a5ff6fe…73/                        the copies of the index whose storage id this is (the mark's)
             copy-000000000042.sqlite        the latest copy of the index (see "The copy of the index")
-            refused-…, newer-version-…      copies the Drive set aside, and keeps (see "Starting from a copy")
+            refused-…, newer-version-…,     copies the Drive set aside, and keeps (see "Starting from a copy")
+            higher-numbered-…
     storage-id                              the Drive's mark: the id of the storage, which the index keeps too
 ```
 
@@ -504,6 +508,12 @@ brought; guests sign in again with a new link.
   which copies are still to be moved, as `newer_copies`); a move the storage refuses is tried again after the next copy,
   and the newer copy stays where it is meanwhile. One whose number is past any a copy reaches (2⁵², by its name) is not
   left alone: the Drive does not start.
+- A copy numbered after the Drive's own, which the index does not know of, is never removed. It is there when the Drive
+  once started with no index while it could not see its mark on the storage (a wrong `DRIVE_STORAGE_FOLDER`, a disk not
+  mounted yet): it built an empty index, and took the mark when the storage came back. When its first copy is on the
+  storage, it moves the higher-numbered one aside, to `higher-numbered-<when>-<its name>`, keeps it, and says so loudly
+  (`level=ERROR`, `THE STORAGE HELD A COPY OF THE INDEX NUMBERED AFTER THIS DRIVE'S OWN`). To get its shares, links and
+  guests back: stop the Drive, give the copy back its name, and start the Drive with an empty data folder.
 - **A damaged copy**, or **one of another storage's index**: not adopted. It is moved aside on the storage, to
   `refused-<when>-<its name>` (or beside the data folder's copy, as `index.sqlite.refused-<when>`), and kept; the Drive
   builds its index from the files, and the log says so loudly (`level=ERROR`, in capitals). One larger than 4 GiB (no
@@ -952,7 +962,9 @@ line. A zip is bounded as for members (10,000 entries).
 #### Upload-only links
 
 A folder's link can be upload-only: anyone with its address sends files into that folder, and sees nothing of what is in
-it, not even the names, nor what anyone else sent; nothing they send replaces anything. It is for collecting files from
+it, not even the names, nor what anyone else sent; nothing they send replaces anything. (One thing does show: how much
+room the link has left, since a file larger than that is refused before it is read; and so, to someone who keeps
+asking, how large the files that arrive through it are.) It is for collecting files from
 people outside the project (a client's documents, a supplier's invoices), without a guest's sign-in. It counts where a
 view link would (its folder live, its place open, sharing outside the project on there; in a My files while its maker
 may still share the folder) and lets its visitors do two things only, at its own folder (`access.EnterThroughLink`,
@@ -981,7 +993,8 @@ in `Content-Length`, is the shape a member's upload in one request already has, 
 
 ```
 POST   /s/{token}/files?name=<its name>[&turn=<word>]    Content-Length: <its size>, and its bytes as the body
-       201 {"size": n}                         taken: the same answer whatever was in the folder
+       201 {"size": n}                         taken: the same answer whatever was in the folder (a name taken
+                                               up to " (999)" gets a few random letters in its place)
        400 {"error"}                           a name the Drive does not store, or the file stopped before its end
        411 {"error"}                           no Content-Length (sent in chunks)
        413 {"error", "full": true | false}     it would take the link past its limit (full: it has reached it)
@@ -1133,7 +1146,9 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   invitation away and inviting it again mails it each time. So a member has 30 invitations mailed within any hour; the
   next is refused (429, with `Retry-After`), says so, and makes no invitation. Changing an invitation that is there,
   taking one away and sharing with a member's address are not counted. The count is kept in memory: a restart forgets
-  it, and the hour starts again.
+  it, and the hour starts again. ("Shared with you" mail to members has a count of its own: one member's shares mail
+  at most 60 times within any hour; past that the share is made all the same, and no mail goes.) An address whose part
+  after the `@` is a machine's number, such as `x@[10.0.0.5]`, is not an address a guest can have.
 - **Their transfers** take turns with visitors': outsiders hold at most 8 of the 32 slots, in a line of their own. A
   download or zip of theirs that waited is decided again when its turn comes, a zip as it goes on, and an upload in one
   request once its file is whole (see [Large transfers](#large-transfers-and-the-memory-figure)): an invitation taken
@@ -1756,7 +1771,11 @@ What happens on each request:
    to the sign-in page at `auth.example.localhost`, which sets a session cookie for `example.localhost` and sends the
    browser back.
 2. If so, Authelia names the person by their username, and Caddy passes the request to the Drive with that username
-   as `Remote-User-Id` and the secret from `.env` as `Drive-Secret`, replacing any the browser sent.
+   as `Remote-User-Id` and the secret from `.env` as `Drive-Secret`. What the browser itself sent under those names is
+   removed first (`request_header -Remote-User-Id`, inside a `route` block, which keeps the order written), before
+   Authelia is asked: `copy_headers` alone replaces the user
+   id only when Authelia names someone, so a rule that lets a request through without sign-in (`policy: bypass`) would
+   pass a browser's own `Remote-User-Id` on, with the secret added. Keep those lines in a proxy set-up of your own.
 3. The Drive finds the user id in `members/members.json`, so each Authelia username is a member's `userId` there.
    The list gives their email address, name and role.
 

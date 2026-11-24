@@ -83,9 +83,18 @@ func TestRefusesThePublishedExampleSecret(t *testing.T) {
 	if _, err := FromEnv(func(k string) string { return env[k] }); err == nil || !strings.Contains(err.Error(), "DRIVE_HEADER_SECRET is the example's") {
 		t.Fatalf("the example's secret: %v", err)
 	}
+	// The development secret, as public as the example's, is taken only where nobody else reaches the port.
 	env["DRIVE_HEADER_SECRET"] = DevelopmentSecret
-	if _, err := FromEnv(func(k string) string { return env[k] }); err != nil {
-		t.Fatalf("the development secret: %v", err)
+	for listen, taken := range map[string]bool{"127.0.0.1:8080": true, "localhost:8080": true, "[::1]:8080": true,
+		":8080": false, "0.0.0.0:8080": false, "192.168.1.5:8080": false, "": false} {
+		env["DRIVE_LISTEN"] = listen
+		_, err := FromEnv(func(k string) string { return env[k] })
+		if taken && err != nil {
+			t.Errorf("the development secret, listening on %q: %v", listen, err)
+		}
+		if !taken && (err == nil || !strings.Contains(err.Error(), "development secret")) {
+			t.Errorf("the development secret, listening on %q: %v, want it refused", listen, err)
+		}
 	}
 }
 

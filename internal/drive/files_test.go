@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
+	"github.com/neonjelly-co/superit-drive/internal/members"
 )
 
 // Names in the index come from storage listings, which a misbehaving WebDAV server could fill with anything, and from
@@ -247,5 +248,32 @@ func TestNothingIsWrittenIntoASharedFolderOnItsWayToTheTrash(t *testing.T) {
 	defer cancel()
 	if _, err := d.wholePlace(short, other.ID); err == nil {
 		t.Fatal("the shared folder was held alone while a change inside it was under way")
+	}
+}
+
+// A member's top folder is named after their address, or their user id, as the member list has them: whatever it says,
+// the name is one the Drive takes for any folder, and its path stays inside "My files".
+func TestAMembersTopFolderIsAlwaysAPlainName(t *testing.T) {
+	for _, m := range []members.Member{
+		{UserID: "u-reka", Email: "Reka@Example.com"},
+		{UserID: "../.superit-drive", Email: "."},
+		{UserID: "..", Email: ".."},
+		{UserID: "a/b", Email: "x\x00y@example.com"},
+		{UserID: "u\nid", Email: strings.Repeat("a", 300) + "@example.com"},
+		{UserID: strings.Repeat("u", 300), Email: ".."},
+	} {
+		name := folderName(m)
+		if err := CheckName(name); err != nil {
+			t.Errorf("the folder of %q (%q) is %q: %v", m.UserID, m.Email, name, err)
+		}
+		if p, ok := pathIn(MyFilesFolder, name); !ok || !strings.HasPrefix(p, MyFilesFolder+"/") || strings.Count(p, "/") != 1 {
+			t.Errorf("the folder of %q (%q) is at %q", m.UserID, m.Email, p)
+		}
+	}
+	if got := folderName(members.Member{UserID: "u-reka", Email: " Reka@Example.com "}); got != "reka@example.com" {
+		t.Errorf("Réka's folder: %q", got)
+	}
+	if got := folderName(members.Member{UserID: "../.superit-drive", Email: "."}); got != ".._.superit-drive" {
+		t.Errorf("the folder of a user id with a slash: %q", got)
 	}
 }

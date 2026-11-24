@@ -38,10 +38,11 @@ package drive
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
-	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -317,7 +318,11 @@ func (d *Drive) MyFiles(ctx context.Context, m members.Member) (index.Place, err
 	if err == nil || !errors.Is(err, index.ErrNoPlace) {
 		return p, err
 	}
-	folder, err := d.freeFolder(ctx, path.Join(MyFilesFolder, folderName(m)))
+	want, ok := pathIn(MyFilesFolder, folderName(m))
+	if !ok {
+		return index.Place{}, fmt.Errorf("no folder name for member %q", m.UserID)
+	}
+	folder, err := d.freeFolder(ctx, want)
 	if err != nil {
 		return index.Place{}, err
 	}
@@ -347,13 +352,19 @@ func (d *Drive) freeFolder(ctx context.Context, want string) (string, error) {
 }
 
 // folderName is the name of a member's top folder: their email address in lower case, made safe as one folder name.
+// An address that cannot be a name (CheckName) gives way to the user id, made safe the same way; and a user id that
+// cannot either, to letters and digits made from it. Whatever the member list says, the name is one the Drive takes
+// for any folder: it never reaches outside "My files", and a copy of the index that holds it is not refused.
 func folderName(m members.Member) string {
-	name := strings.ToLower(strings.TrimSpace(m.Email))
-	name = strings.NewReplacer("/", "_", "\\", "_").Replace(name)
-	if name == "" || name == "." || name == ".." || len(name) > 255 {
-		return m.UserID
+	safe := strings.NewReplacer("/", "_", "\\", "_")
+	if name := safe.Replace(strings.ToLower(strings.TrimSpace(m.Email))); CheckName(name) == nil {
+		return name
 	}
-	return name
+	if name := safe.Replace(strings.TrimSpace(m.UserID)); CheckName(name) == nil {
+		return name
+	}
+	sum := sha256.Sum256([]byte(m.UserID))
+	return "member-" + hex.EncodeToString(sum[:16])
 }
 
 // pathIn is the storage path reached from top (a place's top folder, or its folder in the trash) through names, one
