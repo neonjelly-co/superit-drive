@@ -166,7 +166,9 @@ func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item, by str
 	}
 	defer leave()
 	release, ok := d.claim(from)
-	if !ok || (it.Folder && d.busyInside(from)) {
+	// A folder above it that is itself being renamed or moved: what is at this path is on its way elsewhere, and a
+	// change sent to it now would find nothing there and take the item for gone.
+	if !ok || (it.Folder && d.busyInside(from)) || d.busyAt(path.Dir(from)) {
 		if ok {
 			release()
 		}

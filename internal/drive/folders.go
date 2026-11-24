@@ -3,6 +3,7 @@ package drive
 import (
 	"context"
 	"errors"
+	"path"
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/storage"
@@ -182,7 +183,9 @@ func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item
 	}
 	defer leave()
 	release, ok := d.claim(src, dest)
-	if !ok || (it.Folder && d.busyInside(src)) {
+	// A folder above it that is itself being renamed or moved: what is at this path is on its way elsewhere, and a
+	// change sent to it now would find nothing there and take the item for gone.
+	if !ok || (it.Folder && d.busyInside(src)) || d.busyAt(path.Dir(src)) {
 		if ok {
 			release()
 		}
@@ -271,7 +274,9 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 	}
 	defer leave()
 	release, ok := d.claim(from, dest)
-	if !ok || (it.Folder && d.busyInside(from)) {
+	// A folder above it that is itself being renamed or moved: what is at this path is on its way elsewhere, and a
+	// change sent to it now would find nothing there and take the item for gone.
+	if !ok || (it.Folder && d.busyInside(from)) || d.busyAt(path.Dir(from)) {
 		if ok {
 			release()
 		}
