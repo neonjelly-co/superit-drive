@@ -1,5 +1,5 @@
 # A worked example: Superit Drive on one server, behind Caddy (the reverse proxy) and Authelia (the sign-in), with a
-# member list file. The README of this repository walks through it, under "Running it yourself".
+# member list file. docs/operations.md in this repository walks through it, under "A worked example".
 #
 #   cp example.env .env        then set DRIVE_VERSION in .env
 #   docker compose up -d

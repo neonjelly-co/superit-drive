@@ -268,30 +268,30 @@ func TestTheStorageSettingsAloneAreEnoughToCheckAServer(t *testing.T) {
 	}
 }
 
-// The README's settings table is the settings reference for people running the Drive themselves: it lists every
+// The settings table in docs/settings.md is the settings reference for people running the Drive themselves: it lists every
 // variable, and nothing else.
-func TestTheREADMEListsEverySetting(t *testing.T) {
-	readme, err := os.ReadFile("../../README.md")
+func TestTheSettingsTableListsEverySetting(t *testing.T) {
+	table, err := os.ReadFile("../../docs/settings.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	row := regexp.MustCompile("(?m)^\\| `([A-Z_]+)` \\| (yes|no)")
 	documented := map[string]bool{}
-	for _, m := range row.FindAllStringSubmatch(string(readme), -1) {
+	for _, m := range row.FindAllStringSubmatch(string(table), -1) {
 		documented[m[1]] = m[2] == "yes"
 	}
 	for _, v := range Variables {
 		required, ok := documented[v.Name]
 		switch {
 		case !ok:
-			t.Errorf("the README's settings table does not list %s", v.Name)
+			t.Errorf("the settings table in docs/settings.md does not list %s", v.Name)
 		case required != v.Required:
-			t.Errorf("the README's settings table says %s is required: %v, want %v", v.Name, required, v.Required)
+			t.Errorf("the settings table in docs/settings.md says %s is required: %v, want %v", v.Name, required, v.Required)
 		}
 		delete(documented, v.Name)
 	}
 	for name := range documented {
-		t.Errorf("the README's settings table lists %s, which the Drive does not read", name)
+		t.Errorf("the settings table in docs/settings.md lists %s, which the Drive does not read", name)
 	}
 }
 

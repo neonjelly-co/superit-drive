@@ -1,5 +1,5 @@
 # One image holding one static binary, the interface compiled into it. It starts with only environment variables and
-# a member list file (see the README for both).
+# a member list file (see docs/settings.md and docs/signing-in.md).
 #
 #   docker build -t superit-drive:dev .
 #

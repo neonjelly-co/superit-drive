@@ -3,7 +3,7 @@
 //	superit-drive                 run the Drive
 //	superit-drive check-storage   check whether the WebDAV server in the storage settings can hold the Drive's files
 //
-// Every setting comes from environment variables; see internal/settings or the README.
+// Every setting comes from environment variables; see internal/settings or docs/settings.md.
 package main
 
 import (
@@ -22,7 +22,7 @@ import (
 var version = "dev"
 
 const usage = `Usage:
-  superit-drive                 Run the Drive. Every setting is an environment variable (see the README).
+  superit-drive                 Run the Drive. Every setting is an environment variable (see docs/settings.md).
   superit-drive check-storage   Check whether the WebDAV server in DRIVE_STORAGE_URL, DRIVE_STORAGE_USER,
                                 DRIVE_STORAGE_PASSWORD and DRIVE_STORAGE_FOLDER can hold the Drive's files.
                                 Exits 0 when it can, 1 when a step failed, 2 when a setting is missing.`

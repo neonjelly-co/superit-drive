@@ -20,7 +20,7 @@ import (
 )
 
 // Adopting a copy of the index. A Drive whose data folder holds no index (a new server, or the server's data restored
-// from a backup that holds only the copy, as the README asks a backup to hold) makes it from a copy, before it opens it:
+// from a backup that holds only the copy, as docs/storage.md asks a backup to hold) makes it from a copy, before it opens it:
 //
 //   - the data folder's own copy (index.BackupFile), when a backup of the data folder was put back: it is the whole
 //     index as it was, guests' sessions included;

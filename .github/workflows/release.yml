@@ -2,7 +2,7 @@
 # (linux/amd64) and arm64 (linux/arm64) and publishes it as ghcr.io/neonjelly-co/superit-drive:1.2.3. Nothing else is
 # published: no `latest` or other moving tag. A version the registry already has is refused, never replaced.
 #
-# What has to be set up on GitHub first is in the README, under "Releases".
+# What has to be set up on GitHub first is in docs/development.md, under "Releases".
 name: Release
 
 on:

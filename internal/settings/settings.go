@@ -1,7 +1,7 @@
 // Package settings reads every setting of the Drive from environment variables. There is no settings page and no
 // settings file: whoever runs the Drive (Superit's daemon, or a self-hoster) hands everything over at start.
 //
-// Every variable is listed in Variables, which the README's settings table mirrors. Add a new setting there first.
+// Every variable is listed in Variables, which the settings table in docs/settings.md mirrors. Add a new setting there first.
 package settings
 
 import (
@@ -105,7 +105,7 @@ type Variable struct {
 	Meaning  string
 }
 
-// Variables lists every environment variable, in the order the README documents them.
+// Variables lists every environment variable, in the order docs/settings.md documents them.
 var Variables = []Variable{
 	{Name: "DRIVE_STORAGE_URL", Required: true, Meaning: "Address of the WebDAV server that holds the files (http or https)."},
 	{Name: "DRIVE_STORAGE_USER", Required: true, Meaning: "Login name for the WebDAV server."},
