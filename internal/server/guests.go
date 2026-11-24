@@ -127,9 +127,16 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 func (s *Server) guestSession(r *http.Request) (guest *index.Guest, stale bool, err error) {
 	// Sent twice, there is no telling which the Drive set. Over HTTPS the cookie's name lets no other name set one
 	// (guestCookie); over plain HTTP a page on another name under the same domain can give a browser a second one, for
-	// a narrower path, which comes first, and put a guest into a session of its own choosing. Nobody is signed in then.
-	if len(r.CookiesNamed(s.guestCookie())) > 1 {
-		return nil, false, nil
+	// a narrower path, which comes first, and put a guest into a session of its own choosing. Nobody is signed in then,
+	// and every session the request names is ended (the one given to the browser from outside too) and the Drive's own
+	// cookie taken back, as signing out would: a request for that never gets as far as signing out, being nobody's.
+	if doubled := r.CookiesNamed(s.guestCookie()); len(doubled) > 1 {
+		for _, ck := range doubled {
+			if err := s.drive.SignOut(r.Context(), ck.Value); err != nil {
+				return nil, false, err
+			}
+		}
+		return nil, true, nil
 	}
 	ck, err := r.Cookie(s.guestCookie())
 	if err != nil {
@@ -382,7 +389,7 @@ func (s *Server) signIn(w http.ResponseWriter, r *http.Request, _ call) {
 //
 //	POST /s/guest/api/sign-out   204
 func (s *Server) signOut(w http.ResponseWriter, r *http.Request, _ call) {
-	for _, ck := range r.CookiesNamed(s.guestCookie()) { // every session named, should there be two
+	if ck, err := r.Cookie(s.guestCookie()); err == nil { // one cookie: with two, guestSession has ended both already
 		if err := s.drive.SignOut(r.Context(), ck.Value); err != nil {
 			s.fail(w, r, err)
 			return
@@ -583,7 +590,10 @@ func (s *Server) guestMove(w http.ResponseWriter, r *http.Request, c call) {
 		s.refuse(w, r, http.StatusNotFound, noSuchDestination) // the same answer as for a folder that is not there
 		return
 	}
-	it, err := s.drive.Move(r.Context(), *c.place, *c.item, &folder)
+	var it index.Item
+	if !s.apart(w, r, c, func() { it, err = s.drive.Move(r.Context(), *c.place, *c.item, &folder) }) {
+		return
+	}
 	var taken *drive.Taken
 	switch {
 	case err == nil:
@@ -602,7 +612,11 @@ func (s *Server) guestMove(w http.ResponseWriter, r *http.Request, c call) {
 //	DELETE /s/guest/api/places/{place}/items/{item}   204
 func (s *Server) guestDelete(w http.ResponseWriter, r *http.Request, c call) {
 	// Who deleted it is not recorded as a member: only whoever sees the place's whole trash restores it.
-	if _, err := s.drive.Delete(r.Context(), *c.place, *c.item, ""); err != nil {
+	var err error
+	if !s.apart(w, r, c, func() { _, err = s.drive.Delete(r.Context(), *c.place, *c.item, "") }) {
+		return
+	}
+	if err != nil {
 		s.changeFailed(w, r, err, c.item.Name)
 		return
 	}

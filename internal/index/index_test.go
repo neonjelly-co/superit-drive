@@ -1285,7 +1285,7 @@ func TestALinksKind(t *testing.T) {
 	if _, err := x.MakeLink(ctx, p.ID, file.ID, hash(2), ViewLink, "u1", now, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := x.SetLinkKind(ctx, p.ID, file.ID, UploadLink, "u-dora"); !errors.Is(err, ErrLinkKind) {
+	if _, err := x.SetLinkKind(ctx, p.ID, file.ID, UploadLink, "u-dora", false); !errors.Is(err, ErrLinkKind) {
 		t.Errorf("a file's link made upload-only: %v", err)
 	}
 	if l, _ := x.LinkOn(ctx, file.ID); l.Kind != ViewLink {
@@ -1302,7 +1302,7 @@ func TestALinksKind(t *testing.T) {
 	if err := x.AddUses(ctx, map[int64]Use{up.ID: {Count: 2, Last: now}}); err != nil {
 		t.Fatal(err)
 	}
-	view, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-dora")
+	view, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-dora", false)
 	if err != nil || view.ID != up.ID || view.Kind != ViewLink || view.TakenIn != 700 || view.Uses != 2 {
 		t.Fatalf("the link made a view link: %+v %v", view, err)
 	}
@@ -1310,25 +1310,32 @@ func TestALinksKind(t *testing.T) {
 	if view.MadeBy != "u-dora" {
 		t.Fatalf("the maker of the link Dóra made a view link: %q", view.MadeBy)
 	}
-	if same, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-reka"); err != nil || same.MadeBy != "u-dora" {
+	if same, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-reka", false); err != nil || same.MadeBy != "u-dora" {
 		t.Fatalf("the link given the kind it has, by Réka: %+v %v", same, err)
+	}
+	// Taken over, it is theirs at the kind it has; and Dóra's again when she takes it back.
+	if taken, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-reka", true); err != nil || taken.MadeBy != "u-reka" || taken.Kind != ViewLink {
+		t.Fatalf("the link taken over by Réka: %+v %v", taken, err)
+	}
+	if taken, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-dora", true); err != nil || taken.MadeBy != "u-dora" {
+		t.Fatalf("the link taken back by Dóra: %+v %v", taken, err)
 	}
 	if l, _, err := x.LinkByToken(ctx, hash(3)); err != nil || l.ID != up.ID {
 		t.Fatalf("the link's address after its kind changed: %+v %v", l, err)
 	}
-	back, err := x.SetLinkKind(ctx, p.ID, folder.ID, UploadLink, "u-dora")
+	back, err := x.SetLinkKind(ctx, p.ID, folder.ID, UploadLink, "u-dora", false)
 	if err != nil || back.Kind != UploadLink {
 		t.Fatalf("the link made upload-only again: %+v %v", back, err)
 	}
-	reset, err := x.ResetLink(ctx, p.ID, folder.ID)
+	reset, err := x.ResetLink(ctx, p.ID, folder.ID, "u-dora")
 	if err != nil || reset.TakenIn != 0 || reset.Uses != 2 {
 		t.Fatalf("the link reset: %+v %v", reset, err)
 	}
 	other := put(t, x, p, 0, "Bakery", true, 0)
-	if _, err := x.SetLinkKind(ctx, p.ID, other.ID, ViewLink, "u-dora"); !errors.Is(err, ErrNoLink) {
+	if _, err := x.SetLinkKind(ctx, p.ID, other.ID, ViewLink, "u-dora", false); !errors.Is(err, ErrNoLink) {
 		t.Errorf("the kind of a link a folder does not have: %v", err)
 	}
-	if _, err := x.ResetLink(ctx, p.ID, other.ID); !errors.Is(err, ErrNoLink) {
+	if _, err := x.ResetLink(ctx, p.ID, other.ID, "u-dora"); !errors.Is(err, ErrNoLink) {
 		t.Errorf("resetting a link a folder does not have: %v", err)
 	}
 	// Taken in through a link removed meanwhile: nothing, and no error.
@@ -1360,7 +1367,7 @@ func TestALinksFilesAndAFoldersEntriesAreCounted(t *testing.T) {
 	if got, _ := x.LinkByID(ctx, l.ID); got.TakenFiles != 3 || got.TakenIn != 5 {
 		t.Fatalf("after three files, two of them empty: %+v", got)
 	}
-	if got, err := x.ResetLink(ctx, bence.ID, clients.ID); err != nil || got.TakenFiles != 0 || got.TakenIn != 0 {
+	if got, err := x.ResetLink(ctx, bence.ID, clients.ID, "u-dora"); err != nil || got.TakenFiles != 0 || got.TakenIn != 0 {
 		t.Fatalf("after a reset: %+v %v", got, err)
 	}
 	for _, name := range []string{"a", "b", "c"} {

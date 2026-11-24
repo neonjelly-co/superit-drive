@@ -186,6 +186,13 @@ func (c *Client) each(ctx context.Context, dir string, limit int64, each func(En
 	return nil
 }
 
+// maxPieceBytes is how much of a listing one entry takes at most: many times what any server sends for one (see
+// maxEntryBytes), and little enough to keep whole.
+const maxPieceBytes = 256 << 10
+
+// errPieceTooLong stops reading a listing one entry of which is longer than any entry is.
+var errPieceTooLong = errors.New("one entry of the listing is longer than any entry is")
+
 // errListingTooLong stops reading a listing longer than its limit.
 var errListingTooLong = errors.New("the listing is longer than the Drive reads")
 
@@ -218,9 +225,14 @@ func (c *Client) propfind(ctx context.Context, target *url.URL, depth string, li
 	if limit >= 0 {
 		in = &limitedListing{r: res.Body, left: limit}
 	}
-	dec := xml.NewDecoder(in)
+	// Whatever the whole listing may take, one piece of it (one entry, or whatever stands between two) is read only so
+	// far: the decoder keeps a piece whole in memory, and a server that sent one of a gigabyte would have the Drive
+	// keep it, several times over.
+	piece := &limitedListing{r: in, left: maxPieceBytes, why: errPieceTooLong}
+	dec := xml.NewDecoder(piece)
 	multistatus := false
 	for {
+		piece.left = maxPieceBytes
 		tok, err := dec.Token()
 		if err == io.EOF {
 			break
@@ -240,6 +252,7 @@ func (c *Client) propfind(ctx context.Context, target *url.URL, depth string, li
 			multistatus = true
 		case "response":
 			var r response
+			piece.left = maxPieceBytes
 			if err := dec.DecodeElement(&r, &start); err != nil {
 				if errors.Is(err, errListingTooLong) {
 					return nil, fmt.Errorf("%w: %w", ErrTooMany, err)
@@ -262,10 +275,15 @@ func (c *Client) propfind(ctx context.Context, target *url.URL, depth string, li
 type limitedListing struct {
 	r    io.Reader
 	left int64
+	// why is the error when nothing is left: errListingTooLong when nil.
+	why error
 }
 
 func (l *limitedListing) Read(p []byte) (int, error) {
 	if l.left <= 0 {
+		if l.why != nil {
+			return 0, l.why
+		}
 		return 0, errListingTooLong
 	}
 	if int64(len(p)) > l.left {
@@ -876,8 +894,8 @@ func (r response) entry(name string) (Entry, bool) {
 		if ps.Prop.ResourceType.Collection != nil {
 			e.Folder = true
 		}
-		if n, err := strconv.ParseInt(strings.TrimSpace(ps.Prop.ContentLength), 10, 64); err == nil {
-			e.Size = n
+		if n, err := strconv.ParseInt(strings.TrimSpace(ps.Prop.ContentLength), 10, 64); err == nil && n >= 0 {
+			e.Size = n // a length below zero is no length: it would be kept, and taken off what the Drive holds
 		}
 		if t, err := http.ParseTime(strings.TrimSpace(ps.Prop.LastModified)); err == nil {
 			e.Changed = t.UTC()

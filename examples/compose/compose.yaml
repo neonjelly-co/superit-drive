@@ -36,6 +36,9 @@ services:
   drive:
     image: ghcr.io/neonjelly-co/superit-drive:${DRIVE_VERSION:?set DRIVE_VERSION in .env}
     restart: unless-stopped
+    # Time to stop in: the Drive ends what is under way, then writes how often links were used and a last copy of its
+    # index. Docker's own ten seconds can be over before that.
+    stop_grace_period: 40s
     # No ports: only Caddy reaches the Drive, over the network compose makes for this example.
     environment:
       DRIVE_ADDRESS: https://drive.example.localhost

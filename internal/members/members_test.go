@@ -171,3 +171,20 @@ func TestABrokenVersionStaysAProblemUntilItChanges(t *testing.T) {
 		t.Fatalf("a version that reads again: %v", err)
 	}
 }
+
+// A display name is shown to people outside the project too: it is kept as one line, without the characters that
+// turn the direction of text, and no longer than a name is.
+func TestADisplayNameIsOneLineOfPlainText(t *testing.T) {
+	l, err := Parse([]byte(`{"members":[
+		{"userId":"u1","email":"a@example.com","role":"member","displayName":"Anna‮ gnp.exe\r\nBcc: x"},
+		{"userId":"u2","email":"b@example.com","role":"member","displayName":"` + strings.Repeat("n", 500) + `"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := l.Lookup("u1"); m.DisplayName != "Anna gnp.exe Bcc: x" {
+		t.Errorf("a name with a direction override and a line break: %q", m.DisplayName)
+	}
+	if m, _ := l.Lookup("u2"); len([]rune(m.DisplayName)) != MaxDisplayName {
+		t.Errorf("a name of 500 characters is kept as %d", len([]rune(m.DisplayName)))
+	}
+}

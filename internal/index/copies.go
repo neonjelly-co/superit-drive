@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -432,6 +433,16 @@ func CheckCopy(ctx context.Context, file string, topFolder func(kind PlaceKind, 
 		}
 	}
 
+	// Its rows must be ones the schema allows. SQLite reads a table's CHECK constraints only into a connection that may
+	// write, so the integrity check above, read-only, never tried them: a role, a kind of link or a guest's address the
+	// Drive could never have written passed. Now that the schema is known to be the Drive's own (nothing in it runs),
+	// the check is made once more on a connection that could write, and is told not to.
+	if problems, err := rowsAllowed(ctx, file); err != nil {
+		return damaged("%v", err)
+	} else if problems != "" {
+		return damaged("a row the Drive's schema does not allow: %s", problems)
+	}
+
 	// Every place's top folder, and every act's, is where the Drive puts them.
 	folders := "SELECT kind, folder FROM places"
 	if version >= 10 { // held_acts came with migration 0010
@@ -540,4 +551,41 @@ func freshSchema(ctx context.Context, version int) ([]string, error) {
 		return nil, fmt.Errorf("making the schema of version %d to compare a copy with: %w", version, err)
 	}
 	return schemaOf(ctx, conn)
+}
+
+// rowsAllowed runs SQLite's integrity check on the copy at file with its CHECK constraints in force, and returns what
+// it found ("" for nothing). The connection may write and is told not to (query_only); files SQLite makes beside a
+// copy to open it that way are removed again.
+func rowsAllowed(ctx context.Context, file string) (problems string, err error) {
+	for _, beside := range []string{file + "-wal", file + "-shm", file + "-journal"} {
+		if _, err := os.Stat(beside); errors.Is(err, fs.ErrNotExist) {
+			defer os.Remove(beside)
+		}
+	}
+	pragmas := url.Values{}
+	pragmas.Add("_pragma", "busy_timeout(5000)")
+	pragmas.Add("_pragma", fmt.Sprintf("cache_size(-%d)", copyCacheKiB/2))
+	pragmas.Add("_pragma", "query_only(ON)")
+	db, err := sql.Open("sqlite", "file:"+file+"?"+pragmas.Encode())
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	rows, err := db.QueryContext(ctx, "PRAGMA integrity_check(3)")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var found []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			return "", err
+		}
+		if line != "ok" {
+			found = append(found, line)
+		}
+	}
+	return strings.Join(found, "; "), rows.Err()
 }

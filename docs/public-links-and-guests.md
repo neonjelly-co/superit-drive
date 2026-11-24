@@ -34,9 +34,13 @@ view link, in the list's sentence) that anyone with the link can.
   also after their maker left the project. In a My files a link is its maker's share: it works only while they may still
   share the item there. It stops when that is taken away from them (or they leave the project), and works again if it is
   given back; a held My files (its owner left) opens nothing. Whoever may share the item sees in its details whether the
-  link works now. Whoever changes a link's kind becomes its maker: an upload-only link that someone else turned into one
-  that shows the folder is theirs, and stops with their access, not with the access of whoever made it first. (An
-  invitation changed by someone else becomes theirs the same way.)
+  link works now. Whoever changes a link's kind, or resets what an upload-only link has taken in, becomes its maker: an
+  upload-only link that someone else turned into one that shows the folder is theirs, and stops with their access, not
+  with the access of whoever made it first. (An invitation changed by someone else becomes theirs the same way.) Whoever
+  may share the item makes a link theirs at the kind it has with `"takeOver": true`: so an owner takes back, at the
+  address it has, a link that someone else made theirs. A link that has stopped is never taken: only its maker changes
+  or resets it (409 for anyone else), because made another's it would work again at the address its maker knows, who was
+  to be kept out. A new link in its place (`"replace": true`) has a new address.
 - **Sharing outside the project switched off** (for the whole project, or for the link's shared folder: see [Sharing
   outside the project switched off](sharing.md#sharing-outside-the-project-switched-off)): no link opens there and none can be
   made, but links can still be seen and removed, and work again, at the same address, when it is switched back on. A
@@ -59,10 +63,13 @@ POST   /api/places/{place}/items/{item}/link     {"replace": true, "kind": "view
        201 {"link": {…, "address": "https://files.example.com/s/<token>"}}    the only answer with the address
        400 {"error"}                             an upload-only link on a file, or a kind there is not
        409 {"error", "exists": true}             it has a link, and replacing it was not asked for
-PUT    /api/places/{place}/items/{item}/link     {"kind": "view" | "upload-only"}    the same link, at the same address
-       200 {"link": {…}}    400 an upload-only link on a file, or a kind there is not    409 it has no link
-POST   /api/places/{place}/items/{item}/link/reset    an upload-only link counts what it takes in from 0 again
-       200 {"link": {…}}    409 it has no link
+PUT    /api/places/{place}/items/{item}/link     {"kind": "view" | "upload-only", "takeOver": true}    the same link, at
+       the same address; whoever asks becomes its maker when the kind changes, or with takeOver (which may be left out)
+       200 {"link": {…}}    400 an upload-only link on a file, or a kind there is not    409 it has no link, or it has
+       stopped and is someone else's
+POST   /api/places/{place}/items/{item}/link/reset    an upload-only link counts what it takes in from 0 again, and is
+       its resetter's
+       200 {"link": {…}}    409 it has no link, or it has stopped and is someone else's
 DELETE /api/places/{place}/items/{item}/link     204 (also when it has none)
 ```
 
@@ -140,7 +147,15 @@ line. A zip is bounded as for members (10,000 entries).
   place, on the name, and for an upload on its transfer slot, after the person has gone: for as long as the storage's
   own time limits, 30 seconds for most steps, ten minutes for moving a whole upload into its folder (a storage that
   copies where a Storage Box renames), some twenty minutes at the very worst. Nobody can make the storage slow; while
-  it is, outsiders' uploads can keep their 8 slots that long, and members' 24 are their own.
+  it is, outsiders' uploads can keep their 8 slots that long, and members' 24 are their own. A guest's change, and a
+  guest's listing that waits for a look at the storage, give their turn back for it and take one of 8 places of their
+  own: against a slow storage they keep one another waiting (503), never a guest's sign-in or an ordinary listing.
+- **A move the storage did not answer is looked at, and nothing is removed on a guess.** When the connection breaks
+  or the time runs out, the Drive looks at both ends: the item where it was going and no longer where it was is a move
+  made, and is recorded. Left unsettled, the change fails and both ends stay as they are: the folder made in the trash
+  for a delete is not removed, since it may hold the item, now or a moment later (an empty one goes with the trash
+  after 30 days). What the index must record after a move is tried again while the index is busy, and when it still
+  cannot be written the move is undone on the storage, so the two agree.
 
 ### Upload-only links
 
@@ -240,7 +255,7 @@ can remove the link. Measured in the [memory test](operations.md#large-transfers
 A member who may share a file or folder (as for a [public link](#public-links): `access.InviteGuest`) types an email
 address in its "Give access". An address in the member list (compared as below) is that member's: it is shared with
 them as with any member, and the answer says so (`"member"`). Any other address invites a **guest**, as viewer or editor,
-with an end date if the member gives one (none by default), and the answer says so (`"guest"`, and `"invited"` for a
+with an end date if the member gives one (none by default; not past the year 2999, 400), and the answer says so (`"guest"`, and `"invited"` for a
 new invitation). The guest is mailed an invitation: who invited them, to what (never a folder above it), what they may
 do, until when, and a link to it on the guests' page, `DRIVE_ADDRESS/s/guest/?place=…&item=…#as=<their address>` (the
 address after `#` is never sent to a server; the page offers it to confirm). A guest never gets an account and never

@@ -3,6 +3,7 @@ package drive
 import (
 	"context"
 	"errors"
+	"path"
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
 	"github.com/neonjelly-co/superit-drive/internal/storage"
@@ -52,6 +53,9 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 		return index.Item{}, err
 	}
 
+	// From here on, whoever asked hanging up changes nothing (as in putInPlace): a folder the storage made and the index
+	// never heard of would be taken for one put there directly, without the label of the guest who made it.
+	ctx = context.WithoutCancel(ctx)
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
 	err = d.storage.CreateFolder(sctx, made)
 	cancel()
@@ -66,7 +70,11 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 		return index.Item{}, d.nameError(err, name)
 	}
 	d.changed(folderKey{p.ID, folderID(in)})
-	it, err := d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()}, d.now(), by.added())
+	var it index.Item
+	err = d.recorded(func() (err error) {
+		it, err = d.index.PutItem(ctx, p.ID, folderID(in), index.Seen{Name: name, Folder: true, Changed: d.now().UTC()}, d.now(), by.added())
+		return err
+	})
 	if errors.Is(err, index.ErrNoFolder) {
 		return index.Item{}, ErrGone // its folder moved away, or went, meanwhile; a listing finds the new one there
 	}
@@ -175,7 +183,9 @@ func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item
 	}
 	defer leave()
 	release, ok := d.claim(src, dest)
-	if !ok || (it.Folder && d.busyInside(src)) {
+	// A folder above it that is itself being renamed or moved: what is at this path is on its way elsewhere, and a
+	// change sent to it now would find nothing there and take the item for gone.
+	if !ok || (it.Folder && d.busyInside(src)) || d.busyAt(path.Dir(src)) {
 		if ok {
 			release()
 		}
@@ -218,7 +228,11 @@ func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item
 	}
 	// A listing of the item itself under its old place, under way, is out of date too.
 	d.changed(folderKey{from.ID, it.ParentID}, folderKey{to.ID, folderID(into)}, folderKey{from.ID, it.ID})
-	moved, err := d.index.MoveToPlace(ctx, from.ID, it.ID, to.ID, folderID(into), it.Name, left)
+	var moved index.Item
+	err = d.recorded(func() (err error) {
+		moved, err = d.index.MoveToPlace(ctx, from.ID, it.ID, to.ID, folderID(into), it.Name, left)
+		return err
+	})
 	switch {
 	case errors.Is(err, index.ErrUploading):
 		// An upload started between the look above and now: put the item back where it was, so the two agree.
@@ -228,6 +242,9 @@ func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item
 		// The folder it went into moved away, or went, meanwhile.
 		d.putBack(ctx, it.Folder, src, dest)
 		return index.Item{}, ErrGone
+	case err != nil:
+		d.putBack(ctx, it.Folder, src, dest) // the index did not take the move: put it back, so the two agree
+		return index.Item{}, err
 	}
 	if err == nil && len(left.Links)+len(left.Invitations) > 0 {
 		d.log.Info("public links and invitations that no longer worked were not taken along with what was moved to a shared folder",
@@ -257,7 +274,9 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 	}
 	defer leave()
 	release, ok := d.claim(from, dest)
-	if !ok || (it.Folder && d.busyInside(from)) {
+	// A folder above it that is itself being renamed or moved: what is at this path is on its way elsewhere, and a
+	// change sent to it now would find nothing there and take the item for gone.
+	if !ok || (it.Folder && d.busyInside(from)) || d.busyAt(path.Dir(from)) {
 		if ok {
 			release()
 		}
@@ -294,11 +313,18 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 		return index.Item{}, d.nameError(err, name)
 	}
 	d.changed(folderKey{p.ID, it.ParentID}, folderKey{p.ID, folderID(to)})
-	moved, err := d.index.Relocate(ctx, p.ID, it.ID, folderID(to), name)
+	var moved index.Item
+	err = d.recorded(func() (err error) {
+		moved, err = d.index.Relocate(ctx, p.ID, it.ID, folderID(to), name)
+		return err
+	})
 	if errors.Is(err, index.ErrNoFolder) {
 		// The folder it went into moved to another place, or went, meanwhile: put it back, so the two agree.
 		d.putBack(ctx, it.Folder, from, dest)
 		return index.Item{}, ErrGone
+	}
+	if err != nil {
+		d.putBack(ctx, it.Folder, from, dest) // the index did not take the move: put it back, so the two agree
 	}
 	return moved, err
 }

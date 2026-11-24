@@ -581,7 +581,11 @@ func (d *Drive) putInPlace(ctx context.Context, p index.Place, folder *index.Ite
 	}
 	cancel()
 	d.changed(folderKey{p.ID, folderID(folder)})
-	it, err := d.index.PutItem(ctx, p.ID, folderID(folder), seen, d.now(), by.added())
+	var it index.Item
+	err = d.recorded(func() (err error) {
+		it, err = d.index.PutItem(ctx, p.ID, folderID(folder), seen, d.now(), by.added())
+		return err
+	})
 	if errors.Is(err, index.ErrNoFolder) {
 		// Its folder moved to another place, or went, after the upload was decided on it; the file is where the folder
 		// was, and a look at it finds it there.

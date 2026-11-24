@@ -79,6 +79,9 @@ type Server struct {
 	// visitors bounds how many visitors' requests are worked on at once (visitors.go); guests how many guests' (and
 	// requests to sign in as one).
 	visitors, guests *admission
+	// guestWork bounds how many guests' requests are at the storage at once, with their turns given back (apart): a
+	// change, or a listing that waits for a look.
+	guestWork *admission
 	// heldGoing is how many bytes of long answers kept for visitors and guests wait to be taken (answers.go).
 	heldGoing atomic.Int64
 	// codeKey keys the HMAC of the codes mailed to guests (guests.go): derived from the header secret, which the index
@@ -108,11 +111,12 @@ func New(c Config) *Server {
 	key.Write([]byte("superit-drive: guests' codes"))
 	s := &Server{project: c.ProjectName, secret: c.HeaderSecret, members: c.Members, drive: c.Drive, capacity: c.Capacity,
 		mail: c.Mail, address: c.Address, ui: c.Interface, log: c.Log,
-		slots:    transfers.NewGate(transfers.Slots, transfers.OutsiderSlots),
-		visitors: newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
-		guests:   newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
-		codeKey:  key.Sum(nil),
-		codes:    make(chan codeAsk, codesWaiting), asking: map[string]bool{},
+		slots:     transfers.NewGate(transfers.Slots, transfers.OutsiderSlots),
+		visitors:  newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
+		guests:    newAdmission(visitorsAtOnce, visitorsWaiting, visitorWait),
+		guestWork: newAdmission(guestsAtTheStorage, visitorsWaiting, visitorWait),
+		codeKey:   key.Sum(nil),
+		codes:     make(chan codeAsk, codesWaiting), asking: map[string]bool{},
 		refusedChanges: seldom.Every(seldom.Each), codesDropped: seldom.Every(seldom.Each),
 		codesTooSoon: seldom.Every(seldom.Each), codesTooMany: seldom.Every(seldom.Each),
 		invitationMails: newMailCount(invitationMailsPerHour, time.Hour),
@@ -611,8 +615,17 @@ func (s *Server) notFound(w http.ResponseWriter, r *http.Request, _ call) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	// Made whole before any of it is sent: an answer that cannot be written (a value JSON has no way to write) is a
+	// failure that says so, never a 200 with nothing in it.
+	body, err := json.Marshal(v)
+	if err != nil {
+		slog.Error("an answer could not be written as JSON", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("{}\n"))
+		return
+	}
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(append(body, '\n'))
 }
 
 // securityHeaders adds the headers every answer carries: no framing, no guessing of content types, no third-party
@@ -652,3 +665,34 @@ func policyFor(path string) string {
 // memberPolicy is the Content-Security-Policy of the interface's pages, the members' and the guests': nothing but the
 // Drive's own files loads or runs.
 const memberPolicy = "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
+
+// guestsAtTheStorage is how many guests' changes, and listings waiting for a look, are at the storage at once.
+const guestsAtTheStorage = 8
+
+// apart does work that waits for the storage (a change, a look). A member's is simply done. A guest's is done with
+// the guest's turn given back, in one of a few places of its own (guestWork): the storage takes as long as it takes,
+// and a change goes on after whoever asked has gone, so with the turn held, sixteen of them against a slow storage
+// would keep every guest out, sign-in included; and without a bound of their own, any number would be at the storage
+// at once. ok is false when the person was already answered: there was no place for it, and nothing was done.
+func (s *Server) apart(w http.ResponseWriter, r *http.Request, c call, work func()) (ok bool) {
+	if c.aside == nil {
+		work()
+		return true
+	}
+	done := false
+	// Whether a turn could be taken again afterwards is not asked: the work is done, and only its answer is left.
+	_ = c.aside(func() {
+		leave, entered := s.guestWork.enter(r.Context())
+		if !entered {
+			return
+		}
+		defer leave()
+		work()
+		done = true
+	})
+	if !done && r.Context().Err() == nil {
+		w.Header().Set("Retry-After", "5")
+		s.refuse(w, r, http.StatusServiceUnavailable, visitorsBusy)
+	}
+	return done
+}

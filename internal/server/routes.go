@@ -505,16 +505,7 @@ func (s *Server) looked(w http.ResponseWriter, r *http.Request, c call, folder *
 	if !r.URL.Query().Has("wait") {
 		return s.drive.Recheck(*c.place, folder), true
 	}
-	wait := func() { checking = s.drive.Rechecked(r.Context(), *c.place, folder, recheckWait) }
-	if c.aside == nil {
-		wait()
-	} else if !c.aside(wait) {
-		// A guest's: the look is the storage's work, however long it takes, and sixteen guests waiting for one with
-		// their turns held would keep every other guest out, sign-in included.
-		if r.Context().Err() == nil {
-			w.Header().Set("Retry-After", "5")
-			s.refuse(w, r, http.StatusServiceUnavailable, visitorsBusy)
-		}
+	if !s.apart(w, r, c, func() { checking = s.drive.Rechecked(r.Context(), *c.place, folder, recheckWait) }) {
 		return false, false
 	}
 	if r.Context().Err() != nil {
@@ -674,7 +665,11 @@ func (s *Server) newFolder(w http.ResponseWriter, r *http.Request, c call) {
 	if !s.readBody(w, r, &body) {
 		return
 	}
-	it, err := s.drive.NewFolder(r.Context(), *c.place, folder, body.Name, c.by())
+	var it index.Item
+	var err error
+	if !s.apart(w, r, c, func() { it, err = s.drive.NewFolder(r.Context(), *c.place, folder, body.Name, c.by()) }) {
+		return
+	}
 	if err != nil {
 		s.changeFailed(w, r, err, body.Name)
 		return
@@ -693,7 +688,11 @@ func (s *Server) rename(w http.ResponseWriter, r *http.Request, c call) {
 	if !s.readBody(w, r, &body) {
 		return
 	}
-	it, err := s.drive.Rename(r.Context(), *c.place, *c.item, body.Name, c.by())
+	var it index.Item
+	var err error
+	if !s.apart(w, r, c, func() { it, err = s.drive.Rename(r.Context(), *c.place, *c.item, body.Name, c.by()) }) {
+		return
+	}
 	if err != nil {
 		s.changeFailed(w, r, err, body.Name)
 		return

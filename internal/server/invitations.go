@@ -27,6 +27,9 @@ import (
 // the Drive.
 const invitationMailsPerHour = 30
 
+// maxEndYear is the last year an invitation may end in: far past any real one, and one every answer can still write.
+const maxEndYear = 2999
+
 // sharedMailsPerHour is how many "shared with you" mails one member's shares cause in an hour. Sharing with a member,
 // taking it away and sharing again mails them each time, with a name the sharer chose: past this many, the share is
 // made all the same, and no mail goes.
@@ -203,6 +206,12 @@ func (s *Server) invitationRules(w http.ResponseWriter, r *http.Request, c call,
 		ends = body.Ends.UTC().Truncate(time.Millisecond)
 		if !ends.After(s.drive.Now()) {
 			s.refuse(w, r, http.StatusBadRequest, endHasPassed)
+			return time.Time{}, false
+		}
+		// A year past 9999 cannot be written in an answer (JSON's dates end there): kept, every list that holds the
+		// invitation would fail, the admins' list of what is shared outside the project with them.
+		if ends.Year() > maxEndYear {
+			s.refuse(w, r, http.StatusBadRequest, endTooFar)
 			return time.Time{}, false
 		}
 	}

@@ -773,3 +773,43 @@ func TestAServerClosingAKeptConnectionFailsNothing(t *testing.T) {
 		}
 	}
 }
+
+// One entry of a listing is read only so far, whatever the whole listing may take: the decoder keeps an entry whole,
+// and a server that sent one of hundreds of megabytes would have the Drive keep it. A length below zero is no length.
+func TestOneEntryOfAListingIsBounded(t *testing.T) {
+	entry := func(href, more string) string {
+		return `<D:response><D:href>` + href + `</D:href><D:propstat><D:prop><D:resourcetype/>` +
+			`<D:getcontentlength>-5</D:getcontentlength></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>` + more + `</D:response>`
+	}
+	const open, folder = `<?xml version="1.0"?><D:multistatus xmlns:D="DAV:">`,
+		`<D:response><D:href>/drive/f/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>` +
+			`<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMultiStatus)
+		switch r.URL.Path {
+		case "/drive/href/":
+			_, _ = w.Write([]byte(open + folder + entry("/drive/href/"+strings.Repeat("a", 4<<20), "") + `</D:multistatus>`))
+		case "/drive/propstats/":
+			_, _ = w.Write([]byte(open + folder + entry("/drive/propstats/a", strings.Repeat("<D:propstat/>", 1<<18)) + `</D:multistatus>`))
+		case "/drive/between/":
+			_, _ = w.Write([]byte(open + strings.Repeat(" ", 4<<20) + folder + `</D:multistatus>`))
+		default:
+			_, _ = w.Write([]byte(open + folder + entry("/drive/f/a", "") + `</D:multistatus>`))
+		}
+	}))
+	defer srv.Close()
+	base, _ := url.Parse(srv.URL)
+	c := New(base, "u", "p", "/drive")
+	ctx := context.Background()
+	for _, dir := range []string{"href", "propstats", "between"} {
+		if err := c.Each(ctx, dir, func(Entry) error { return nil }); err == nil || !strings.Contains(err.Error(), "longer than any entry") {
+			t.Errorf("Each of %q, one piece of megabytes: %v; want it refused", dir, err)
+		}
+		if _, err := c.List(ctx, dir, 10000); err == nil {
+			t.Errorf("List of %q, one piece of megabytes: no error", dir)
+		}
+	}
+	if got, err := c.List(ctx, "f", 10); err != nil || len(got) != 1 || got[0].Name != "a" || got[0].Size != 0 {
+		t.Fatalf("an entry with a length below zero: %+v, %v", got, err)
+	}
+}

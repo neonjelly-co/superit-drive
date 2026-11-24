@@ -94,20 +94,27 @@ func TestAccessChangesAreCounted(t *testing.T) {
 		must(err)
 	})
 	doesNotCount("files taken in through it", func() { must(x.TakenIn(ctx, upload.ID, 1000)) })
-	doesNotCount("what it took in reset", func() {
-		_, err := x.ResetLink(ctx, p.ID, folder.ID)
+	doesNotCount("what it took in reset by its maker", func() {
+		_, err := x.ResetLink(ctx, p.ID, folder.ID, "u1")
 		must(err)
 	})
+	counts("what it took in reset by someone else, who becomes its maker", func() {
+		l, err := x.ResetLink(ctx, p.ID, folder.ID, "u-dora")
+		must(err)
+		if l.MadeBy != "u-dora" {
+			t.Fatalf("the maker of a link Dóra reset: %q", l.MadeBy)
+		}
+	})
 	counts("its kind changed to view", func() {
-		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-dora")
+		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-dora", false)
 		must(err)
 	})
 	doesNotCount("its kind set to what it is", func() {
-		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-dora")
+		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-dora", false)
 		must(err)
 	})
 	counts("its kind changed back to upload-only", func() {
-		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, UploadLink, "u-dora")
+		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, UploadLink, "u-dora", false)
 		must(err)
 	})
 	counts("it removed", func() { must(x.RemoveLink(ctx, p.ID, folder.ID)) })
@@ -388,6 +395,9 @@ func TestOnlyACopyTheDriveMadePasses(t *testing.T) {
 			alter(t, f, "CREATE TRIGGER keep_links AFTER DELETE ON links BEGIN INSERT INTO links SELECT OLD.*; END")
 		}, ErrCopyDamaged},
 		{"a check taken off", func(f string) { alter(t, f, "DROP INDEX grants_one_per_grantee") }, ErrCopyDamaged},
+		{"a row the schema does not allow", func(f string) {
+			alter(t, f, "PRAGMA ignore_check_constraints = ON", "INSERT INTO guests (address, added_at) VALUES ('  Victim@X  ', 1)")
+		}, ErrCopyDamaged},
 		{"numbered past any copy", func(f string) {
 			alter(t, f, "UPDATE drive_state SET value = '9223372036854775807' WHERE key = 'copy_seq'")
 		}, ErrCopyDamaged},

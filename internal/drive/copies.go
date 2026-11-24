@@ -75,6 +75,10 @@ type Copying struct {
 	// Quiet is how long after the last access change nothing more must change before a copy is written; Latest the
 	// longest an access change waits for its copy, however much more changes meanwhile.
 	Quiet, Latest time.Duration
+	// Apart is the least time between two copies written for access changes. Anyone who may rename a file makes an
+	// access change, and each copy is the whole index, written twice and sent to the storage: without it, one small
+	// change every Quiet and a bit would have the Drive do that as often.
+	Apart time.Duration
 	// Retry is how long after a copy the storage did not take (unreachable, or not holding the Drive's mark) it is tried
 	// again.
 	Retry time.Duration
@@ -85,7 +89,7 @@ type Copying struct {
 }
 
 // DefaultCopying is when a released Drive copies its index.
-var DefaultCopying = Copying{Quiet: 30 * time.Second, Latest: 5 * time.Minute, Retry: 5 * time.Minute, Night: 3 * time.Hour,
+var DefaultCopying = Copying{Quiet: 30 * time.Second, Latest: 5 * time.Minute, Apart: 5 * time.Minute, Retry: 5 * time.Minute, Night: 3 * time.Hour,
 	Poll: time.Second}
 
 // walkState are the keys of drive_state that say where the walk is, by one server's clock: a copy on the storage leaves
@@ -127,8 +131,9 @@ func (d *Drive) KeepCopies(ctx context.Context, dataDir string, c Copying) {
 					k.waiting = now
 				}
 			}
-			if now.Sub(k.changed) >= c.Quiet || now.Sub(k.waiting) >= c.Latest {
+			if (now.Sub(k.changed) >= c.Quiet || now.Sub(k.waiting) >= c.Latest) && now.Sub(k.forChange) >= c.Apart {
 				reason = "access changed"
+				k.forChange = now
 			}
 		}
 		if !now.Before(k.night) {
@@ -155,6 +160,8 @@ type keeper struct {
 	// when it was, and waiting since when changes wait for a copy (zero while none does).
 	copied, seen     int64
 	changed, waiting time.Time
+	// forChange is when the last copy for access changes was begun (zero before the first).
+	forChange time.Time
 	// night is when the next nightly copy is due.
 	night time.Time
 	// behind says the storage did not take the last copy, for the index whose storage id is behindID; it is tried again
@@ -384,10 +391,16 @@ func (k *keeper) removeOthers(ctx context.Context, folder string, seq int64, kee
 		n, isCopy := copySeqOf(e.Name)
 		switch {
 		case e.Folder || slices.Contains(keep, e.Name):
+		// At most maxLeftOvers of each in one go, the rest after the next copy: files put there by the thousand (anyone
+		// with the storage's login can) are not all kept in memory, nor removed one after another for minutes.
 		case isCopy && n > seq:
-			higher = append(higher, e.Name)
+			if len(higher) < maxLeftOvers {
+				higher = append(higher, e.Name)
+			}
 		case isCopy || strings.HasSuffix(e.Name, ".part"):
-			old = append(old, folder+"/"+e.Name)
+			if len(old) < maxLeftOvers {
+				old = append(old, folder+"/"+e.Name)
+			}
 		}
 		return nil
 	})

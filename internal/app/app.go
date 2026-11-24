@@ -184,6 +184,7 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	copying := drive.DefaultCopying
 	if quiet, latest, retry, ok := clock.Copying(); ok {
 		copying.Quiet, copying.Latest, copying.Retry, copying.Poll = quiet, latest, retry, min(copying.Poll, quiet/4)
+		copying.Apart = 0
 		log.Warn("this is a test build: the copy of the index follows access changes at the pace the test sets",
 			"quiet", quiet.String(), "latest", latest.String(), "retry", retry.String())
 	}
@@ -211,7 +212,15 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	if err != nil {
 		return err
 	}
+	// Every request's context ends a little after the Drive is told to stop (cutAfter): a download, a zip or an upload
+	// would otherwise keep it from stopping for the whole time it is given, and what it writes last (how often links
+	// were used, the copy of the index) would not be written before whatever stops it loses patience. Requests that
+	// take a moment have that moment; a change the storage already has is finished all the same (it does not hang on
+	// the request's context).
+	requests, cutRequests := context.WithCancel(context.Background())
+	defer cutRequests()
 	httpServer := &http.Server{
+		BaseContext:       func(net.Listener) context.Context { return requests },
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		MaxHeaderBytes:    MaxHeaderBytes,
@@ -222,6 +231,7 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	go func() {
 		defer close(shutdownDone)
 		<-ctx.Done()
+		defer time.AfterFunc(cutAfter, cutRequests).Stop()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdown)
@@ -247,3 +257,6 @@ func nearby(host string) bool {
 	}
 	return host == "localhost" || !strings.Contains(host, ".")
 }
+
+// cutAfter is how long after the Drive is told to stop the requests still under way are cut.
+const cutAfter = 3 * time.Second
