@@ -140,3 +140,34 @@ func TestAllListsEveryMemberByName(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+// A version that cannot be read stays refused for as long as the file stays as it is, so that the log can say so
+// again: read once and then taken for fine, a list nobody can read would be one line in the log.
+func TestABrokenVersionStaysAProblemUntilItChanges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "members.json")
+	good := `{"members":[{"userId":"u1","email":"a@example.com","role":"member"}]}`
+	if err := os.WriteFile(path, []byte(good), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := &Watcher{path: path, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := w.reload(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"members": [`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if err := w.reload(); err == nil {
+			t.Fatalf("read %d of a broken version: no problem", i+1)
+		}
+	}
+	if _, ok := w.Current().Lookup("u1"); !ok {
+		t.Fatal("the list before the broken version is gone")
+	}
+	if err := os.WriteFile(path, []byte(good+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.reload(); err != nil {
+		t.Fatalf("a version that reads again: %v", err)
+	}
+}

@@ -505,7 +505,18 @@ func (s *Server) looked(w http.ResponseWriter, r *http.Request, c call, folder *
 	if !r.URL.Query().Has("wait") {
 		return s.drive.Recheck(*c.place, folder), true
 	}
-	checking = s.drive.Rechecked(r.Context(), *c.place, folder, recheckWait)
+	wait := func() { checking = s.drive.Rechecked(r.Context(), *c.place, folder, recheckWait) }
+	if c.aside == nil {
+		wait()
+	} else if !c.aside(wait) {
+		// A guest's: the look is the storage's work, however long it takes, and sixteen guests waiting for one with
+		// their turns held would keep every other guest out, sign-in included.
+		if r.Context().Err() == nil {
+			w.Header().Set("Retry-After", "5")
+			s.refuse(w, r, http.StatusServiceUnavailable, visitorsBusy)
+		}
+		return false, false
+	}
 	if r.Context().Err() != nil {
 		return false, false
 	}

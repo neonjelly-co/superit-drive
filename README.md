@@ -510,7 +510,8 @@ brought; guests sign in again with a new link.
   left alone: the Drive does not start.
 - A copy numbered after the Drive's own, which the index does not know of, is never removed. It is there when the Drive
   once started with no index while it could not see its mark on the storage (a wrong `DRIVE_STORAGE_FOLDER`, a disk not
-  mounted yet): it built an empty index, and took the mark when the storage came back. When its first copy is on the
+  mounted yet): it built an empty index, and took the mark when the storage came back. (Or when its data folder was put
+  back to an older state than the storage's copy.) When its first copy is on the
   storage, it moves the higher-numbered one aside, to `higher-numbered-<when>-<its name>`, keeps it, and says so loudly
   (`level=ERROR`, `THE STORAGE HELD A COPY OF THE INDEX NUMBERED AFTER THIS DRIVE'S OWN`). To get its shares, links and
   guests back: stop the Drive, give the copy back its name, and start the Drive with an empty data folder.
@@ -861,7 +862,9 @@ view link, in the list's sentence) that anyone with the link can.
   also after their maker left the project. In a My files a link is its maker's share: it works only while they may still
   share the item there. It stops when that is taken away from them (or they leave the project), and works again if it is
   given back; a held My files (its owner left) opens nothing. Whoever may share the item sees in its details whether the
-  link works now.
+  link works now. Whoever changes a link's kind becomes its maker: an upload-only link that someone else turned into one
+  that shows the folder is theirs, and stops with their access, not with the access of whoever made it first. (An
+  invitation changed by someone else becomes theirs the same way.)
 - **Sharing outside the project switched off** (for the whole project, or for the link's shared folder: see [Sharing
   outside the project switched off](#sharing-outside-the-project-switched-off)): no link opens there and none can be
   made, but links can still be seen and removed, and work again, at the same address, when it is switched back on. A

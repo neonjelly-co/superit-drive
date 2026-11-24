@@ -162,8 +162,8 @@ func (z *zipping) items(ctx context.Context, prefix string, in *index.Item, item
 			// is being zipped, and what is in it now is not looked at (whoever zips through a link on a folder above
 			// would otherwise get the names of the folders in it, at its new place).
 			now, err := z.d.index.Item(ctx, z.place.ID, it.ID)
-			if errors.Is(err, index.ErrNoItem) || (err == nil && (!now.Folder || now.ParentID != folderID(in))) {
-				continue
+			if errors.Is(err, index.ErrNoItem) || (err == nil && (!now.Folder || !sameFolders(now.Above, it.Above))) {
+				continue // moved, or a folder above it was: every folder above it must be the one it was listed under
 			}
 			if err != nil {
 				return err
@@ -191,7 +191,17 @@ func (z *zipping) items(ctx context.Context, prefix string, in *index.Item, item
 }
 
 func (z *zipping) file(ctx context.Context, name string, it index.Item) error {
-	p, ok := itemPath(z.place, it)
+	// Read again where it is now, and read from there: a zip can go on for hours, and the path it was listed at may be
+	// another file's by now (its folder renamed, and a new one made under the old name), one whoever zips was never
+	// given. A file no longer under the folders it was listed under is no longer part of what is being zipped.
+	now, err := z.d.index.Item(ctx, z.place.ID, it.ID)
+	if errors.Is(err, index.ErrNoItem) || (err == nil && (now.Folder || !sameFolders(now.Above, it.Above))) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	p, ok := itemPath(z.place, now)
 	if !ok {
 		return nil
 	}
@@ -231,3 +241,8 @@ func (d *Drive) listed(ctx context.Context, p index.Place, folder *index.Item) (
 // zipName is a name as a zip holds it: some programs take a backslash for a folder, which could put a file outside
 // the folder it is unpacked into.
 func zipName(name string) string { return strings.ReplaceAll(name, `\`, "_") }
+
+// sameFolders says whether two lists of folders, from the top of a place down, are the same folders by id.
+func sameFolders(a, b []index.Item) bool {
+	return slices.EqualFunc(a, b, func(x, y index.Item) bool { return x.ID == y.ID })
+}

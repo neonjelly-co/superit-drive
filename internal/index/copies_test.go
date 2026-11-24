@@ -99,15 +99,15 @@ func TestAccessChangesAreCounted(t *testing.T) {
 		must(err)
 	})
 	counts("its kind changed to view", func() {
-		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink)
+		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-dora")
 		must(err)
 	})
 	doesNotCount("its kind set to what it is", func() {
-		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink)
+		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, ViewLink, "u-dora")
 		must(err)
 	})
 	counts("its kind changed back to upload-only", func() {
-		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, UploadLink)
+		_, err := x.SetLinkKind(ctx, p.ID, folder.ID, UploadLink, "u-dora")
 		must(err)
 	})
 	counts("it removed", func() { must(x.RemoveLink(ctx, p.ID, folder.ID)) })

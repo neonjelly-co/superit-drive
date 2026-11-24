@@ -128,6 +128,9 @@ func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item, by str
 	defer release()
 	stale := d.since(folderKey{p.ID, it.ParentID})
 
+	// From here on, whoever asked hanging up changes nothing (as in putInPlace): a move the storage made and the index
+	// never heard of would be taken for one made on the storage directly, and lose what was given on the item.
+	ctx = context.WithoutCancel(ctx)
 	entry, dir, held, err := d.makeEntry(ctx, p)
 	if err != nil {
 		return TrashEntry{}, err
@@ -159,6 +162,9 @@ func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item, by str
 // putAside moves the file at file, which an upload by the member by is about to replace, into the place's trash, as a
 // new item. undo puts it back, for when the upload fails. replaced is nil when the file had gone meanwhile.
 func (d *Drive) putAside(ctx context.Context, p index.Place, folder *index.Item, file string, there storage.Entry, by string) (replaced *index.TrashItem, undo func(), err error) {
+	// From here on, whoever asked hanging up changes nothing (as in putInPlace): a move the storage made and the index
+	// never heard of would be taken for one made on the storage directly, and lose what was given on the item.
+	ctx = context.WithoutCancel(ctx)
 	entry, dir, held, err := d.makeEntry(ctx, p)
 	if err != nil {
 		return nil, nil, err
@@ -349,6 +355,9 @@ func (d *Drive) restoreInto(ctx context.Context, p index.Place, t index.TrashIte
 		return index.Item{}, storageError(err)
 	}
 
+	// From here on, whoever asked hanging up changes nothing (as in putInPlace): a move the storage made and the index
+	// never heard of would be taken for one made on the storage directly, and lose what was given on the item.
+	ctx = context.WithoutCancel(ctx)
 	if err := d.moveOnStorage(ctx, t.Folder, from, to); err != nil {
 		if errors.Is(err, storage.ErrExists) {
 			return index.Item{}, &Taken{Name: name} // put there directly since the Drive looked

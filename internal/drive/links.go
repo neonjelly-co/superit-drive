@@ -94,14 +94,14 @@ func (d *Drive) LinkByID(ctx context.Context, id int64) (index.Link, error) {
 
 // SetLinkKind changes what the public link on a live item of the place lets visitors do, keeping its address
 // (index.ErrNoLink when it has none, index.ErrLinkKind for an upload-only link on a file). It takes the place's lock,
-// as MakeLink does.
-func (d *Drive) SetLinkKind(ctx context.Context, p index.Place, it index.Item, kind string) (index.Link, error) {
+// as MakeLink does. The member by becomes its maker when the kind changes.
+func (d *Drive) SetLinkKind(ctx context.Context, p index.Place, it index.Item, kind, by string) (index.Link, error) {
 	leave, err := d.inPlace(ctx, p)
 	if err != nil {
 		return index.Link{}, err
 	}
 	defer leave()
-	l, err := d.index.SetLinkKind(ctx, p.ID, it.ID, kind)
+	l, err := d.index.SetLinkKind(ctx, p.ID, it.ID, kind, by)
 	return d.withUses(l), err
 }
 

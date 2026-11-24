@@ -166,8 +166,14 @@ func (x *Index) MakeLink(ctx context.Context, placeID, itemID int64, hash []byte
 }
 
 // SetLinkKind changes what the link on a live item of the place lets visitors do, keeping its address, its uses and what
-// it has taken in: ErrNoLink when the item has none, ErrLinkKind for an upload-only link on a file.
-func (x *Index) SetLinkKind(ctx context.Context, placeID, itemID int64, kind string) (Link, error) {
+// it has taken in: ErrNoLink when the item has none, ErrLinkKind for an upload-only link on a file. When the kind
+// changes, the member by becomes the link's maker, as whoever changes an invitation becomes its giver (ChangeInvitation):
+// in a My files a link counts only while its maker may still share, so what one person made of another's link (an
+// upload-only link turned into one that shows the folder) never outlasts their own access under the other's name.
+func (x *Index) SetLinkKind(ctx context.Context, placeID, itemID int64, kind, by string) (Link, error) {
+	if by == "" {
+		return Link{}, errors.New("a link's kind is changed by a member")
+	}
 	err := x.write(ctx, func(tx *sql.Tx) error {
 		it, err := item(ctx, tx, placeID, itemID)
 		if err != nil {
@@ -177,7 +183,7 @@ func (x *Index) SetLinkKind(ctx context.Context, placeID, itemID int64, kind str
 			return ErrLinkKind
 		}
 		// Only when it changes: the same kind again is no access change.
-		_, err = tx.ExecContext(ctx, "UPDATE links SET kind = ? WHERE item_id = ? AND kind != ?", kind, itemID, kind)
+		_, err = tx.ExecContext(ctx, "UPDATE links SET kind = ?, made_by = ? WHERE item_id = ? AND kind != ?", kind, by, itemID, kind)
 		return err
 	})
 	if err != nil {

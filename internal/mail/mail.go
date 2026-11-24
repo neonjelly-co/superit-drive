@@ -285,6 +285,10 @@ func (m *Mailer) deliver(ctx context.Context, msg Message) error {
 			return failed(whyRefused, fmt.Errorf("sending: %w", err))
 		}
 		if err := w.Close(); err != nil {
+			var refused *textproto.Error // may quote the address too
+			if errors.As(err, &refused) {
+				return failed(whyRefused, fmt.Errorf("the mail server did not take the message (%d)", refused.Code))
+			}
 			return failed(whyRefused, fmt.Errorf("the mail server did not take the message: %w", err))
 		}
 		return nil

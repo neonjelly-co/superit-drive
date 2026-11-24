@@ -142,6 +142,8 @@ type Watcher struct {
 	log     *slog.Logger
 	current atomic.Pointer[List]
 	seen    os.FileInfo
+	// problem is why the file as last read was refused, nil when it was taken: said again while the file stays as it is.
+	problem error
 	data    []byte
 }
 
@@ -200,7 +202,7 @@ func (w *Watcher) reload() error {
 		return fmt.Errorf("cannot read the member list %s: %w", w.path, err)
 	}
 	if w.seen != nil && os.SameFile(w.seen, info) && info.ModTime().Equal(w.seen.ModTime()) && info.Size() == w.seen.Size() {
-		return nil
+		return w.problem // the file as it was last read: still refused, if it was
 	}
 	data, err := os.ReadFile(w.path)
 	if err != nil {
@@ -208,13 +210,15 @@ func (w *Watcher) reload() error {
 	}
 	w.seen = info
 	if w.data != nil && bytes.Equal(data, w.data) {
+		w.problem = nil
 		return nil
 	}
 	list, err := Parse(data)
 	if err != nil {
-		return fmt.Errorf("%s: %w", w.path, err)
+		w.problem = fmt.Errorf("%s: %w", w.path, err)
+		return w.problem
 	}
-	w.data = data
+	w.data, w.problem = data, nil
 	previous := w.current.Swap(list)
 	if previous != nil {
 		w.log.Info("the member list changed", "members", list.Len())
