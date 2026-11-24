@@ -250,7 +250,10 @@ takes the label off. Guests never see labels.
 **What strangers can use up.** A file sent is a transfer in the outsiders' line (8 slots at most, shared with view
 links' downloads and guests): members' 24 are never theirs. A file not let through is answered 503 before any of it is
 read, and its turn keeps its place; at most 64 outsiders' turns are kept at once, so new turns sent as fast as a
-stranger likes cost a fixed amount of memory. Each link takes in at most 10 GB and 1,000 files until it is reset. A stranger who sends a
+stranger likes cost a fixed amount of memory. Of those, one link's visitors together keep 2 (one guest's uploads
+too, and one member's 4): a slot is kept 30 seconds for each turn that comes up, so turns sent and never come back for
+would otherwise keep every slot outsiders have, with no file sent at all; one more turn keeps no place until one of
+the others has gone, and is let through all the same when a slot is free. Each link takes in at most 10 GB and 1,000 files until it is reset. A stranger who sends a
 file slowly holds one of the 8 slots, and the room their file says it needs, for as long as bytes keep coming (a
 transfer is ended only after two minutes without any); members are not slowed by it, and whoever may share the folder
 can remove the link. Measured in the [memory test](operations.md#large-transfers-and-the-memory-figure).

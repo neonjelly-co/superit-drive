@@ -73,14 +73,26 @@ func (s *Server) waitTurn(w http.ResponseWriter, r *http.Request, c call) (relea
 }
 
 // tryTurn takes a transfer slot if it is the upload's turn (key keeps its place in line), or answers 503. A guest's
-// upload is in the outsiders' line.
+// upload is in the outsiders' line. One person keeps only so many places at once (turnOwner).
 func (s *Server) tryTurn(w http.ResponseWriter, r *http.Request, c call, key string) (release func(), ok bool) {
-	release, ok = s.slots.Try(classOf(c), key)
+	release, ok = s.slots.TryAs(classOf(c), turnOwner(c), key)
 	if !ok {
 		w.Header().Set("Retry-After", busyRetry)
 		refuseWith(w, r, http.StatusServiceUnavailable, map[string]any{"busy": true}, busyMessage)
 	}
 	return release, ok
+}
+
+// turnOwner is whose an upload's place in line is: at most transfers.KeysEach are kept at once for one member, for
+// one guest, and for the visitors of one link together, who are nobody in particular.
+func turnOwner(c call) string {
+	switch {
+	case c.link != nil:
+		return "link:" + strconv.FormatInt(c.link.ID, 10)
+	case c.guest != nil:
+		return "guest:" + strconv.FormatInt(c.guest.ID, 10)
+	}
+	return "member:" + c.member.UserID
 }
 
 // turnKey is what keeps an upload's place in line for a slot: a resumable upload's id; for an upload in one request,

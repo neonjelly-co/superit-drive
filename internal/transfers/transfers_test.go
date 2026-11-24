@@ -438,3 +438,87 @@ func TestMembersKeysAreBounded(t *testing.T) {
 		t.Fatalf("after the others were forgotten: %d keys (%d counted), want 1", len(g.keys), g.keyedMembers)
 	}
 }
+
+// One owner's keys keep only so many places at once, in line and with a slot kept for them together: sending new keys
+// and never coming for a slot keeps no more of the slots than that, and the others' uploads go on.
+func TestOneOwnersKeysKeepOnlySoManyPlaces(t *testing.T) {
+	for _, c := range []Class{Outsiders, Members} {
+		g := NewGate(8, 8)
+		now := time.Unix(1_700_000_000, 0)
+		g.now = func() time.Time { return now }
+		var held []func()
+		for range 8 {
+			release, ok := g.TryAs(c, "someone else", "")
+			if !ok {
+				t.Fatal("a slot was not free")
+			}
+			held = append(held, release)
+		}
+		for i := range 20 {
+			if _, ok := g.TryAs(c, "one link", fmt.Sprintf("key %d", i)); ok {
+				t.Fatal("a key took a slot that was not free")
+			}
+			if g.Waiting(fmt.Sprintf("key %d", i)) != (i < KeysEach(c)) {
+				t.Fatalf("class %d: key %d of one owner: in line %v", c, i, i >= KeysEach(c))
+			}
+		}
+		// Another owner's key keeps its place behind them, and nobody's is not counted.
+		if _, ok := g.TryAs(c, "another", "theirs"); ok || !g.Waiting("theirs") {
+			t.Fatal("another owner's key kept no place")
+		}
+		// Every slot is given back: only so many are kept for the one owner, and the rest are free for anyone.
+		for _, release := range held {
+			release()
+		}
+		g.mu.Lock()
+		free, owned := g.free, g.owned["one link"]
+		g.mu.Unlock()
+		if want := 8 - KeysEach(c) - 1; free != want || owned != KeysEach(c) {
+			t.Fatalf("class %d: %d slots free and %d keys of the owner kept, want %d and %d", c, free, owned, want, KeysEach(c))
+		}
+		if release, ok := g.TryAs(c, "someone else", "a new upload"); !ok {
+			t.Fatal("another person's upload was refused while slots were free")
+		} else {
+			release()
+		}
+		// A key that takes its slot makes room for the owner's next one; so does one forgotten.
+		release, ok := g.TryAs(c, "one link", "key 0")
+		if !ok {
+			t.Fatal("the key did not get the slot kept for it")
+		}
+		release()
+		g.mu.Lock()
+		owned = g.owned["one link"]
+		g.mu.Unlock()
+		if owned != KeysEach(c)-1 {
+			t.Fatalf("class %d: %d keys of the owner kept after one took its slot, want %d", c, owned, KeysEach(c)-1)
+		}
+	}
+}
+
+// A key forgotten makes room for its owner's next one, and an owner without keys is not remembered.
+func TestAnOwnersForgottenKeysMakeRoom(t *testing.T) {
+	g := NewGate(1, 1)
+	now := time.Unix(1_700_000_000, 0)
+	g.now = func() time.Time { return now }
+	hold, _ := g.Try(Outsiders, "")
+	for i := range KeysEach(Outsiders) + 1 {
+		g.TryAs(Outsiders, "one link", fmt.Sprintf("key %d", i))
+	}
+	if g.Waiting(fmt.Sprintf("key %d", KeysEach(Outsiders))) {
+		t.Fatal("one key too many keeps a place")
+	}
+	now = now.Add(g.forget + time.Second)
+	if _, ok := g.TryAs(Outsiders, "one link", "later"); ok || !g.Waiting("later") {
+		t.Fatal("a new key keeps no place once the owner's others were forgotten")
+	}
+	hold()
+	release, ok := g.TryAs(Outsiders, "one link", "later")
+	if !ok {
+		t.Fatal("the key did not get the slot kept for it")
+	}
+	release()
+	if len(g.owned) != 0 || len(g.keys) != 0 {
+		t.Fatalf("%d owners and %d keys remembered, want none", len(g.owned), len(g.keys))
+	}
+}

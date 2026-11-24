@@ -206,7 +206,8 @@ upload-only link too), or one part of a resumable upload. Three rules hold the f
   for up to ten minutes, then gets 503; when its turn comes, it is decided again (below). An upload is answered at once with 503, `{"busy": true}` and `Retry-After`,
   before any of its bytes are read, and keeps its place in line: a resumable upload by its id, an upload in one request
   by the `turn` it names (any word the interface makes up for it, counted only for that person). When its turn comes, a
-  slot is kept for it for 30 seconds; a place not asked about again for a minute is lost. The interface shows such an
+  slot is kept for it for 30 seconds; a place not asked about again for a minute is lost. One member keeps at most 4
+  places at once, one guest 2, and one link's visitors 2 together: more keep none until one of the others has gone. The interface shows such an
   upload as "Waiting for its turn". A transfer that moves no bytes for two minutes is ended, so a paused download does
   not keep a slot (the browser resumes it with `Range`).
 - **Each connection's buffers are capped at 256 KiB**, send and receive, on the browser side (the listener) and on the

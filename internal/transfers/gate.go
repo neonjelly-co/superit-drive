@@ -59,6 +59,8 @@ type Gate struct {
 	keyedOutsiders int
 	// keyedMembers is how many of the keys are members'.
 	keyedMembers int
+	// owned is how many of the keys each owner has (TryAs): those in line and those a slot is kept for.
+	owned map[string]int
 
 	hold, forget time.Duration
 	now          func() time.Time
@@ -79,8 +81,20 @@ const MaxOutsidersWaiting = 64
 // is taken.
 const MaxMembersKeys = 1024
 
+// KeysEach is the most keys one owner keeps at once, in line or with a slot kept for them: one member, one guest, or
+// the visitors of one link together. A key costs nothing to send, and a slot is kept Hold for each whose turn comes:
+// without a bound of their own, one person sending new keys and never coming for a slot had every slot of their class
+// kept for them, and every upload of everyone else refused. The interface sends one file at a time, with one key.
+func KeysEach(c Class) int {
+	if c == Outsiders {
+		return 2
+	}
+	return 4
+}
+
 type waiter struct {
 	class Class
+	owner string        // whose key it is; "" for nobody's
 	key   string        // "" for a request waiting itself
 	ready chan struct{} // closed when a request waiting itself gets its slot
 	given bool          // the slot is the waiter's
@@ -90,7 +104,7 @@ type waiter struct {
 
 // NewGate makes a gate with slots slots, of which outsiders may hold at most outsiderSlots.
 func NewGate(slots, outsiderSlots int) *Gate {
-	return &Gate{free: slots, share: min(outsiderSlots, slots), keys: map[string]*waiter{}, hold: Hold, forget: Forget, now: time.Now}
+	return &Gate{free: slots, share: min(outsiderSlots, slots), keys: map[string]*waiter{}, owned: map[string]int{}, hold: Hold, forget: Forget, now: time.Now}
 }
 
 // Wait takes a slot for a transfer of class c, waiting in line for its turn until ctx ends or max has passed (then
@@ -155,6 +169,13 @@ func (g *Gate) leave(w *waiter) {
 // and key (when not empty) keeps its place in line, or keeps waiting in it: try again with it. Call release when the
 // transfer is over.
 func (g *Gate) Try(c Class, key string) (release func(), ok bool) {
+	return g.TryAs(c, "", key)
+}
+
+// TryAs is Try for a key of owner's: a new key keeps a place only while its owner has fewer than KeysEach kept, in
+// line and with a slot kept for them together. One more keeps none, as if it had no key, until one of the others has
+// gone: taken its slot, not come for it, or been forgotten.
+func (g *Gate) TryAs(c Class, owner, key string) (release func(), ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if w := g.keys[key]; key != "" && w != nil {
@@ -183,8 +204,17 @@ func (g *Gate) Try(c Class, key string) (release func(), ok bool) {
 				return nil, false // as for outsiders: asked again, it takes a place once others have gone
 			}
 		}
-		w := &waiter{class: c, key: key, tried: g.now()}
+		if owner != "" && g.owned[owner] >= KeysEach(c) {
+			g.forgetIn(c)
+			if g.owned[owner] >= KeysEach(c) {
+				return nil, false // its owner keeps enough places already
+			}
+		}
+		w := &waiter{class: c, owner: owner, key: key, tried: g.now()}
 		g.keys[key] = w
+		if owner != "" {
+			g.owned[owner]++
+		}
 		if c == Outsiders {
 			g.keyedOutsiders++
 		} else {
@@ -201,6 +231,11 @@ func (g *Gate) dropKey(w *waiter) {
 		return
 	}
 	delete(g.keys, w.key)
+	if w.owner != "" {
+		if g.owned[w.owner]--; g.owned[w.owner] <= 0 {
+			delete(g.owned, w.owner)
+		}
+	}
 	if w.class == Outsiders {
 		g.keyedOutsiders--
 	} else {
