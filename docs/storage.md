@@ -289,7 +289,11 @@ The index alone holds who has access to what, and it lives on one server. So the
 
 **When.** Both together: when the Drive starts; soon after access changes; every night at 03:00 UTC, whatever
 changed; and as the Drive stops (after the last request is answered), when access changed since the last copy, so that
-a snapshot of the data folder taken once it has stopped, as before an upgrade, holds every change.
+a snapshot of the data folder taken once it has stopped, as before an upgrade, holds every change. Stopping takes up to
+half a minute: requests still under way three seconds after the Drive is told to stop are cut (a download, a zip or an
+upload would otherwise hold it up; a change the storage already has is finished all the same), then the uses and this
+copy are written. Give it that time: `stop_grace_period: 40s` in the worked example, since Docker's own ten seconds can
+be over first, and a Drive killed then writes neither.
 
 An access change is anything that changes who may reach what: a share given, changed or taken away; a public link made,
 replaced or removed, or its kind changed (view or upload-only); a guest invited, their invitation changed, or gone with
