@@ -412,3 +412,29 @@ func TestAtMostSoManyOutsidersKeepAPlace(t *testing.T) {
 	release()
 	m()
 }
+
+// A member who asks with a new key each time while every slot is taken makes the Drive remember only so many: more
+// keep no place, and take one once those not asked for again are forgotten.
+func TestMembersKeysAreBounded(t *testing.T) {
+	g := NewGate(1, 1)
+	now := time.Unix(1_700_000_000, 0)
+	g.now = func() time.Time { return now }
+	if _, ok := g.Try(Members, ""); !ok {
+		t.Fatal("the one slot was not free")
+	}
+	for i := range MaxMembersKeys + 100 {
+		if _, ok := g.Try(Members, fmt.Sprintf("key %d", i)); ok {
+			t.Fatalf("key %d took a slot that was not free", i)
+		}
+	}
+	if len(g.keys) != MaxMembersKeys || g.keyedMembers != MaxMembersKeys || len(g.lines[Members]) != MaxMembersKeys {
+		t.Fatalf("kept %d keys (%d counted, %d in line), want %d", len(g.keys), g.keyedMembers, len(g.lines[Members]), MaxMembersKeys)
+	}
+	now = now.Add(g.forget + time.Second)
+	if _, ok := g.Try(Members, "a key after the others were forgotten"); ok {
+		t.Fatal("it took a slot that was not free")
+	}
+	if len(g.keys) != 1 || g.keyedMembers != 1 {
+		t.Fatalf("after the others were forgotten: %d keys (%d counted), want 1", len(g.keys), g.keyedMembers)
+	}
+}

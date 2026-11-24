@@ -57,6 +57,8 @@ type Gate struct {
 	// keys is every key in line, or holding a slot kept for it; keyedOutsiders how many of them are outsiders'.
 	keys           map[string]*waiter
 	keyedOutsiders int
+	// keyedMembers is how many of the keys are members'.
+	keyedMembers int
 
 	hold, forget time.Duration
 	now          func() time.Time
@@ -71,6 +73,11 @@ const (
 // MaxOutsidersWaiting is the most outsiders that wait in line themselves at once, and the most outsiders' keys kept at
 // once.
 const MaxOutsidersWaiting = 64
+
+// MaxMembersKeys is the most members' keys kept at once: far more than the members of a project send transfers at
+// once, and a bound on what one of them can make the Drive remember by asking with a new key each time while every slot
+// is taken.
+const MaxMembersKeys = 1024
 
 type waiter struct {
 	class Class
@@ -165,15 +172,23 @@ func (g *Gate) Try(c Class, key string) (release func(), ok bool) {
 	}
 	if key != "" {
 		if c == Outsiders && g.keyedOutsiders >= MaxOutsidersWaiting {
-			g.forgetOutsiders()
+			g.forgetIn(Outsiders)
 			if g.keyedOutsiders >= MaxOutsidersWaiting {
 				return nil, false // too many outsiders keep a place already: this one keeps none
+			}
+		}
+		if c == Members && g.keyedMembers >= MaxMembersKeys {
+			g.forgetIn(Members)
+			if g.keyedMembers >= MaxMembersKeys {
+				return nil, false // as for outsiders: asked again, it takes a place once others have gone
 			}
 		}
 		w := &waiter{class: c, key: key, tried: g.now()}
 		g.keys[key] = w
 		if c == Outsiders {
 			g.keyedOutsiders++
+		} else {
+			g.keyedMembers++
 		}
 		g.lines[c] = append(g.lines[c], w)
 	}
@@ -188,22 +203,24 @@ func (g *Gate) dropKey(w *waiter) {
 	delete(g.keys, w.key)
 	if w.class == Outsiders {
 		g.keyedOutsiders--
+	} else {
+		g.keyedMembers--
 	}
 }
 
-// forgetOutsiders takes out of the outsiders' line the keys not tried again within forget, which would otherwise lose
-// their place only when their turn comes. g.mu must be held.
-func (g *Gate) forgetOutsiders() {
-	line := g.lines[Outsiders][:0]
-	for _, w := range g.lines[Outsiders] {
+// forgetIn takes out of a class's line the keys not tried again within forget, which would otherwise lose their place
+// only when their turn comes. g.mu must be held.
+func (g *Gate) forgetIn(c Class) {
+	line := g.lines[c][:0]
+	for _, w := range g.lines[c] {
 		if w.key != "" && g.now().Sub(w.tried) > g.forget {
 			g.dropKey(w)
 			continue
 		}
 		line = append(line, w)
 	}
-	clear(g.lines[Outsiders][len(line):]) // let go of those taken out
-	g.lines[Outsiders] = line
+	clear(g.lines[c][len(line):]) // let go of those taken out
+	g.lines[c] = line
 }
 
 // Waiting says whether key is in line, its turn not yet come.
