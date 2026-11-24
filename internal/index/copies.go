@@ -87,6 +87,9 @@ func (x *Index) WriteCopy(ctx context.Context, file string) (CopyInfo, error) {
 	// A small page cache for the copy (VACUUM INTO gives the new file the same): it reads and writes each page once.
 	_, err = conn.ExecContext(ctx, fmt.Sprintf("PRAGMA cache_size = -%d", copyCacheKiB))
 	if err == nil {
+		err = private(file) // made empty and the Drive's own user's alone, for VACUUM INTO to fill
+	}
+	if err == nil {
 		_, err = conn.ExecContext(ctx, "VACUUM INTO ?", file)
 	}
 	_, _ = conn.ExecContext(context.WithoutCancel(ctx), "PRAGMA cache_size = -2000") // SQLite's default, for the pool

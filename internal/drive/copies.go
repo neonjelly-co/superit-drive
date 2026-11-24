@@ -44,7 +44,8 @@ import (
 // latest copy (two for a moment, while the one before it is removed), and upload-<random>.part while one arrives. A
 // copy the Drive refused to adopt is moved aside there, as refused-<when>-<its name>, and kept; so is a copy made by a
 // newer Drive that the index was made without (adopt.go), as newer-version-<when>-<its name>, once a copy of the
-// Drive's own is there.
+// Drive's own is there; and so is any other copy numbered after the Drive's own, as higher-numbered-<when>-<its name>
+// (removeOthers).
 const CopiesFolder = HiddenFolder + "/index"
 
 // copiesFolderOf is the folder of the copies of the index whose storage id is id; ok is false for an id that cannot name
@@ -321,7 +322,7 @@ func (k *keeper) toStorage(ctx context.Context, info index.CopyInfo) (string, er
 	}
 	d.stopAt("own copy stored")
 	if spare, ok := k.setAsideNewer(ctx, folder, info.Seq); ok {
-		k.removeOthers(ctx, folder, append(spare, copyName(info.Seq)))
+		k.removeOthers(ctx, folder, info.Seq, append(spare, copyName(info.Seq)))
 	}
 	return name, nil
 }
@@ -369,13 +370,23 @@ func (k *keeper) setAsideNewer(ctx context.Context, folder string, seq int64) (s
 	return spare, true
 }
 
-// removeOthers removes from the copies' folder every copy but those in keep, and every upload left there. A copy moved
-// aside (refused, or made by a newer version) stays.
-func (k *keeper) removeOthers(ctx context.Context, folder string, keep []string) {
-	var old []string
+// removeOthers removes from the copies' folder every copy before the one just put there, numbered seq, but those in
+// keep, and every upload left there. A copy moved aside (refused, or made by a newer version) stays.
+//
+// A copy numbered after seq is not one this index came before: it is of an index this one was made without (the Drive
+// once started with no index and could not see the storage's mark, built an empty one, and took the mark later). It
+// may be the only record of every share, link and guest, so it is never removed: it is moved aside, to
+// higher-numbered-<when>-<its name>, kept, and said loudly.
+func (k *keeper) removeOthers(ctx context.Context, folder string, seq int64, keep []string) {
+	var old, higher []string
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
 	err := k.d.storage.Each(sctx, folder, func(e storage.Entry) error {
-		if _, isCopy := copySeqOf(e.Name); (isCopy || strings.HasSuffix(e.Name, ".part")) && !slices.Contains(keep, e.Name) && !e.Folder {
+		n, isCopy := copySeqOf(e.Name)
+		switch {
+		case e.Folder || slices.Contains(keep, e.Name):
+		case isCopy && n > seq:
+			higher = append(higher, e.Name)
+		case isCopy || strings.HasSuffix(e.Name, ".part"):
 			old = append(old, folder+"/"+e.Name)
 		}
 		return nil
@@ -383,6 +394,25 @@ func (k *keeper) removeOthers(ctx context.Context, folder string, keep []string)
 	cancel()
 	if err != nil && k.d.logged.due("copies not removed", 10*time.Minute) {
 		k.d.log.Warn("the copies of the index before the last could not be listed on the storage; they are removed after the next copy", "error", err)
+	}
+	for _, name := range higher {
+		aside := folder + "/higher-numbered-" + time.Now().UTC().Format("20060102T150405Z") + "-" + name
+		sctx, cancel := context.WithTimeout(ctx, storageTimeout)
+		err := k.d.storage.Move(sctx, folder+"/"+name, aside)
+		cancel()
+		switch {
+		case err == nil:
+			k.d.log.Error("THE STORAGE HELD A COPY OF THE INDEX NUMBERED AFTER THIS DRIVE'S OWN: this index was made without it "+
+				"(the Drive started with no index while it could not see its mark on the storage). The copy was moved aside "+
+				"and is kept; to get its shares, links and guests back, stop the Drive, give the copy back its name, and "+
+				"start the Drive with an empty data folder", "copy", aside, "this Drive's own", copyName(seq))
+		case errors.Is(err, storage.ErrNotFound):
+		default:
+			if k.d.logged.due("higher copy not moved", 10*time.Minute) {
+				k.d.log.Error("a copy of the index numbered after this Drive's own could not be moved aside on the storage; "+
+					"it stays where it is, and is tried again after the next copy", "copy", folder+"/"+name, "error", err)
+			}
+		}
 	}
 	for _, p := range old {
 		k.removeOnStorage(p)

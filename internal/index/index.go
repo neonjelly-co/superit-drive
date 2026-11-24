@@ -56,6 +56,9 @@ func Open(ctx context.Context, dataDir string) (*Index, error) {
 		return nil, fmt.Errorf("preparing the index's search: %w", err)
 	}
 	file := filepath.Join(dataDir, FileName)
+	if err := private(file); err != nil {
+		return nil, fmt.Errorf("opening the index %s: %w", file, err)
+	}
 	pragmas := url.Values{}
 	for _, p := range []string{"journal_mode(WAL)", "busy_timeout(5000)", "foreign_keys(1)", "synchronous(NORMAL)"} {
 		pragmas.Add("_pragma", p)
@@ -399,4 +402,18 @@ func (x *Index) AddMyFiles(ctx context.Context, userID, folder string) (Place, e
 		return Place{}, err
 	}
 	return x.MyFiles(ctx, userID)
+}
+
+// private makes sure the file at path is there and only the Drive's own user reads or writes it, whatever the data
+// folder's own mode lets others do: the index holds every name, address and share. SQLite gives the files it keeps
+// beside a database (its log) the database's mode, and fills an empty file as it would make one.
+func private(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
