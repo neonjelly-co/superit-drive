@@ -510,7 +510,8 @@ brought; guests sign in again with a new link.
   left alone: the Drive does not start.
 - A copy numbered after the Drive's own, which the index does not know of, is never removed. It is there when the Drive
   once started with no index while it could not see its mark on the storage (a wrong `DRIVE_STORAGE_FOLDER`, a disk not
-  mounted yet): it built an empty index, and took the mark when the storage came back. When its first copy is on the
+  mounted yet): it built an empty index, and took the mark when the storage came back. (Or when its data folder was put
+  back to an older state than the storage's copy.) When its first copy is on the
   storage, it moves the higher-numbered one aside, to `higher-numbered-<when>-<its name>`, keeps it, and says so loudly
   (`level=ERROR`, `THE STORAGE HELD A COPY OF THE INDEX NUMBERED AFTER THIS DRIVE'S OWN`). To get its shares, links and
   guests back: stop the Drive, give the copy back its name, and start the Drive with an empty data folder.

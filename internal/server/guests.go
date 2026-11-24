@@ -362,7 +362,7 @@ func (s *Server) signIn(w http.ResponseWriter, r *http.Request, _ call) {
 //
 //	POST /s/guest/api/sign-out   204
 func (s *Server) signOut(w http.ResponseWriter, r *http.Request, _ call) {
-	if ck, err := r.Cookie(s.guestCookie()); err == nil {
+	for _, ck := range r.CookiesNamed(s.guestCookie()) { // every session named, should there be two
 		if err := s.drive.SignOut(r.Context(), ck.Value); err != nil {
 			s.fail(w, r, err)
 			return

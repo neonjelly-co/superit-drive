@@ -448,7 +448,7 @@ func (d *Drive) FinishUpload(ctx context.Context, p index.Place, folder *index.I
 	if err != nil {
 		return Upload{}, err
 	}
-	if err := d.index.RemoveUpload(ctx, u.ID); err != nil {
+	if err := d.index.RemoveUpload(context.WithoutCancel(ctx), u.ID); err != nil { // stored: whoever sent it may be gone
 		d.log.Error("a finished upload is still in the index; it is removed within a day", "upload", u.ID, "error", err)
 	}
 	return up, nil

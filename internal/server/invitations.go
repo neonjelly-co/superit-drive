@@ -279,7 +279,11 @@ func guestAddress(typed string) (string, bool) {
 	}
 	// A name, never a machine's number (x@[10.0.0.5], x@10.0.0.5): a mail server that takes those delivers to whichever
 	// machine the member picked, inside its own network too.
-	if strings.ContainsAny(domain, "[]:") || net.ParseIP(domain) != nil {
+	// Its last part is letters somewhere: all digits, or a number in hexadecimal, is how a number is written in other
+	// ways (x@127.1, x@0x7f.0.0.1). (A name that leads to a machine inside is the mail server's to refuse.)
+	last := domain[strings.LastIndexByte(domain, '.')+1:]
+	if strings.ContainsAny(domain, "[]:") || net.ParseIP(domain) != nil || strings.HasPrefix(last, "0x") ||
+		!strings.ContainsFunc(last, func(r rune) bool { return r >= 'a' && r <= 'z' }) {
 		return "", false
 	}
 	return address, true

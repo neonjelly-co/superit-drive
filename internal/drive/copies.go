@@ -373,9 +373,9 @@ func (k *keeper) setAsideNewer(ctx context.Context, folder string, seq int64) (s
 // removeOthers removes from the copies' folder every copy before the one just put there, numbered seq, but those in
 // keep, and every upload left there. A copy moved aside (refused, or made by a newer version) stays.
 //
-// A copy numbered after seq is not one this index came before: it is of an index this one was made without (the Drive
-// once started with no index and could not see the storage's mark, built an empty one, and took the mark later). It
-// may be the only record of every share, link and guest, so it is never removed: it is moved aside, to
+// A copy numbered after seq is not one this index came before: it is of an index this one was not made from (the Drive
+// once started with no index and could not see the storage's mark, built an empty one, and took the mark later; or its
+// data folder was put back to an older state). It may be the only record of every share, link and guest, so it is never removed: it is moved aside, to
 // higher-numbered-<when>-<its name>, kept, and said loudly.
 func (k *keeper) removeOthers(ctx context.Context, folder string, seq int64, keep []string) {
 	var old, higher []string
@@ -402,8 +402,9 @@ func (k *keeper) removeOthers(ctx context.Context, folder string, seq int64, kee
 		cancel()
 		switch {
 		case err == nil:
-			k.d.log.Error("THE STORAGE HELD A COPY OF THE INDEX NUMBERED AFTER THIS DRIVE'S OWN: this index was made without it "+
-				"(the Drive started with no index while it could not see its mark on the storage). The copy was moved aside "+
+			k.d.log.Error("THE STORAGE HELD A COPY OF THE INDEX NUMBERED AFTER THIS DRIVE'S OWN: this index was not made from it "+
+				"(the Drive started with no index while it could not see its mark on the storage, or its data folder was "+
+				"put back to an older state). The copy was moved aside "+
 				"and is kept; to get its shares, links and guests back, stop the Drive, give the copy back its name, and "+
 				"start the Drive with an empty data folder", "copy", aside, "this Drive's own", copyName(seq))
 		case errors.Is(err, storage.ErrNotFound):
