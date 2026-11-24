@@ -95,25 +95,25 @@ func (d *Drive) LinkByID(ctx context.Context, id int64) (index.Link, error) {
 // SetLinkKind changes what the public link on a live item of the place lets visitors do, keeping its address
 // (index.ErrNoLink when it has none, index.ErrLinkKind for an upload-only link on a file). It takes the place's lock,
 // as MakeLink does. The member by becomes its maker when the kind changes.
-func (d *Drive) SetLinkKind(ctx context.Context, p index.Place, it index.Item, kind, by string) (index.Link, error) {
+func (d *Drive) SetLinkKind(ctx context.Context, p index.Place, it index.Item, kind, by string, takeOver bool) (index.Link, error) {
 	leave, err := d.inPlace(ctx, p)
 	if err != nil {
 		return index.Link{}, err
 	}
 	defer leave()
-	l, err := d.index.SetLinkKind(ctx, p.ID, it.ID, kind, by)
+	l, err := d.index.SetLinkKind(ctx, p.ID, it.ID, kind, by, takeOver)
 	return d.withUses(l), err
 }
 
 // ResetLink starts the count of what the public link on a live item of the place has taken in again from 0, so that an
 // upload-only link that took in all it may takes files again (index.ErrNoLink when it has none).
-func (d *Drive) ResetLink(ctx context.Context, p index.Place, it index.Item) (index.Link, error) {
+func (d *Drive) ResetLink(ctx context.Context, p index.Place, it index.Item, by string) (index.Link, error) {
 	leave, err := d.inPlace(ctx, p)
 	if err != nil {
 		return index.Link{}, err
 	}
 	defer leave()
-	l, err := d.index.ResetLink(ctx, p.ID, it.ID)
+	l, err := d.index.ResetLink(ctx, p.ID, it.ID, by)
 	return d.withUses(l), err
 }
 

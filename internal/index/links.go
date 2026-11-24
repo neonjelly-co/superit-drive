@@ -170,7 +170,10 @@ func (x *Index) MakeLink(ctx context.Context, placeID, itemID int64, hash []byte
 // changes, the member by becomes the link's maker, as whoever changes an invitation becomes its giver (ChangeInvitation):
 // in a My files a link counts only while its maker may still share, so what one person made of another's link (an
 // upload-only link turned into one that shows the folder) never outlasts their own access under the other's name.
-func (x *Index) SetLinkKind(ctx context.Context, placeID, itemID int64, kind, by string) (Link, error) {
+//
+// With takeOver, by becomes its maker also when the kind stays as it is: that is how whoever may share an item makes a
+// link theirs that someone else made, or made theirs by changing its kind and back, at the address it has.
+func (x *Index) SetLinkKind(ctx context.Context, placeID, itemID int64, kind, by string, takeOver bool) (Link, error) {
 	if by == "" {
 		return Link{}, errors.New("a link's kind is changed by a member")
 	}
@@ -183,7 +186,8 @@ func (x *Index) SetLinkKind(ctx context.Context, placeID, itemID int64, kind, by
 			return ErrLinkKind
 		}
 		// Only when it changes: the same kind again is no access change.
-		_, err = tx.ExecContext(ctx, "UPDATE links SET kind = ?, made_by = ? WHERE item_id = ? AND kind != ?", kind, by, itemID, kind)
+		_, err = tx.ExecContext(ctx, "UPDATE links SET kind = ?1, made_by = ?2 WHERE item_id = ?3 AND (kind != ?1 OR (?4 AND made_by != ?2))",
+			kind, by, itemID, takeOver)
 		return err
 	})
 	if err != nil {
@@ -194,12 +198,22 @@ func (x *Index) SetLinkKind(ctx context.Context, placeID, itemID int64, kind, by
 
 // ResetLink starts the count of what the link on a live item of the place has taken in again from 0: ErrNoLink when the
 // item has none.
-func (x *Index) ResetLink(ctx context.Context, placeID, itemID int64) (Link, error) {
+//
+// The member by becomes the link's maker, as with a change of its kind (SetLinkKind): a link given room for another
+// ten gigabytes is theirs to answer for, and stops with their access.
+func (x *Index) ResetLink(ctx context.Context, placeID, itemID int64, by string) (Link, error) {
+	if by == "" {
+		return Link{}, errors.New("a link is reset by a member")
+	}
 	err := x.write(ctx, func(tx *sql.Tx) error {
 		if _, err := item(ctx, tx, placeID, itemID); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, "UPDATE links SET taken_in = 0, taken_files = 0 WHERE item_id = ?", itemID)
+		if _, err := tx.ExecContext(ctx, "UPDATE links SET taken_in = 0, taken_files = 0 WHERE item_id = ?", itemID); err != nil {
+			return err
+		}
+		// On its own, and only when it changes: a reset by its maker is no access change, and makes no copy of the index.
+		_, err := tx.ExecContext(ctx, "UPDATE links SET made_by = ? WHERE item_id = ? AND made_by != ?", by, itemID, by)
 		return err
 	})
 	if err != nil {

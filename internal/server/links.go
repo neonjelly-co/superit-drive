@@ -154,6 +154,8 @@ func (s *Server) makeLink(w http.ResponseWriter, r *http.Request, c call) {
 func (s *Server) setLinkKind(w http.ResponseWriter, r *http.Request, c call) {
 	var body struct {
 		Kind string `json:"kind"`
+		// TakeOver makes the person asking the link's maker also when its kind stays as it is.
+		TakeOver bool `json:"takeOver"`
 	}
 	if !s.readBody(w, r, &body) {
 		return
@@ -166,8 +168,32 @@ func (s *Server) setLinkKind(w http.ResponseWriter, r *http.Request, c call) {
 	if !ok {
 		return
 	}
-	l, err := s.drive.SetLinkKind(r.Context(), *c.place, *c.item, kind, c.member.UserID)
+	if !s.mayTakeLink(w, r, c) {
+		return
+	}
+	l, err := s.drive.SetLinkKind(r.Context(), *c.place, *c.item, kind, c.member.UserID, body.TakeOver)
 	s.changedLink(w, r, c, l, err)
+}
+
+// mayTakeLink says whether the person asking may become the maker of the link on c.item, as changing its kind,
+// resetting it or taking it over makes them: its maker always; anyone else only while it works. A link that has stopped
+// (in a My files, its maker may no longer share the item) stays stopped, whoever asks: made another's, it would work
+// again at the address its maker knows, who was to be kept out. A new link in its place has a new address. ok is false
+// when the person was already answered; a link that is not there is for the change itself to answer.
+func (s *Server) mayTakeLink(w http.ResponseWriter, r *http.Request, c call) (ok bool) {
+	l, err := s.drive.LinkOn(r.Context(), *c.item)
+	if errors.Is(err, index.ErrNoLink) {
+		return true
+	}
+	if err != nil {
+		s.fail(w, r, err)
+		return false
+	}
+	if l.MadeBy != c.member.UserID && !linkWorks(l, c.access, s.members.Current()) {
+		s.refuse(w, r, http.StatusConflict, linkStopped)
+		return false
+	}
+	return true
 }
 
 // resetLink lets an upload-only link that has taken in all it may (drive.LinkLimit) take files again: what it has taken
@@ -177,7 +203,10 @@ func (s *Server) setLinkKind(w http.ResponseWriter, r *http.Request, c call) {
 //	200 {"link": {…}}
 //	409 {"error"}    it has no link
 func (s *Server) resetLink(w http.ResponseWriter, r *http.Request, c call) {
-	l, err := s.drive.ResetLink(r.Context(), *c.place, *c.item)
+	if !s.mayTakeLink(w, r, c) {
+		return
+	}
+	l, err := s.drive.ResetLink(r.Context(), *c.place, *c.item, c.member.UserID)
 	s.changedLink(w, r, c, l, err)
 }
 

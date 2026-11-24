@@ -134,6 +134,10 @@ var (
 		"Feltöltési link csak mappára készülhet. Egy fájl linkjével megnyitni és letölteni lehet.")
 	linkExists = text.M("This already has a public link. Make a new one in its place to change its address.",
 		"Ennek már van nyilvános linkje. Ha új címet szeretnél, készíts újat a helyére.")
+	linkStopped = text.M("This link no longer works: whoever made it can no longer share this. Make a new link in its place.",
+		"Ez a link már nem működik: aki készítette, már nem oszthatja meg ezt. Készíts helyette új linket.")
+	endTooFar = text.M("That end date is too far ahead. Choose an earlier one, or none.",
+		"Ez a nap túl távoli. Válassz egy korábbit, vagy ne adj meg semmit.")
 	noLinkYet = text.M("This has no public link. Make one first.",
 		"Ennek nincs nyilvános linkje. Előbb készíts egyet.")
 	offForThisFolder = text.M("Sharing outside the project is switched off for this shared folder, so no public link can be made "+

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/index"
@@ -76,8 +77,43 @@ func (d *Drive) moveOnStorage(ctx context.Context, folder bool, from, to string)
 	return d.moveWithin(ctx, storageTimeout, folder, from, to)
 }
 
+// An unsureMove is a move the storage gave no answer to (the connection broke, or the time for it ran out), and which
+// a look at both ends did not settle: the storage may have made it, may be making it still, or may yet make it. Nothing
+// that would remove what is at either end is done after one (unsure): a folder emptied "because the move failed" may
+// hold, a moment later, the very thing that was being moved.
+type unsureMove struct{ err error }
+
+func (u *unsureMove) Error() string { return u.err.Error() }
+func (u *unsureMove) Unwrap() error { return u.err }
+
+// unsure says whether err is of a move that may have been made, or may yet be.
+func unsure(err error) bool {
+	var u *unsureMove
+	return errors.As(err, &u)
+}
+
+// recorded writes to the index what a move on the storage has just done, again a few times when the index is busy
+// (another change holds it for longer than a write waits): given up on, the storage and the index would disagree, and
+// the next look at the folder would take the item for a new one, without what was given on it.
+func (d *Drive) recorded(write func() error) error {
+	err := write()
+	for try := 0; try < 3 && indexBusy(err); try++ {
+		time.Sleep(time.Second)
+		err = write()
+	}
+	return err
+}
+
+func indexBusy(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "database is locked"))
+}
+
 // moveWithin is moveOnStorage, given timeout to finish.
+//
+// When the storage gives no answer, both ends are looked at: the item at to and no longer at from is a move made, and
+// no error; anything else is an *unsureMove.
 func (d *Drive) moveWithin(ctx context.Context, timeout time.Duration, folder bool, from, to string) error {
+	asked := ctx
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var err error
@@ -92,7 +128,18 @@ func (d *Drive) moveWithin(ctx context.Context, timeout time.Duration, folder bo
 			return fmt.Errorf("%w (the folder it was going into is missing)", storage.ErrNotFound)
 		}
 	}
-	return err
+	if err == nil || status != nil || errors.Is(err, storage.ErrExists) || errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrFull) {
+		return err // the storage answered
+	}
+	look, done := context.WithTimeout(context.WithoutCancel(asked), storageTimeout)
+	defer done()
+	if _, there := d.storage.Stat(look, to); there == nil {
+		if _, left := d.storage.Stat(look, from); errors.Is(left, storage.ErrNotFound) {
+			d.log.Warn("the storage did not answer a move, and made it", "from", from, "to", to, "error", err)
+			return nil
+		}
+	}
+	return &unsureMove{err}
 }
 
 // removeEntry removes an entry's folder from the trash on the storage, with whatever is still in it.
@@ -138,7 +185,9 @@ func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item, by str
 	defer held()
 	to, _ := pathIn(dir, it.Name)
 	if err := d.moveOnStorage(ctx, it.Folder, from, to); err != nil {
-		_ = d.removeEntry(ctx, dir)
+		if !unsure(err) { // unsure, the entry may hold the item, now or in a moment: it is left, and never removed with it
+			_ = d.removeEntry(ctx, dir)
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			// Gone from the storage already: the index follows, hiding it until a later look confirms it.
 			if err := d.index.MarkMissing(ctx, p.ID, it.ParentID, it.ID, it.Name, d.now(), stale); err != nil {
@@ -149,7 +198,14 @@ func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item, by str
 		return TrashEntry{}, storageError(err)
 	}
 	d.changed(folderKey{p.ID, it.ParentID}, folderKey{p.ID, trashFolder})
-	if err := d.index.Trash(ctx, p.ID, it.ID, d.now(), entry, by); err != nil {
+	if err := d.recorded(func() error { return d.index.Trash(ctx, p.ID, it.ID, d.now(), entry, by) }); err != nil {
+		// The index did not take it: back where it was, so the two agree (its entry goes once it is empty again).
+		if back := d.moveOnStorage(ctx, it.Folder, to, from); back == nil {
+			_ = d.removeEntry(ctx, dir)
+		} else {
+			d.log.Error("an item moved to the trash on the storage could not be put back after the index refused it; a look at its folder sets the index right",
+				"from", from, "to", to, "error", back)
+		}
 		return TrashEntry{}, err
 	}
 	t, err := d.index.TrashItem(ctx, p.ID, it.ID)
@@ -172,15 +228,24 @@ func (d *Drive) putAside(ctx context.Context, p index.Place, folder *index.Item,
 	defer held()
 	to, _ := pathIn(dir, there.Name)
 	if err := d.moveOnStorage(ctx, false, file, to); err != nil {
-		_ = d.removeEntry(ctx, dir)
+		if !unsure(err) { // as in Delete
+			_ = d.removeEntry(ctx, dir)
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, nil, nil
 		}
 		return nil, nil, storageError(err)
 	}
 	d.changed(folderKey{p.ID, trashFolder})
-	id, err := d.index.AddReplaced(ctx, p.ID, folderID(folder), index.Seen{Name: there.Name, Size: there.Size, Changed: there.Changed}, d.now(), entry, by)
+	var id int64
+	err = d.recorded(func() (err error) {
+		id, err = d.index.AddReplaced(ctx, p.ID, folderID(folder), index.Seen{Name: there.Name, Size: there.Size, Changed: there.Changed}, d.now(), entry, by)
+		return err
+	})
 	if err != nil {
+		if back := d.moveOnStorage(ctx, false, to, file); back == nil { // the file stays where it was
+			_ = d.removeEntry(ctx, dir)
+		}
 		return nil, nil, err
 	}
 	t, err := d.index.TrashItem(ctx, p.ID, id)
@@ -312,7 +377,8 @@ func (d *Drive) Restore(ctx context.Context, p index.Place, t index.TrashItem, i
 		if err != nil {
 			return index.Item{}, err
 		}
-		if err := d.removeEntry(ctx, dir); err != nil {
+		// Restored: its emptied entry goes whoever asked has gone meanwhile.
+		if err := d.removeEntry(context.WithoutCancel(ctx), dir); err != nil {
 			d.log.Warn("an emptied folder in the trash could not be removed", "folder", dir, "error", err)
 		}
 		return it, nil
@@ -375,12 +441,19 @@ func (d *Drive) restoreInto(ctx context.Context, p index.Place, t index.TrashIte
 		return index.Item{}, ErrGone
 	}
 	d.changed(folderKey{p.ID, folderID(dest)}, folderKey{p.ID, trashFolder})
-	it, err := d.index.Restore(ctx, p.ID, t.ID, folderID(dest), name)
+	var it index.Item
+	err = d.recorded(func() (err error) {
+		it, err = d.index.Restore(ctx, p.ID, t.ID, folderID(dest), name)
+		return err
+	})
 	if errors.Is(err, index.ErrNoFolder) {
 		// The folder it went back into moved to another place, or went, meanwhile: back into the trash, and the top
 		// folder is tried instead.
 		d.putBack(ctx, t.Folder, from, to)
 		return index.Item{}, ErrGone
+	}
+	if err != nil {
+		d.putBack(ctx, t.Folder, from, to) // the index did not take it: back into the trash, so the two agree
 	}
 	return it, err
 }

@@ -3,6 +3,7 @@ package drive
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path"
 	"time"
 
@@ -134,11 +135,14 @@ func (d *Drive) DeleteSharedFolder(ctx context.Context, p index.Place) (DeletedS
 	// never heard of would be taken for one made on the storage directly, and lose what was given on the item.
 	ctx = context.WithoutCancel(ctx)
 	if err := d.moveOnStorage(ctx, true, p.Folder, to); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		_ = d.removeEntry(ctx, dir)
+		if !unsure(err) { // unsure, the entry may hold the whole shared folder, now or in a moment: it is left
+			_ = d.removeEntry(ctx, dir)
+		}
 		return DeletedSharedFolder{}, storageError(err)
 	}
 	d.changed(folderKey{p.ID, 0}, folderKey{p.ID, trashFolder})
-	if err := d.index.DeleteSharedFolder(ctx, p.ID, d.now(), entry); err != nil {
+	if err := d.recorded(func() error { return d.index.DeleteSharedFolder(ctx, p.ID, d.now(), entry) }); err != nil {
+		d.putBack(ctx, true, p.Folder, to) // the index did not take it: back where it was, so the two agree
 		return DeletedSharedFolder{}, err
 	}
 	gone, err := d.index.DeletedPlace(ctx, p.ID)
@@ -200,7 +204,21 @@ func (d *Drive) RestoreSharedFolder(ctx context.Context, p index.Place) (index.P
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
 		// Its top folder is not in its entry (it had gone before it was deleted): an empty one, as a listing would make.
-		if err := d.storage.CreateFolder(sctx, p.Folder); err != nil && !errors.Is(err, storage.ErrExists) {
+		// Only when a look says so too: the entry is removed below with whatever is in it, and an answer of "not there"
+		// that was wrong would take the whole shared folder with it.
+		fctx, done := context.WithTimeout(ctx, storageTimeout)
+		_, serr := d.storage.Stat(fctx, from)
+		if serr == nil {
+			done()
+			return index.Place{}, fmt.Errorf("%w: the storage would not move a shared folder out of the trash, and still holds it there", ErrStorage)
+		}
+		if !errors.Is(serr, storage.ErrNotFound) {
+			done()
+			return index.Place{}, storageError(serr)
+		}
+		err := d.storage.CreateFolder(fctx, p.Folder)
+		done()
+		if err != nil && !errors.Is(err, storage.ErrExists) {
 			return index.Place{}, storageError(err)
 		}
 	case errors.Is(err, storage.ErrExists):
@@ -212,8 +230,8 @@ func (d *Drive) RestoreSharedFolder(ctx context.Context, p index.Place) (index.P
 	if err := d.removeEntry(ctx, dir); err != nil {
 		d.log.Warn("an emptied folder in the trash could not be removed", "folder", dir, "error", err)
 	}
-	if err := d.index.RestoreSharedFolder(ctx, p.ID); err != nil {
-		return index.Place{}, err
+	if err := d.recorded(func() error { return d.index.RestoreSharedFolder(ctx, p.ID) }); err != nil {
+		return index.Place{}, err // its top folder is back at its own path: restoring again finds it there (topFolderBack)
 	}
 	return d.index.PlaceByID(ctx, p.ID)
 }

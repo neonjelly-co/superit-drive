@@ -583,7 +583,10 @@ func (s *Server) guestMove(w http.ResponseWriter, r *http.Request, c call) {
 		s.refuse(w, r, http.StatusNotFound, noSuchDestination) // the same answer as for a folder that is not there
 		return
 	}
-	it, err := s.drive.Move(r.Context(), *c.place, *c.item, &folder)
+	var it index.Item
+	if !s.apart(w, r, c, func() { it, err = s.drive.Move(r.Context(), *c.place, *c.item, &folder) }) {
+		return
+	}
 	var taken *drive.Taken
 	switch {
 	case err == nil:
@@ -602,7 +605,11 @@ func (s *Server) guestMove(w http.ResponseWriter, r *http.Request, c call) {
 //	DELETE /s/guest/api/places/{place}/items/{item}   204
 func (s *Server) guestDelete(w http.ResponseWriter, r *http.Request, c call) {
 	// Who deleted it is not recorded as a member: only whoever sees the place's whole trash restores it.
-	if _, err := s.drive.Delete(r.Context(), *c.place, *c.item, ""); err != nil {
+	var err error
+	if !s.apart(w, r, c, func() { _, err = s.drive.Delete(r.Context(), *c.place, *c.item, "") }) {
+		return
+	}
+	if err != nil {
 		s.changeFailed(w, r, err, c.item.Name)
 		return
 	}

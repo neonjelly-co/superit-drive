@@ -384,10 +384,16 @@ func (k *keeper) removeOthers(ctx context.Context, folder string, seq int64, kee
 		n, isCopy := copySeqOf(e.Name)
 		switch {
 		case e.Folder || slices.Contains(keep, e.Name):
+		// At most maxLeftOvers of each in one go, the rest after the next copy: files put there by the thousand (anyone
+		// with the storage's login can) are not all kept in memory, nor removed one after another for minutes.
 		case isCopy && n > seq:
-			higher = append(higher, e.Name)
+			if len(higher) < maxLeftOvers {
+				higher = append(higher, e.Name)
+			}
 		case isCopy || strings.HasSuffix(e.Name, ".part"):
-			old = append(old, folder+"/"+e.Name)
+			if len(old) < maxLeftOvers {
+				old = append(old, folder+"/"+e.Name)
+			}
 		}
 		return nil
 	})
