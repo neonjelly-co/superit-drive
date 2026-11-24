@@ -67,7 +67,7 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 	// The answer is kept while the turn is held, and sent once it is given back: a guest (or anybody) who does not take
 	// it keeps nobody else waiting.
 	real := w
-	held := &heldAnswer{ResponseWriter: real, most: guestAnswerMost, onSpill: leave}
+	held := &heldAnswer{ResponseWriter: real, most: guestAnswerMost, onSpill: func() { leave() }}
 	w = held
 	defer func() { leave(); s.sendHeld(r, held) }()
 	if !s.fromOwnPage(r) {
@@ -76,6 +76,14 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 		return
 	}
 	c := call{action: rt.action}
+	// A wait for something that is not the Drive's own work (a look at the storage) is not made with the turn held:
+	// the turn is given back, and another taken when the wait is over.
+	c.aside = func(wait func()) (ok bool) {
+		leave()
+		wait()
+		leave, ok = s.guests.enter(r.Context())
+		return ok
+	}
 	guest, stale, err := s.guestSession(r)
 	if err != nil {
 		s.fail(w, r, err)

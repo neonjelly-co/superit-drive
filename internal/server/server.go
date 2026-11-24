@@ -214,6 +214,9 @@ type call struct {
 	// upload is the person's upload in progress the request is about; item is then the folder it goes into (nil: the
 	// place's top folder).
 	upload *index.Upload
+	// aside is set for a request that holds one of the outsiders' turns (a guest's): it gives the turn back, waits as
+	// wait does, and takes a turn again; false when there was none to take, and the request is to be answered as busy.
+	aside func(wait func()) bool
 }
 
 // by is who is asking, as what they do is recorded: a member by user id, a guest by id and address.

@@ -195,6 +195,9 @@ func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item
 		return index.Item{}, err
 	}
 
+	// From here on, whoever asked hanging up changes nothing (as in putInPlace): a move the storage made and the index
+	// never heard of would be taken for one made on the storage directly, and lose what was given on the item.
+	ctx = context.WithoutCancel(ctx)
 	err = d.moveOnStorage(ctx, it.Folder, src, dest)
 	switch {
 	case errors.Is(err, storage.ErrExists):
@@ -269,6 +272,9 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 		return index.Item{}, err
 	}
 
+	// From here on, whoever asked hanging up changes nothing (as in putInPlace): a move the storage made and the index
+	// never heard of would be taken for one made on the storage directly, and lose what was given on the item.
+	ctx = context.WithoutCancel(ctx)
 	err = d.moveOnStorage(ctx, it.Folder, from, dest)
 	switch {
 	case errors.Is(err, storage.ErrExists):

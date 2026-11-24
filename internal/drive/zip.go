@@ -191,7 +191,17 @@ func (z *zipping) items(ctx context.Context, prefix string, in *index.Item, item
 }
 
 func (z *zipping) file(ctx context.Context, name string, it index.Item) error {
-	p, ok := itemPath(z.place, it)
+	// Read again where it is now, and read from there: a zip can go on for hours, and the path it was listed at may be
+	// another file's by now (its folder renamed, and a new one made under the old name), one whoever zips was never
+	// given. A file no longer under the folders it was listed under is no longer part of what is being zipped.
+	now, err := z.d.index.Item(ctx, z.place.ID, it.ID)
+	if errors.Is(err, index.ErrNoItem) || (err == nil && (now.Folder || !sameFolders(now.Above, it.Above))) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	p, ok := itemPath(z.place, now)
 	if !ok {
 		return nil
 	}

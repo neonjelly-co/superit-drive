@@ -130,6 +130,9 @@ func (d *Drive) DeleteSharedFolder(ctx context.Context, p index.Place) (DeletedS
 	}
 	// Not found: its top folder had already gone from the storage. The empty entry stands for it, and restoring makes
 	// the top folder again.
+	// From here on, whoever asked hanging up changes nothing (as in putInPlace): a move the storage made and the index
+	// never heard of would be taken for one made on the storage directly, and lose what was given on the item.
+	ctx = context.WithoutCancel(ctx)
 	if err := d.moveOnStorage(ctx, true, p.Folder, to); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		_ = d.removeEntry(ctx, dir)
 		return DeletedSharedFolder{}, storageError(err)
@@ -190,6 +193,9 @@ func (d *Drive) RestoreSharedFolder(ctx context.Context, p index.Place) (index.P
 	case !errors.Is(err, storage.ErrNotFound):
 		return index.Place{}, storageError(err)
 	}
+	// From here on, whoever asked hanging up changes nothing (as in putInPlace): a move the storage made and the index
+	// never heard of would be taken for one made on the storage directly, and lose what was given on the item.
+	ctx = context.WithoutCancel(ctx)
 	err = d.moveOnStorage(ctx, true, from, p.Folder)
 	switch {
 	case errors.Is(err, storage.ErrNotFound):

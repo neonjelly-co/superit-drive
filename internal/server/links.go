@@ -166,7 +166,7 @@ func (s *Server) setLinkKind(w http.ResponseWriter, r *http.Request, c call) {
 	if !ok {
 		return
 	}
-	l, err := s.drive.SetLinkKind(r.Context(), *c.place, *c.item, kind)
+	l, err := s.drive.SetLinkKind(r.Context(), *c.place, *c.item, kind, c.member.UserID)
 	s.changedLink(w, r, c, l, err)
 }
 
