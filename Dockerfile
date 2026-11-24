@@ -11,6 +11,8 @@ WORKDIR /src/web
 COPY web/package.json web/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY web/ ./
+# The interface carries the notices of the software in it, next to its own files (web/vite.config.ts).
+COPY THIRD-PARTY-NOTICES.txt /src/
 RUN bun run build
 
 FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS build
@@ -28,10 +30,12 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 FROM scratch
 # Certificates to check the storage's HTTPS; a /tmp the Drive's user can write, where SQLite puts a temporary file when
 # one change or one sort is too large to keep in memory (COPY copies what is in a folder, not the folder itself, so the
-# folder made here gets its owner from --chown); /data for the index.
+# folder made here gets its owner from --chown); /data for the index; the Drive's licence and the notices of the software
+# in it, which the binary holds too (`superit-drive licenses`).
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build --chown=65532:65532 /out/tmp /tmp
 COPY --from=build --chown=65532:65532 /out/data /data
+COPY LICENSE THIRD-PARTY-NOTICES.txt /licenses/
 COPY --from=build /out/superit-drive /superit-drive
 USER 65532:65532
 ENV DRIVE_DATA_DIR=/data

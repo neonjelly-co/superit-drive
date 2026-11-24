@@ -4,7 +4,7 @@ BIN     := bin/superit-drive
 IMAGE   := superit-drive:dev
 STORAGE := superit-drive-dev-storage
 
-.PHONY: help ui build test test-short test-memory image dev-storage run dev-ui check-storage
+.PHONY: help ui build notices test test-short test-memory image dev-storage run dev-ui check-storage
 
 help:
 	@grep -E '^[a-z-]+:.*## ' Makefile | sed 's/:.*## /\t/'
@@ -14,6 +14,10 @@ ui: ## Build the interface into web/dist (needs Bun)
 
 build: ui ## Build the Drive, interface included, into bin/
 	CGO_ENABLED=0 go build -trimpath -o $(BIN) ./cmd/superit-drive
+
+notices: ## Write THIRD-PARTY-NOTICES.txt again, after a dependency was added, removed or moved to another version
+	cd web && bun install --frozen-lockfile
+	go run ./dev/notices
 
 test: ## Run every test (needs Docker running)
 	cd web && bun test

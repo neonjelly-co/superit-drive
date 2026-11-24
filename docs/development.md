@@ -8,6 +8,7 @@ make test         # every test (the interface's catalogue test with Bun, then Go
 make test-short   # only the tests that need no Docker
 make test-memory  # the image in a 64 MiB container under 40 downloads and 10 uploads at once (slow)
 make image        # the container image superit-drive:dev
+make notices      # THIRD-PARTY-NOTICES.txt again, after a dependency changed
 ```
 
 **Tests.** `test/` holds the tests through the Drive's HTTP interface. Each one starts the real binary against a
@@ -70,7 +71,8 @@ A browser cannot reach the Drive on :8080 directly, because nothing adds the sig
 interface and passes `/api` to the Drive with the headers for `DEV_USER_ID` (in `dev/drive.env`). That is why
 `DRIVE_ADDRESS` there is `http://localhost:5173`: it is the page the browser is on, so uploads from it are accepted.
 
-**The image.** `docker build` makes one image holding one static binary, CA certificates, and empty `/data` and
+**The image.** `docker build` makes one image holding one static binary, CA certificates, the licences
+(`/licenses`), and empty `/data` and
 `/tmp`, both owned by user 65532, which it runs as (SQLite writes a temporary file in `/tmp` when one change or one sort
 is too large to keep in memory). `make image` tags it `superit-drive:dev`; the [worked example](operations.md#a-worked-example)
 expects the name `ghcr.io/neonjelly-co/superit-drive:<version>`. It starts with the [settings](settings.md) and a
@@ -87,7 +89,8 @@ rename.
 ## Repository layout
 
 ```
-cmd/superit-drive/     main: runs the Drive, or the storage check (`check-storage`)
+cmd/superit-drive/     main: runs the Drive, the storage check (`check-storage`), or prints the licences (`licenses`)
+licenses.go            the Drive's licence (LICENSE) and THIRD-PARTY-NOTICES.txt, built into the binary
 internal/app/          wires everything together and serves until stopped
 internal/settings/     every environment variable
 internal/members/      the member list file, re-read when it changes
@@ -129,10 +132,26 @@ web/                   the interface (Vite, React, Tailwind with the Pilot light
                        each language
 test/                  tests through HTTP; harness/ runs the Drive; webdav/ is the stand-in storage; memory/ is the
                        64 MiB test
-dev/                   settings and a member list for running locally
+dev/                   settings and a member list for running locally; notices/ writes THIRD-PARTY-NOTICES.txt
 examples/compose/      the worked example: the Drive behind Caddy and Authelia
 .github/workflows/     release.yml publishes a version's image when it is tagged
 ```
+
+## Dependencies and their licences
+
+The Drive is AGPL-3.0, and what is built into it must have a licence that allows that: MIT, BSD, ISC, Apache-2.0,
+MPL-2.0 and the like for code, the SIL Open Font License for fonts. Nothing under a licence that forbids it (one that
+is not free, or that bars commercial use) may be added. What only builds or tests the Drive and never goes out with
+it (the interface's `devDependencies`, the images in the Dockerfile's first stages) does not count.
+
+Those licences ask that their notices go with every copy, so `THIRD-PARTY-NOTICES.txt` holds them in full. `make
+notices` writes it (`dev/notices`): it asks Go which modules are compiled into the binary for the published platforms,
+follows the interface's `dependencies` through `web/node_modules`, and copies every licence, notice and patent file at
+the top of each; a package with none stops it, to be read by a person. A test there fails while the file is not what
+the dependencies give, so after a change to `go.mod` or `web/package.json`, run `make notices` and read the difference:
+a new licence shows up in it. The file goes out three ways: built into the binary (`superit-drive licenses` prints it
+after the Drive's own licence), in the image under `/licenses`, and next to the interface's files
+(`assets/THIRD-PARTY-NOTICES.txt`, which every script names in its first line).
 
 ## Releases
 

@@ -65,7 +65,9 @@ make test-short   # only the tests that need no Docker
 ## Licence
 
 Superit Drive is published by neonjelly studio under the GNU Affero General Public License, version 3 (AGPL-3.0).
-The full text is in [LICENSE](LICENSE).
+The full text is in [LICENSE](LICENSE). The software that is not the Drive's own and goes out with it (compiled into
+the binary, sent to the browser with the interface, or carried in the image) keeps its own licences, all of which allow
+that: their notices are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which `superit-drive licenses` prints.
 
 ## Contributing
 
