@@ -2,6 +2,8 @@ package server
 
 import (
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -133,5 +135,44 @@ func TestAsksForOneAddressWaitOnce(t *testing.T) {
 	ask("anna@client.example")
 	if n := len(s.codes); n != codesWaiting || first.address != "anna@client.example" {
 		t.Fatalf("%d asks wait once Anna's was taken and she asked again (the first was for %q)", n, first.address)
+	}
+}
+
+// A request that says it has a body and never sends it is answered all the same, and its connection ends: Go's server
+// would otherwise wait for the body, without a deadline, before it sent the answer.
+func TestABodyThatNeverComesIsNotWaitedFor(t *testing.T) {
+	was := unreadWait
+	unreadWait = 200 * time.Millisecond
+	t.Cleanup(func() { unreadWait = was })
+	srv := httptest.NewUnstartedServer(bareServer(t).Handler())
+	srv.Config.ReadHeaderTimeout = 10 * time.Second // as the Drive's own server: no deadline once the headers are in
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	for _, c := range []struct {
+		request string
+		status  string
+	}{
+		{"GET /api/me HTTP/1.1\r\nHost: files.example.com\r\nContent-Length: 1\r\n\r\n", "400"},
+		{"GET /s/nothing HTTP/1.1\r\nHost: files.example.com\r\nTransfer-Encoding: chunked\r\n\r\n", "400"},
+		{"HEAD /s/nothing HTTP/1.1\r\nHost: files.example.com\r\nContent-Length: 1\r\n\r\n", "400"},
+		{"POST /api/me HTTP/1.1\r\nHost: files.example.com\r\nContent-Length: 1\r\n\r\n", "403"},
+		{"POST /s/nothing HTTP/1.1\r\nHost: files.example.com\r\nContent-Length: 1\r\n\r\n", "405"},
+	} {
+		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := io.WriteString(conn, c.request); err != nil {
+			t.Fatal(err)
+		}
+		// The answer, and then the end of the connection: nothing waits for the body.
+		all, err := io.ReadAll(conn)
+		conn.Close()
+		line, _, _ := strings.Cut(string(all), "\r\n")
+		if err != nil || !strings.HasPrefix(line, "HTTP/1.1 "+c.status) {
+			t.Errorf("%q: answered %q (%v), want %s and the connection ended", strings.SplitN(c.request, "\r\n", 2)[0], line, err, c.status)
+		}
 	}
 }

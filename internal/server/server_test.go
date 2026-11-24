@@ -36,6 +36,14 @@ func bareServer(t *testing.T) *Server {
 	return New(Config{Address: address, HeaderSecret: secret, Members: fixedList{l}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 }
 
+// bodyFor is a body for a request that may have one: a GET or HEAD with a body is refused before anything else.
+func bodyFor(method, body string) io.Reader {
+	if method == http.MethodGet || method == http.MethodHead {
+		return nil
+	}
+	return strings.NewReader(body)
+}
+
 // examplePath turns a route pattern into an address that matches it.
 func examplePath(pattern string) string {
 	_, p, _ := strings.Cut(pattern, " ")
@@ -433,7 +441,7 @@ func TestAMemberIsNobodyUnderTheGuestsPrefix(t *testing.T) {
 			"a wrong cookie":    {"Cookie": {"drive-guest-x=1; __Secure-drive-guest=1; __Host-drive-guest=1"}, "Origin": {"https://files.example.com"}},
 			"a member's cookie": {SecretHeader: {secret}, UserIDHeader: {"u-reka"}, "Cookie": {"authelia_session=abc"}, "Origin": {"https://files.example.com"}},
 		} {
-			req := httptest.NewRequest(method, examplePath(rt.pattern), strings.NewReader("{}"))
+			req := httptest.NewRequest(method, examplePath(rt.pattern), bodyFor(method, "{}"))
 			req.Header = headers.Clone()
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -527,7 +535,7 @@ func TestVisitorsOnlyRead(t *testing.T) {
 				{},
 				{SecretHeader: {secret}, UserIDHeader: {"u-reka"}, "Origin": {"https://files.example.com"}},
 			} {
-				req := httptest.NewRequest(method, path, strings.NewReader("x"))
+				req := httptest.NewRequest(method, path, bodyFor(method, "x"))
 				req.Header = headers.Clone()
 				rec := httptest.NewRecorder()
 				h.ServeHTTP(rec, req)

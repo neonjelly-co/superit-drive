@@ -280,7 +280,7 @@ func (s *Server) Handler() http.Handler {
 		}
 		visitors.ServeHTTP(w, r)
 	}))
-	return securityHeaders(mux)
+	return securityHeaders(s.bodies(mux))
 }
 
 // visitorsMethod says whether a visitor's route has the one method it may: GET, which only reads, for all but sending a

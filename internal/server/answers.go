@@ -21,6 +21,8 @@ import (
 //     Drive little whoever takes it slowly; only a signed-in guest gets one.
 //
 // A transfer's bytes are neither: it leaves its turn once it is decided, and has its own deadlines (transfers.go).
+//
+// And a body nobody reads must not be waited for at all (bodies).
 const (
 	// bodyWait is how long a small body may take to arrive.
 	bodyWait = 15 * time.Second
@@ -39,6 +41,61 @@ const (
 	heldFree   = 64 << 10
 	heldAtOnce = 8 << 20
 )
+
+// unreadWait is how long the rest of a body that no handler read may take to arrive, or to be found not to.
+var unreadWait = bodyWait
+
+// bodies keeps a request's body from being waited for without end. Before Go's server sends an answer, and again once
+// the handler is done, it reads what is left of the request's body (up to 256 KiB), so that the connection can serve
+// another request; the read has the connection's read deadline, and a request has none once its headers are in. So a
+// request that says it has a body and never sends it kept whatever answered it: a download its transfer slot, a
+// visitor's long page its share of what is kept, any other answer its goroutine and connection, for as long as the
+// connection stayed open, and no write deadline ended it. Here:
+//
+//   - a GET or HEAD has no body: one that says it has is refused, and its connection ends;
+//   - any other body has unreadWait from the start, until whoever reads it gives it a time of its own (readSmall,
+//     bodyFirst, receiving), and unreadWait again from when the handler is done, if it was not read to its end (an
+//     upload refused, a change not allowed, an address that is nothing).
+//
+// A body read to its end has no deadline left on it: the connection is then watched for the person hanging up, which
+// a deadline would be taken for.
+func (s *Server) bodies(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body == nil || r.Body == http.NoBody {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(unreadWait))
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			w.Header().Set("Connection", "close") // what they send is not read
+			s.refuse(w, r, http.StatusBadRequest, unreadable)
+			return
+		}
+		body := &readToItsEnd{ReadCloser: r.Body}
+		r.Body = body
+		defer func() {
+			if !body.ended {
+				_ = rc.SetReadDeadline(time.Now().Add(unreadWait))
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// readToItsEnd is a request's body that knows whether it was read to its end.
+type readToItsEnd struct {
+	io.ReadCloser
+	ended bool
+}
+
+func (b *readToItsEnd) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		b.ended = true
+	}
+	return n, err
+}
 
 // heldAnswer keeps an answer, instead of sending it, until sendHeld: up to most bytes. One more byte and it is sent
 // as it is made from then on (spilled): onSpill is called first, to give the turn back, and each write must be taken

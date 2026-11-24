@@ -132,6 +132,11 @@ line. A zip is bounded as for members (10,000 entries).
 - **Headers.** A request's first line and headers may take 32 KiB together (`app.MaxHeaderBytes`; Go's own slack of
   4 KiB on top): a longer one is answered 431 before anything about it is looked at, a visitor's, a guest's or a
   member's. An address the Drive answers and what a browser and the reverse proxy send with it take a few kilobytes.
+- **A body that does not come.** A request that says it has a body and does not send it is not waited for: a `GET`
+  or `HEAD` that says so is refused (400) and its connection ended, a visitor's, a guest's or a member's; the rest of
+  any other body that nothing read (an upload refused, a change not allowed, an address that is nothing) has 15
+  seconds, then the connection ends. Without that, the answer itself waited for the body, with no time limit: a
+  download kept its transfer slot, and any answer its connection, for as long as the sender stayed.
 - **The log.** The lines someone outside the project can cause as often as they ask are written at most once a minute
   each, with what they quote of the request cut to 200 bytes, and the next one says how many were left out (`leftOut`;
   package `seldom`): `refused a change that did not come from the Drive's own pages` (anyone, under `/s/guest`; a
