@@ -299,12 +299,15 @@ and on what is in it, hangs on its id, which an older copy would not find where 
 counts them itself, in the transaction that makes them (migration `0011`: triggers on its tables), so none is missed,
 whatever makes it: a look at the storage that drops something shared counts too. A burst of them makes one copy: it is
 written once nothing changed for 30 seconds, and no change waits more than five minutes for its copy, however much
-changes meanwhile. Files added, folders made and how often links and invitations were used are not access changes: a
+changes meanwhile. Two copies for access changes are at least five minutes apart: renaming a file is an access change
+anyone who may edit can make, and each copy is the whole index, so the first change after a quiet while has its copy
+in 30 seconds, and one that follows that copy closely has its own up to five minutes after it, with those since. Files added, folders made and how often links and invitations were used are not access changes: a
 copy older than them finds the files on the storage, with the access of their folder, and the counts are a night behind
 at most.
 
 **How fresh.** At any moment both copies hold every access change made more than five minutes before (and every one
-made more than 30 seconds before a pause in them), and everything else as it was at the last copy: the last access
+made more than 30 seconds before a pause in them, when no copy was written for an access change in the five minutes
+before), and everything else as it was at the last copy: the last access
 change's, or last night's at the latest. The log says each copy, with why it was made, its number and its size. When the
 storage does not take a copy (it does not answer, or does not hold the Drive's mark), the data folder's copy is
 written all the same, and the storage is asked again every five minutes: once it answers and holds the mark, a new copy

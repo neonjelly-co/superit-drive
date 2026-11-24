@@ -184,6 +184,7 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	copying := drive.DefaultCopying
 	if quiet, latest, retry, ok := clock.Copying(); ok {
 		copying.Quiet, copying.Latest, copying.Retry, copying.Poll = quiet, latest, retry, min(copying.Poll, quiet/4)
+		copying.Apart = 0
 		log.Warn("this is a test build: the copy of the index follows access changes at the pace the test sets",
 			"quiet", quiet.String(), "latest", latest.String(), "retry", retry.String())
 	}
