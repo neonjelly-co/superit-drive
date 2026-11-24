@@ -225,6 +225,8 @@ func (d *Drive) sentInPlace(ctx context.Context, p index.Place, link int64, name
 // the index, a taken name costs a lookup that is lost in the time any request takes. (A name only the storage has, put
 // there directly and not yet seen by a look, still costs the move that finds it: that is all a visitor could tell, and
 // only about such a file.)
+//
+// Past " (999)" the name gets a few random letters instead of a number, and n is 1000 or more.
 func (d *Drive) freeSentName(ctx context.Context, p index.Place, folder *index.Item, dir, name string, from int) (n int, free string, release func(), err error) {
 	for n = max(from, 1); n < 1000; n++ {
 		candidate := name
@@ -246,6 +248,29 @@ func (d *Drive) freeSentName(ctx context.Context, p index.Place, folder *index.I
 		}
 		if !used {
 			return n, candidate, release, nil
+		}
+		release()
+	}
+	// Every numbered name is taken (or from is past them): a name nobody has, with a few random letters where the number
+	// goes. Answering that no name is free would tell a stranger who sent hundreds of files of one name whether that
+	// name was in the folder before theirs: the last of them would be refused one file sooner.
+	for range 3 {
+		candidate := suffixed(name, " ("+randomHex(4)+")", false)
+		path, ok := pathIn(dir, candidate)
+		if !ok {
+			continue
+		}
+		release, ok := d.claim(path)
+		if !ok {
+			continue
+		}
+		used, err := d.index.NameUsed(ctx, p.ID, folderID(folder), candidate)
+		if err != nil {
+			release()
+			return 0, "", nil, err
+		}
+		if !used {
+			return max(from, 1000), candidate, release, nil
 		}
 		release()
 	}

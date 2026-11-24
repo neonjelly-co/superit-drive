@@ -423,6 +423,20 @@ func (d *Drive) FinishUpload(ctx context.Context, p index.Place, folder *index.I
 		return Upload{}, ErrBusy
 	}
 	defer release()
+	// The folder as it is now that the name in it is held: renamed or moved since the request was decided on it, its
+	// path is another folder's, or nobody's, and the file does not go there. Finished again, it goes where the folder is.
+	if folder != nil {
+		now, err := d.index.Item(ctx, p.ID, folder.ID)
+		if errors.Is(err, index.ErrNoItem) {
+			return Upload{}, ErrGone
+		}
+		if err != nil {
+			return Upload{}, err
+		}
+		if at, ok := folderPath(p, &now); !ok || !now.Folder || at != dir {
+			return Upload{}, ErrGone
+		}
+	}
 	n, _, err := d.length(ctx, partial)
 	if err != nil {
 		return Upload{}, err
@@ -531,7 +545,12 @@ func (d *Drive) settle(ctx context.Context, p index.Place, folder *index.Item, d
 // putInPlace moves the whole file at partial, in the uploads folder, to file, called name, in a folder of the place
 // (nil: its top folder), never over anything there (a *Taken error when something is: put there directly since the Drive
 // looked), and records it in the index as added by by. The caller holds the place (inPlace) and the claim on file.
+//
+// From here on, whoever sent the file hanging up changes nothing: the storage may have moved the file by the time the
+// Drive hears of it, and a file moved but not recorded would be in the folder uncounted by the link it came through and
+// without its label. Each step keeps its own time limit.
 func (d *Drive) putInPlace(ctx context.Context, p index.Place, folder *index.Item, partial, file, name string, by By) (index.Item, error) {
+	ctx = context.WithoutCancel(ctx)
 	err := d.moveWithin(ctx, moveIntoPlace, false, partial, file)
 	if errors.Is(err, storage.ErrNotFound) && folder == nil {
 		// The place's top folder is gone from the storage (someone removed it): it is made again.

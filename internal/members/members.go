@@ -148,6 +148,9 @@ type Watcher struct {
 // PollInterval is how often the file is checked for a new version.
 const PollInterval = time.Second
 
+// StaleReminder is how often the log says again that the member list cannot be read, while it cannot.
+const StaleReminder = 10 * time.Minute
+
 // Watch reads the member list and keeps re-reading it until ctx ends. The first read must succeed: the Drive does not
 // start without knowing its members. A later version that cannot be read is logged and the previous one kept, so a
 // broken write never locks everyone out; a missing file is treated the same way.
@@ -160,6 +163,7 @@ func Watch(ctx context.Context, path string, log *slog.Logger) (*Watcher, error)
 		t := time.NewTicker(PollInterval)
 		defer t.Stop()
 		lastProblem := ""
+		var since, said time.Time
 		for {
 			select {
 			case <-ctx.Done():
@@ -167,9 +171,15 @@ func Watch(ctx context.Context, path string, log *slog.Logger) (*Watcher, error)
 			case <-t.C:
 				err := w.reload()
 				switch {
-				case err != nil && err.Error() != lastProblem:
-					w.log.Error("the member list could not be re-read; keeping the previous version", "error", err)
-					lastProblem = err.Error()
+				// Said when it starts or changes, and again every StaleReminder while it lasts: until the list reads again,
+				// nobody removed from it loses their access, and that must not rest on one line someone missed.
+				case err != nil && (err.Error() != lastProblem || time.Since(said) >= StaleReminder):
+					if lastProblem == "" {
+						since = time.Now()
+					}
+					w.log.Error("the member list could not be re-read; keeping the previous version: whoever was removed from "+
+						"the list since keeps their access until it reads again", "error", err, "since", since.UTC().Format(time.RFC3339))
+					lastProblem, said = err.Error(), time.Now()
 				case err == nil:
 					lastProblem = ""
 				}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -25,6 +26,11 @@ import (
 // chose (their own, and the file's or folder's): without a bound, a member could send anyone any number of mails from
 // the Drive.
 const invitationMailsPerHour = 30
+
+// sharedMailsPerHour is how many "shared with you" mails one member's shares cause in an hour. Sharing with a member,
+// taking it away and sharing again mails them each time, with a name the sharer chose: past this many, the share is
+// made all the same, and no mail goes.
+const sharedMailsPerHour = 60
 
 // A mailCount counts the mails each person caused within a while, and says when one has had as many as they may. It is
 // kept in memory, a few times per person at most: a restart forgets it, and the count starts again.
@@ -221,7 +227,7 @@ func (s *Server) changeInvitation(w http.ResponseWriter, r *http.Request, c call
 	if !ok {
 		return
 	}
-	s.changedAccess(w, r, c, s.drive.ChangeInvitation(r.Context(), *c.place, *c.item, guest, string(body.Role), ends))
+	s.changedAccess(w, r, c, s.drive.ChangeInvitation(r.Context(), *c.place, *c.item, guest, string(body.Role), ends, c.member.UserID))
 }
 
 // takeInvitation takes an invitation on a file or folder away: the guest can no longer reach it, and when it was their
@@ -269,6 +275,11 @@ func guestAddress(typed string) (string, bool) {
 	}
 	local, domain, _ := strings.Cut(address, "@")
 	if local == "" || !strings.Contains(domain, ".") || strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") {
+		return "", false
+	}
+	// A name, never a machine's number (x@[10.0.0.5], x@10.0.0.5): a mail server that takes those delivers to whichever
+	// machine the member picked, inside its own network too.
+	if strings.ContainsAny(domain, "[]:") || net.ParseIP(domain) != nil {
 		return "", false
 	}
 	return address, true

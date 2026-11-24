@@ -49,10 +49,20 @@ func TestAGuestGoesWithTheirLastInvitation(t *testing.T) {
 	if granted, _ := x.GrantedToGuest(ctx, anna.ID); len(granted) != 2 {
 		t.Fatalf("what was given to Anna: %+v", granted)
 	}
-	if err := x.ChangeInvitation(ctx, bence.ID, notes.ID, anna.ID, "editor", time.Time{}); err != nil {
+	// Whoever changes an invitation becomes its giver; whoever sends it as it is does not.
+	if err := x.ChangeInvitation(ctx, bence.ID, notes.ID, anna.ID, "viewer", time.Time{}, "u-reka"); err != nil {
 		t.Fatal(err)
 	}
-	if err := x.ChangeInvitation(ctx, bence.ID, offer.ID, anna.ID, "editor", time.Time{}); !errors.Is(err, ErrNoItem) {
+	if got, _ := x.GrantsOn(ctx, bence.ID, []int64{notes.ID}); len(got) != 1 || got[0].By != "u-bence" || got[0].Role != "viewer" {
+		t.Fatalf("Anna's invitation to Notes, sent again as it was: %+v", got)
+	}
+	if err := x.ChangeInvitation(ctx, bence.ID, notes.ID, anna.ID, "editor", time.Time{}, "u-reka"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := x.GrantsOn(ctx, bence.ID, []int64{notes.ID}); len(got) != 1 || got[0].By != "u-reka" || got[0].Role != "editor" {
+		t.Fatalf("Anna's invitation to Notes, changed by Réka: %+v", got)
+	}
+	if err := x.ChangeInvitation(ctx, bence.ID, offer.ID, anna.ID, "editor", time.Time{}, "u-reka"); !errors.Is(err, ErrNoItem) {
 		t.Fatalf("changing an invitation that is not there: %v", err)
 	}
 	if err := x.StartSession(ctx, anna.ID, code("s"), now, now.Add(time.Hour), 10); err != nil {

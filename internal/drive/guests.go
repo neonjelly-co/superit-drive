@@ -71,15 +71,15 @@ func (d *Drive) Invite(ctx context.Context, p index.Place, it index.Item, addres
 	return d.index.Invite(ctx, p.ID, it.ID, members.Address(address), role, ends, d.now(), by)
 }
 
-// ChangeInvitation gives the guest's invitation on a live item of the place a new role and end date (zero: none). It
-// takes the place's lock, as Give does.
-func (d *Drive) ChangeInvitation(ctx context.Context, p index.Place, it index.Item, guest int64, role string, ends time.Time) error {
+// ChangeInvitation gives the guest's invitation on a live item of the place a new role and end date (zero: none), by
+// the member by, who becomes its giver when either changes. It takes the place's lock, as Give does.
+func (d *Drive) ChangeInvitation(ctx context.Context, p index.Place, it index.Item, guest int64, role string, ends time.Time, by string) error {
 	leave, err := d.inPlace(ctx, p)
 	if err != nil {
 		return err
 	}
 	defer leave()
-	return d.index.ChangeInvitation(ctx, p.ID, it.ID, guest, role, ends)
+	return d.index.ChangeInvitation(ctx, p.ID, it.ID, guest, role, ends, by)
 }
 
 // GrantedToGuest returns every item an invitation to the guest is on, the most recently given first: where their

@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/neonjelly-co/superit-drive/internal/clock"
@@ -50,6 +52,10 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 		return err
 	}
 	store := storage.New(s.Storage.URL, s.Storage.User, s.Storage.Password, s.Storage.Folder)
+	if u := s.Storage.URL; u != nil && u.Scheme == "http" && !nearby(u.Hostname()) {
+		log.Warn("DRIVE_STORAGE_URL is http, not https: the storage's login and every file travel unencrypted to "+
+			"another machine. Use https unless the way there is private", "host", u.Hostname())
+	}
 	if shift := clock.Shift(); shift != 0 {
 		log.Warn("this is a test build: its clock is moved forward", "by", shift.String())
 	}
@@ -230,4 +236,14 @@ func Run(ctx context.Context, getenv func(string) string, version string, log *s
 	<-shutdownDone // the requests under way have ended, or had ten seconds to
 	log.Info("stopped")
 	return nil
+}
+
+// nearby says whether a storage's host is this computer or a name without a dot (another container's on the same
+// network, as in the worked example): where a storage is reached over http without its login crossing a network that
+// others share.
+func nearby(host string) bool {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return host == "localhost" || !strings.Contains(host, ".")
 }

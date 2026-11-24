@@ -38,14 +38,25 @@ drive.example.localhost {
 	# answer goes back to the browser. With one, it names the person in Remote-User: their username, which is their
 	# userId in the member list. It is passed on as Remote-User-Id, replacing any the browser sent.
 	handle {
-		forward_auth authelia:9091 {
-			uri /api/authz/forward-auth
-			copy_headers Remote-User>Remote-User-Id
-		}
+		# In the order written (route): Caddy's own order would ask Authelia first and remove the headers after, taking
+		# away the very Remote-User-Id that Authelia's answer gave.
+		route {
+			# What a browser sent about who it is goes first, whatever Authelia then answers: copy_headers below replaces
+			# Remote-User-Id only when Authelia names someone, so an answer that lets a request through without naming
+			# anyone (a bypass rule) would otherwise pass the browser's own header on, with the secret added.
+			request_header -Remote-User-Id
+			request_header -Remote-User
+			request_header -Drive-Secret
 
-		reverse_proxy drive:8080 {
-			# The secret that tells the Drive this request came through here. It replaces any the browser sent.
-			header_up Drive-Secret {$DRIVE_HEADER_SECRET}
+			forward_auth authelia:9091 {
+				uri /api/authz/forward-auth
+				copy_headers Remote-User>Remote-User-Id
+			}
+
+			reverse_proxy drive:8080 {
+				# The secret that tells the Drive this request came through here. It replaces any the browser sent.
+				header_up Drive-Secret {$DRIVE_HEADER_SECRET}
+			}
 		}
 	}
 }

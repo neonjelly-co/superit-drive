@@ -4,3 +4,6 @@ dev/data
 web/node_modules
 web/dist
 **/.DS_Store
+# Settings with real secrets never go into a build
+**/.env
+

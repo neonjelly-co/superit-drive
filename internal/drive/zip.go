@@ -158,6 +158,16 @@ func (z *zipping) items(ctx context.Context, prefix string, in *index.Item, item
 		}
 		name := prefix + entry
 		if it.Folder {
+			// Read again where it is now: a folder moved out of this one since it was listed is no longer part of what
+			// is being zipped, and what is in it now is not looked at (whoever zips through a link on a folder above
+			// would otherwise get the names of the folders in it, at its new place).
+			now, err := z.d.index.Item(ctx, z.place.ID, it.ID)
+			if errors.Is(err, index.ErrNoItem) || (err == nil && (!now.Folder || now.ParentID != folderID(in))) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
 			if err := z.folder(name+"/", &it); err != nil {
 				return err
 			}

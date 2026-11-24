@@ -303,8 +303,14 @@ func (s *Server) giveAccess(who grantee) func(http.ResponseWriter, *http.Request
 // was given as a whole), the project's, and a link to it at DRIVE_ADDRESS. It never names a folder above what was
 // shared, nor the shared folder an item is in. It is in l, the language of the page the person shared from: the Drive
 // knows no other language of the member it goes to.
+//
+// One member's shares cause at most sharedMailsPerHour of these mails in an hour: past that the share stands, and
+// nobody is mailed.
 func (s *Server) tellShared(c call, to members.Member, role access.Role, l text.Lang) {
 	if !s.mail.On() || to.UserID == c.member.UserID || s.address == nil {
+		return
+	}
+	if !s.sharedMails.take(c.member.UserID, s.drive.Now()) {
 		return
 	}
 	link := url.Values{"place": {strconv.FormatInt(c.place.ID, 10)}}

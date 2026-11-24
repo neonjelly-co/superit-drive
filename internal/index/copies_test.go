@@ -126,7 +126,7 @@ func TestAccessChangesAreCounted(t *testing.T) {
 		must(x.StartSession(ctx, guest.ID, bytes.Repeat([]byte{3}, 32), now, now.Add(time.Hour), 10))
 	})
 	counts("an invitation changed", func() {
-		must(x.ChangeInvitation(ctx, p.ID, folder.ID, guest.ID, "editor", now.Add(time.Hour)))
+		must(x.ChangeInvitation(ctx, p.ID, folder.ID, guest.ID, "editor", now.Add(time.Hour), "u-reka"))
 	})
 	counts("an item renamed", func() {
 		_, err := x.Relocate(ctx, p.ID, file.ID, folder.ID, "Offer 2026.pdf")

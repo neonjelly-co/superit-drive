@@ -116,6 +116,12 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 // guestSession is the guest whose session the request's cookie names: nil for none, and stale when a cookie was sent
 // for a session that has ended (or whose guest is now a member).
 func (s *Server) guestSession(r *http.Request) (guest *index.Guest, stale bool, err error) {
+	// Sent twice, there is no telling which the Drive set: a page on another name under the same domain can give a
+	// browser a second one, for a narrower path, which comes first, and put a guest into a session of its own choosing.
+	// Nobody is signed in then.
+	if len(r.CookiesNamed(s.guestCookie())) > 1 {
+		return nil, false, nil
+	}
 	ck, err := r.Cookie(s.guestCookie())
 	if err != nil {
 		return nil, false, nil

@@ -138,7 +138,9 @@ const MinSecretLength = 32
 const PublishedExampleSecret = "example-only-header-secret-0123456789abcdef"
 
 // DevelopmentSecret is the header secret of the repository's own development settings (dev/drive.env), as public as
-// the example's. The Drive runs with it, for development on one's own computer, and says so loudly as it starts.
+// the example's. The Drive runs with it, for development on one's own computer, and says so loudly as it starts; only
+// when it listens on that computer alone (DRIVE_LISTEN at 127.0.0.1, ::1 or localhost): anywhere else, whoever reaches
+// the port would be whoever they say they are.
 const DevelopmentSecret = "dev-secret-dev-secret-dev-secret-0000"
 
 // FromEnv reads the settings. getenv is os.Getenv outside tests. Every problem is reported at once, so a person
@@ -173,6 +175,10 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	}
 	if s.HeaderSecret == PublishedExampleSecret {
 		r.problem("DRIVE_HEADER_SECRET is the example's, which everyone can read: make one of your own (openssl rand -hex 32)")
+	}
+	if s.HeaderSecret == DevelopmentSecret && !onThisComputerOnly(s.Listen) {
+		r.problem("DRIVE_HEADER_SECRET is the repository's development secret, which everyone can read: it is taken only " +
+			"when DRIVE_LISTEN is on this computer alone (such as 127.0.0.1:8080); make one of your own (openssl rand -hex 32)")
 	}
 	if strings.ContainsFunc(s.HeaderSecret, func(r rune) bool { return r > unicode.MaxASCII || !unicode.IsPrint(r) }) {
 		r.problem("DRIVE_HEADER_SECRET must be printable ASCII, so it can travel in a header")
@@ -397,4 +403,17 @@ func ParseSize(raw string) (int64, error) {
 		return 0, fmt.Errorf("must be a whole number of bytes, or one with a unit such as 500GB or 1TiB, not %q", raw)
 	}
 	return n * multiplier, nil
+}
+
+// onThisComputerOnly says whether a listen address takes connections from this computer alone.
+func onThisComputerOnly(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
