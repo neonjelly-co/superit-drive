@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/neonjelly-co/superit-drive/internal/settings"
 )
 
 // Role is a member's role on the project.
@@ -130,11 +132,17 @@ func Parse(data []byte) (*List, error) {
 		if other, dup := l.byEmail[Address(m.Email)]; dup {
 			return nil, fmt.Errorf("members %q and %q have the same email address", other, m.UserID)
 		}
+		// Shown to people outside the project too ("Shared by …" on a link's page, in mail to a guest): one line of
+		// text, without the characters that turn its direction, and no longer than a name is.
+		m.DisplayName = settings.CleanName(m.DisplayName, MaxDisplayName)
 		l.byID[m.UserID] = m
 		l.byEmail[Address(m.Email)] = m.UserID
 	}
 	return l, nil
 }
+
+// MaxDisplayName is how many characters of a member's display name are kept.
+const MaxDisplayName = 120
 
 // Watcher holds the current member list and re-reads the file when it changes.
 type Watcher struct {
