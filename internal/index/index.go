@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -58,6 +59,11 @@ func Open(ctx context.Context, dataDir string) (*Index, error) {
 	file := filepath.Join(dataDir, FileName)
 	if err := private(file); err != nil {
 		return nil, fmt.Errorf("opening the index %s: %w", file, err)
+	}
+	for _, beside := range []string{file + "-wal", file + "-shm"} { // left by a version that made them otherwise
+		if err := os.Chmod(beside, 0o600); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("a file of the index could not be made its user's alone; others who reach the data folder may read it", "file", beside, "error", err)
+		}
 	}
 	pragmas := url.Values{}
 	for _, p := range []string{"journal_mode(WAL)", "busy_timeout(5000)", "foreign_keys(1)", "synchronous(NORMAL)"} {
@@ -415,5 +421,10 @@ func private(path string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o600)
+	// A file the Drive can write and may not change the mode of (another user's, on a data folder used before under
+	// another user) is no reason not to start: it is said, loudly.
+	if err := os.Chmod(path, 0o600); err != nil {
+		slog.Warn("a file of the index could not be made its user's alone; others who reach the data folder may read it", "file", path, "error", err)
+	}
+	return nil
 }

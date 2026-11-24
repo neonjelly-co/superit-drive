@@ -34,6 +34,7 @@ func main() {
 	switch args := os.Args[1:]; {
 	case len(args) == 0:
 		log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+		slog.SetDefault(log) // what has no logger of its own (opening the index) writes its lines the same way
 		if err := app.Run(ctx, os.Getenv, version, log); err != nil {
 			log.Error(err.Error())
 			stop()

@@ -582,7 +582,8 @@ func TestAGuestSignsInWithALinkMailedToThem(t *testing.T) {
 	}
 }
 
-// Over HTTPS the session's cookie is sent only over HTTPS, under a name no page over plain HTTP can set.
+// Over HTTPS the session's cookie is sent only over HTTPS, under a name no page over plain HTTP, and no other name
+// under the same domain, can set (__Host-, which takes the path "/" alone).
 func TestAGuestsCookieOverHTTPS(t *testing.T) {
 	t.Parallel()
 	smtp := mailtest.Start(t, mailtest.Options{})
@@ -592,7 +593,7 @@ func TestAGuestsCookieOverHTTPS(t *testing.T) {
 	x := bencesFiles(t, d)
 	invited(t, d.As(bence), x.place, x.bakery.ID, anna, "viewer", nil)
 	c := signedIn(t, d, smtp, anna)
-	if c.Name != "__Secure-drive-guest" || !c.Secure || c.Path != "/s/guest" || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode {
+	if c.Name != "__Host-drive-guest" || !c.Secure || c.Path != "/" || c.Domain != "" || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode {
 		t.Fatalf("the cookie over HTTPS: %+v", c)
 	}
 	if got := signedInAs(t, d, c); got != anna {
