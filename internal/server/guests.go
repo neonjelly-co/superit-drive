@@ -34,8 +34,9 @@ import (
 // own page, so a program that only fetches the links in a mail signs nobody in and uses nothing up. A code is too long
 // to guess, so wrong ones are not counted, and nothing a stranger does here takes a guest's sign-in away: the links
 // already mailed go on working when another is asked for, and each works once, for drive.CodeValidFor. A session lasts
-// drive.SessionLasts on that browser, in a cookie that only the guests' prefix gets (Path), that no script reads
-// (HttpOnly), that goes only over HTTPS when the Drive's address is HTTPS (Secure, and the __Secure- name), and that no
+// drive.SessionLasts on that browser, in a cookie that no script reads (HttpOnly), that goes only over HTTPS
+// and is taken from the Drive's own name alone when the Drive's address is HTTPS (Secure, and the __Host- name, which
+// takes the path "/"; over plain HTTP only the guests' prefix gets it), and that no
 // other site's page sends along with a change (SameSite=Lax; it is sent when a guest opens a link to the Drive from
 // their mail). Every change also needs the Drive's own Origin, as a member's does.
 //
@@ -124,9 +125,9 @@ func (s *Server) guardGuest(w http.ResponseWriter, r *http.Request, rt route) {
 // guestSession is the guest whose session the request's cookie names: nil for none, and stale when a cookie was sent
 // for a session that has ended (or whose guest is now a member).
 func (s *Server) guestSession(r *http.Request) (guest *index.Guest, stale bool, err error) {
-	// Sent twice, there is no telling which the Drive set: a page on another name under the same domain can give a
-	// browser a second one, for a narrower path, which comes first, and put a guest into a session of its own choosing.
-	// Nobody is signed in then.
+	// Sent twice, there is no telling which the Drive set. Over HTTPS the cookie's name lets no other name set one
+	// (guestCookie); over plain HTTP a page on another name under the same domain can give a browser a second one, for
+	// a narrower path, which comes first, and put a guest into a session of its own choosing. Nobody is signed in then.
 	if len(r.CookiesNamed(s.guestCookie())) > 1 {
 		return nil, false, nil
 	}
@@ -238,13 +239,24 @@ func (s *Server) WorkingInvitations(ctx context.Context, g index.Guest) ([]index
 	return out, nil
 }
 
-// guestCookie is the name of the guests' session cookie: with the __Secure- prefix where the Drive's address is HTTPS,
-// so that a page over plain HTTP can never set one.
+// guestCookie is the name of the guests' session cookie: with the __Host- prefix where the Drive's address is HTTPS.
+// A browser takes a cookie of that name only over HTTPS, from the Drive's own name, for that name alone: no page over
+// plain HTTP can set one, and neither can a page on another name under the same domain, which could otherwise give a
+// guest's browser a session of its own choosing (and have the guest work, and upload, inside it).
 func (s *Server) guestCookie() string {
 	if s.secure() {
-		return "__Secure-drive-guest"
+		return "__Host-drive-guest"
 	}
 	return "drive-guest"
+}
+
+// guestCookiePath is the path the guests' cookie is for: the guests' prefix; except over HTTPS, where the __Host- prefix
+// takes only "/". The browser then sends it with members' requests too, where the Drive never reads it.
+func (s *Server) guestCookiePath() string {
+	if s.secure() {
+		return "/"
+	}
+	return GuestPrefix
 }
 
 func (s *Server) secure() bool {
@@ -252,12 +264,12 @@ func (s *Server) secure() bool {
 }
 
 func (s *Server) setGuestCookie(w http.ResponseWriter, token string, ends time.Time) {
-	http.SetCookie(w, &http.Cookie{Name: s.guestCookie(), Value: token, Path: GuestPrefix,
+	http.SetCookie(w, &http.Cookie{Name: s.guestCookie(), Value: token, Path: s.guestCookiePath(),
 		MaxAge: int(ends.Sub(s.drive.Now()).Seconds()), HttpOnly: true, Secure: s.secure(), SameSite: http.SameSiteLaxMode})
 }
 
 func (s *Server) clearGuestCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: s.guestCookie(), Value: "", Path: GuestPrefix, MaxAge: -1, HttpOnly: true,
+	http.SetCookie(w, &http.Cookie{Name: s.guestCookie(), Value: "", Path: s.guestCookiePath(), MaxAge: -1, HttpOnly: true,
 		Secure: s.secure(), SameSite: http.SameSiteLaxMode})
 }
 

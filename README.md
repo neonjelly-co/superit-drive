@@ -72,7 +72,7 @@ before. In short, the reverse proxy must:
   and its own sign-in cookie, and nothing else: every method (guests upload, rename, move and delete there with `POST`,
   `PUT` and `DELETE`; visitors send files through an upload-only link with `POST`), the request body streamed as it
   arrives (a file sent through a link is one request, up to 10 GB), `Origin`, `Range`, `If-Range`, and the guests'
-  cookie (`__Secure-drive-guest`, or `drive-guest` when `DRIVE_ADDRESS` is plain HTTP) both ways, as for any other
+  cookie (`__Host-drive-guest`, or `drive-guest` when `DRIVE_ADDRESS` is plain HTTP) both ways, as for any other
   request;
 - sign in everything else and add the two headers above, as before, and never add `Drive-Secret` to a request under
   `/s/` (the Drive would ignore it there, but the secret would travel where it is not needed);
@@ -962,6 +962,14 @@ line. A zip is bounded as for members (10,000 entries).
   guest, a member; see [Layout on the storage](#layout-on-the-storage)). The counts are in memory: a restart forgets them, and
   the next line of each kind is written at once.
 
+- **A change, once begun, is finished.** From the moment the Drive asks the storage to move a file or folder (an upload
+  into its folder, a rename, a move, a delete, a restore), it goes on without whoever asked: hanging up then would
+  leave the storage changed and the index not. So a storage that does not answer keeps that request's hold on its
+  place, on the name, and for an upload on its transfer slot, after the person has gone: for as long as the storage's
+  own time limits, 30 seconds for most steps, ten minutes for moving a whole upload into its folder (a storage that
+  copies where a Storage Box renames), some twenty minutes at the very worst. Nobody can make the storage slow; while
+  it is, outsiders' uploads can keep their 8 slots that long, and members' 24 are their own.
+
 #### Upload-only links
 
 A folder's link can be upload-only: anyone with its address sends files into that folder, and sees nothing of what is in
@@ -1115,9 +1123,13 @@ passes the reverse proxy: everything of theirs is under `/s/guest`.
   `DRIVE_HEADER_SECRET`, which the index never holds. A guest who reads their mail on another device than the one they
   want to work on opens the link there: the link signs in the browser it is opened in.
 - **Staying signed in.** The link starts a session of 30 days on that browser, kept by the Drive (the index keeps
-  its token's SHA-256; the browser the token, in a cookie): `__Secure-drive-guest` (`drive-guest` when `DRIVE_ADDRESS`
-  is plain HTTP), `Path=/s/guest`, `HttpOnly`, `Secure` with HTTPS, `SameSite=Lax` (so it comes along when a guest opens
-  the Drive from their mail, and never with another site's change). A guest stays signed in on at most ten browsers;
+  its token's SHA-256; the browser the token, in a cookie): `__Host-drive-guest`, `Path=/`, `Secure` with HTTPS
+  (`drive-guest`, `Path=/s/guest` when `DRIVE_ADDRESS` is plain HTTP), `HttpOnly`, `SameSite=Lax` (so it comes along
+  when a guest opens the Drive from their mail, and never with another site's change). Under the `__Host-` name a
+  browser takes the cookie from the Drive's own name alone: a page on another name under the same domain cannot give a
+  guest's browser a session of its own. The price is `Path=/`: the browser sends the cookie with members' requests too
+  (and so to the sign-in in front of them), where the Drive never reads it. Guests signed in before a version with
+  this name sign in once more. A guest stays signed in on at most ten browsers;
   signing out ends that one. A session ends, for good, when it ends; when the last of their invitations is taken away
   or ends (the guest is removed with it, and their codes, sessions and uploads in progress); when nothing given to them
   lets them in any more (in the trash, gone from the storage, in the My files of someone who left, its giver may no

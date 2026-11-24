@@ -430,7 +430,7 @@ func TestAMemberIsNobodyUnderTheGuestsPrefix(t *testing.T) {
 		for name, headers := range map[string]http.Header{
 			"nothing":           {"Origin": {"https://files.example.com"}},
 			"a member's":        {SecretHeader: {secret}, UserIDHeader: {"u-reka"}, "Origin": {"https://files.example.com"}},
-			"a wrong cookie":    {"Cookie": {"drive-guest-x=1; __Secure-drive-guest=1"}, "Origin": {"https://files.example.com"}},
+			"a wrong cookie":    {"Cookie": {"drive-guest-x=1; __Secure-drive-guest=1; __Host-drive-guest=1"}, "Origin": {"https://files.example.com"}},
 			"a member's cookie": {SecretHeader: {secret}, UserIDHeader: {"u-reka"}, "Cookie": {"authelia_session=abc"}, "Origin": {"https://files.example.com"}},
 		} {
 			req := httptest.NewRequest(method, examplePath(rt.pattern), strings.NewReader("{}"))
