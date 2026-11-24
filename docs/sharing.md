@@ -129,7 +129,9 @@ details (who can see it, and sharing it further, for an editor) open beside the 
 
 People see a shared folder's name. Its top folder on the storage has that name, with ` (2)` and so on added when
 another shared folder, one in the trash included, holds that folder or something is already there: a new shared folder
-never takes over files nobody gave it. So two shared folders can share a name. Making one is refused only when the
+never takes over files nobody gave it. (Nor a name whose folder in the trash, `.superit-drive/trash/Shared folders/<name>`,
+is still on the storage: a shared folder deleted whole lies there, and an index that no longer knows it, built anew or
+made from an older copy, would otherwise show it in the new one's trash, for whoever made that to restore.) So two shared folders can share a name. Making one is refused only when the
 person can already see one of that name; refusing a name they cannot see would tell them it exists.
 
 **A shared folder in the trash.** Deleting a shared folder moves its whole top folder into an entry of its own trash

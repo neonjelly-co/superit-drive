@@ -23,8 +23,8 @@ func (d *Drive) SharedFolders(ctx context.Context) ([]index.Place, error) {
 // and makes creator (a member's user id) its first manager.
 //
 // The top folder is "Shared folders/<name>", or "<name> (2)" and so on when another shared folder holds that folder
-// (one in the trash included) or something is already there on the storage: a new shared folder never takes over
-// files nobody gave it. People see the name either way, so two shared folders can share a name; a person who could
+// (one in the trash included) or something is already there on the storage, or in the trash of that folder there: a
+// new shared folder never takes over files nobody gave it. People see the name either way, so two shared folders can share a name; a person who could
 // see the other one is refused before it gets here.
 func (d *Drive) NewSharedFolder(ctx context.Context, name, creator string) (index.Place, error) {
 	if err := CheckName(name); err != nil {
@@ -69,6 +69,17 @@ func (d *Drive) makeSharedFolder(ctx context.Context, name, folder, creator stri
 	sctx, cancel := context.WithTimeout(ctx, storageTimeout)
 	defer cancel()
 	_, err = d.storage.Stat(sctx, folder)
+	switch {
+	case err == nil:
+		return index.Place{}, false, nil
+	case !errors.Is(err, storage.ErrNotFound):
+		return index.Place{}, false, d.nameError(err, name)
+	}
+	// Nor is anything in the trash of a place that had this top folder: a shared folder deleted whole lies there, and
+	// what was deleted from it, while its top folder is gone. An index that no longer knows that shared folder (built
+	// anew from the files, or made from a copy older than it) would have the next look at the new one's trash take all
+	// of it for the new one's own, for whoever made it to restore.
+	_, err = d.storage.Stat(sctx, trashTop(index.Place{Folder: folder}))
 	switch {
 	case err == nil:
 		return index.Place{}, false, nil
