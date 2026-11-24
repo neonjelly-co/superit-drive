@@ -42,10 +42,16 @@ func (d *Drive) NewFolder(ctx context.Context, p index.Place, in *index.Item, na
 	}
 	defer leave()
 	release, ok := d.claim(made)
-	if !ok {
+	if !ok || d.busyAt(dir) {
+		if ok {
+			release()
+		}
 		return index.Item{}, ErrBusy
 	}
 	defer release()
+	if err := d.stillAt(ctx, p, in, dir); err != nil {
+		return index.Item{}, err
+	}
 	if err := d.ensureTop(ctx, p, in); err != nil {
 		return index.Item{}, err
 	}
@@ -185,13 +191,19 @@ func (d *Drive) MoveToPlace(ctx context.Context, from index.Place, it index.Item
 	release, ok := d.claim(src, dest)
 	// A folder above it that is itself being renamed or moved: what is at this path is on its way elsewhere, and a
 	// change sent to it now would find nothing there and take the item for gone.
-	if !ok || (it.Folder && d.busyInside(src)) || d.busyAt(path.Dir(src)) {
+	if !ok || (it.Folder && d.busyInside(src)) || d.busyAt(path.Dir(src)) || d.busyAt(dir) {
 		if ok {
 			release()
 		}
 		return index.Item{}, ErrBusy
 	}
 	defer release()
+	if err := d.stillAt(ctx, from, &it, src); err != nil {
+		return index.Item{}, err
+	}
+	if err := d.stillAt(ctx, to, into, dir); err != nil {
+		return index.Item{}, err
+	}
 	stale := d.since(folderKey{from.ID, it.ParentID})
 	if busy, err := d.index.Uploading(ctx, from.ID, it.ID); err != nil {
 		return index.Item{}, err
@@ -276,13 +288,20 @@ func (d *Drive) relocate(ctx context.Context, p index.Place, it index.Item, to *
 	release, ok := d.claim(from, dest)
 	// A folder above it that is itself being renamed or moved: what is at this path is on its way elsewhere, and a
 	// change sent to it now would find nothing there and take the item for gone.
-	if !ok || (it.Folder && d.busyInside(from)) || d.busyAt(path.Dir(from)) {
+	if !ok || (it.Folder && d.busyInside(from)) || d.busyAt(path.Dir(from)) || d.busyAt(dir) {
 		if ok {
 			release()
 		}
 		return index.Item{}, ErrBusy
 	}
 	defer release()
+	// The item and the folder it goes into are where they were read, or the change is not made (stillAt).
+	if err := d.stillAt(ctx, p, &it, from); err != nil {
+		return index.Item{}, err
+	}
+	if err := d.stillAt(ctx, p, to, dir); err != nil {
+		return index.Item{}, err
+	}
 	stale := d.since(folderKey{p.ID, it.ParentID})
 	if err := d.ensureTop(ctx, p, to); err != nil {
 		return index.Item{}, err

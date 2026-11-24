@@ -161,6 +161,14 @@ line. A zip is bounded as for members (10,000 entries).
   for a delete is not removed, since it may hold the item, now or a moment later (an empty one goes with the trash
   after 30 days). What the index must record after a move is tried again while the index is busy, and when it still
   cannot be written the move is undone on the storage, so the two agree.
+- **A change is made to the item as it is now, or not at all.** A request is decided with the item where it was when
+  the request came, and the storage moves whatever is at that path. So a rename, a move, a delete and a new folder
+  read the item again just before the storage is asked, holding its path: one that was moved, renamed or deleted
+  meanwhile is answered as gone (404), and nothing is changed. Without that, someone who had a folder moved out of
+  their reach, and put another of its name where it was, could have a change they had sent before take the folder's
+  place in the index (its id, and so what was given on it and what was later put into it) back to where they could
+  open it. A member's small body (the JSON of a change) is read before the change is decided, as a guest's is, so a
+  change is never decided and then carried out up to 15 seconds later.
 
 ### Upload-only links
 

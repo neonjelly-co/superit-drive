@@ -175,6 +175,9 @@ func (d *Drive) Delete(ctx context.Context, p index.Place, it index.Item, by str
 		return TrashEntry{}, ErrBusy
 	}
 	defer release()
+	if err := d.stillAt(ctx, p, &it, from); err != nil {
+		return TrashEntry{}, err
+	}
 	stale := d.since(folderKey{p.ID, it.ParentID})
 
 	// From here on, whoever asked hanging up changes nothing (as in putInPlace): a move the storage made and the index

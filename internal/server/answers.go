@@ -29,6 +29,8 @@ const (
 	// guestBodyMost is the longest body a guest's change may have (an address and a code, a name, a folder's id): read
 	// before any turn is taken, so kept small.
 	guestBodyMost = 8 << 10
+	// memberBodyMost is the longest body a member's change may have, read before it is decided.
+	memberBodyMost = 64 << 10
 	// answerWait is how long a person may take to take an answer that was kept for them.
 	answerWait = 30 * time.Second
 	// guestAnswerMost is the longest answer kept for a guest: a longer one (a long list) is sent as it is made.
@@ -217,7 +219,7 @@ func (s *Server) bodyFirst(w http.ResponseWriter, r *http.Request, most int64) (
 func readSmall(w http.ResponseWriter, r *http.Request, v any) error {
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(bodyWait))
-	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, memberBodyMost))
 	if err != nil {
 		w.Header().Set("Connection", "close") // the deadline stays: nothing more is waited for on this connection
 		return err

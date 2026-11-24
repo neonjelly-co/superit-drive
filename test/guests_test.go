@@ -3,6 +3,7 @@ package test
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -1029,7 +1030,11 @@ func TestAGuestCannotGetOutOfWhatWasGivenToThem(t *testing.T) {
 		fmt.Sprintf("/places/%d/trash/%d/restore", x.place, old.ID), "/members", "/places", "/usage",
 		fmt.Sprintf("/places/%d/zip", x.place)} {
 		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut} {
-			if res := a.Do(t, method, guestAPI+path, strings.NewReader(`{"role":"editor"}`)); res.Status != http.StatusNotFound && res.Status != http.StatusMethodNotAllowed {
+			var body io.Reader // a GET says nothing: one with a body is refused before anything else
+			if method != http.MethodGet {
+				body = strings.NewReader(`{"role":"editor"}`)
+			}
+			if res := a.Do(t, method, guestAPI+path, body); res.Status != http.StatusNotFound && res.Status != http.StatusMethodNotAllowed {
 				t.Errorf("Anna: %s %s: got %d %s", method, path, res.Status, res.Body)
 			}
 		}

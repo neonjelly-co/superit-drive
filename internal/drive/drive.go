@@ -411,6 +411,33 @@ func folderID(folder *index.Item) int64 {
 	return folder.ID
 }
 
+// stillAt says whether the index still has the item it (nil: the place's top folder) at the path at on the storage,
+// where whoever asked for a change read it: nil when it has, ErrGone when the item has moved, has been renamed, or is
+// no longer in the place.
+//
+// A change is asked for with the item as it was read when the request was decided, and moves what is at that path on
+// the storage; the index then records it by the item's id. Between the two the item may have been moved elsewhere, and
+// something else put where it was: the storage would move that other thing, and the index move the item itself, with
+// everything given on it and everything in it, to where the other thing went. So every change reads the item again
+// first, holding its paths (claim) and having found nothing above them under way: from then on no change of the
+// Drive's own can move it before this one is recorded.
+func (d *Drive) stillAt(ctx context.Context, p index.Place, it *index.Item, at string) error {
+	if it == nil {
+		return nil
+	}
+	now, err := d.index.Item(ctx, p.ID, it.ID)
+	if errors.Is(err, index.ErrNoItem) {
+		return ErrGone
+	}
+	if err != nil {
+		return err
+	}
+	if where, ok := itemPath(p, now); !ok || where != at {
+		return ErrGone
+	}
+	return nil
+}
+
 // ErrGone: the item, or the folder it is in or was going to, is no longer on the storage.
 var ErrGone = errors.New("no longer on the storage")
 

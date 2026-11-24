@@ -315,6 +315,12 @@ func (s *Server) guard(rt route) http.Handler {
 			s.refuse(w, r, http.StatusForbidden, refusedOrigin)
 			return
 		}
+		// The small body of a change is read before anything is decided, as a guest's is (answers.go): what is decided
+		// is then done at once, not up to bodyWait later, on an item that was moved or an access that was taken away
+		// meanwhile. An upload's bytes are not: it is decided again once they are in (again.go).
+		if rt.action != access.Upload && !s.bodyFirst(w, r, memberBodyMost) {
+			return
+		}
 		c := call{member: member, person: personOf(member), action: rt.action}
 		if rt.place != "" && !s.findWhere(w, r, rt, &c) {
 			return
