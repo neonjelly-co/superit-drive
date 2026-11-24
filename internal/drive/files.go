@@ -241,12 +241,16 @@ var numberedSuffix = regexp.MustCompile(` \(([1-9][0-9]{0,2})\)$`)
 // replaced rather than added to ("Report (2).pdf" → "Report (3).pdf"); larger numbers, such as a year, stay. The
 // stem is shortened when the result would be longer than MaxNameBytes.
 func numbered(name string, n int, folder bool) string {
+	return suffixed(name, " ("+strconv.Itoa(n)+")", folder)
+}
+
+// suffixed is name with suffix added where numbered adds its number, in place of a number numbered added before.
+func suffixed(name, suffix string, folder bool) string {
 	stem, ext := name, ""
 	if i := strings.LastIndexByte(name, '.'); !folder && i > 0 {
 		stem, ext = name[:i], name[i:]
 	}
 	stem = numberedSuffix.ReplaceAllString(stem, "")
-	suffix := " (" + strconv.Itoa(n) + ")"
 	if len(suffix)+len(ext) >= MaxNameBytes {
 		stem, ext = stem+ext, "" // an extension too long to keep whole is part of the name
 	}
