@@ -310,7 +310,10 @@ along is the files, and nothing given on them: every share (to members, to every
 invitation it was is removed, and signed out), every public link (removed for good) and every upload in progress into it
 are removed, so the folder arrives as private as anything the receiver made, and nothing the removed person decided
 works again, whoever is let in later. What was in the held My files' trash is not handed over: it is removed. The
-receiver is not mailed: the project admin tells them.
+receiver is not mailed: the project admin tells them. The receiver is any member, the project admin who hands it over
+included: the files of someone who has left are the project's to place, and with nobody else in the member list they
+would otherwise be lost. (That a project admin opens nothing in another person's My files is about the people in the
+project; a held My files stays closed until it is handed over, and is then the receiver's own.)
 
 **A deletion** removes the held My files from the storage for good, its trash included, and from the index with
 everything in it. It does not go to a trash: the hold before it is the time to change one's mind, and the confirmation
